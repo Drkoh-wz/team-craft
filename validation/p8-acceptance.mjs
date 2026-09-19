@@ -270,6 +270,116 @@ if (bundle) {
   }
 
   // -------------------------------------------------------------------------
+  // P11: the role-configuration form. Before P11 the agent dialog was READ-ONLY
+  // -- it rendered `ag.model.name`, a field the schema does not have, plus a lone
+  // 关闭 button -- so a role's model and prompt could not be customised from the
+  // UI at all, and team_create_agent could only ever mint NEW roles. This drives
+  // the real bundle end to end: open the dialog, read the catalog, edit the
+  // persona, save, and inspect the POST body. (p11-route.mjs covers the host half;
+  // it never evaluates the client bundle, so this is the only form coverage.)
+  const AGENT_FIXTURE = {
+    id: 'agt-coder', name: 'Coder', role: '编码者', systemPrompt: 'SP-OLD-TEXT',
+    model: { provider: 'p1', model: 'm1' }, tools: {}, skills: [], updatedAt: 1,
+  }
+  const CATALOG_FIXTURE = {
+    ok: true, errors: [],
+    providers: [{ id: 'p1', name: 'P1', models: [{ id: 'm1', name: 'M1', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] }],
+  }
+  const agentPosts = []
+  let catalogOk = false
+  globalThis.fetch = (input, init) => {
+    const url = String(typeof input === 'string' ? input : input.url)
+    const method = String((init && init.method) || 'GET').toUpperCase()
+    if (method === 'POST' && url.indexOf('/agent') !== -1) {
+      agentPosts.push(String((init && init.body) || ''))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    }
+    if (url.indexOf('/models') !== -1) {
+      // Scenario (a) deliberately has no catalog: the form must degrade to manual
+      // input instead of rendering an empty dropdown or throwing.
+      return catalogOk
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve(CATALOG_FIXTURE) })
+        : Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+    }
+    if (url.indexOf('/agents') !== -1) return Promise.resolve({ ok: true, json: () => Promise.resolve({ agents: [AGENT_FIXTURE] }) })
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ workflows: [], tasks: [], runs: [] }) })
+  }
+  const openAgentDialog = async () => {
+    let tree = treeOf(board.component)
+    settle()
+    clickTab(tree, 'Agents')
+    await sleep(20) // let the /agents fetch resolve before looking for its rows
+    tree = treeOf(board.component)
+    settle()
+    const open = findNode(tree, (n) => n.type === 'button' && n.props && n.props.children === '详情' && typeof n.props.onClick === 'function')
+    if (open === undefined) throw new Error('no 详情 button in the Agents tab')
+    open.props.onClick()
+    // Two rounds, deliberately. The first render RUNS the dialog's /models effect;
+    // the sleep lets that fetch resolve with no intervening render; the second
+    // round renders the resolved state. (This stub re-queues effects on every
+    // render, so a render between the fetch starting and resolving would let the
+    // effect's own `alive` cleanup discard the result -- real React re-runs the
+    // effect only when `modal` changes, so it takes exactly one fetch.)
+    settle()
+    await sleep(30)
+    const dialog = treeOf(board.component)
+    settle()
+    return dialog
+  }
+  try {
+    const tManual = await openAgentDialog()
+    if (process.env.P8_DEBUG) {
+      const ft = flatten(tManual)
+      console.log('DEBUG len=' + ft.length +
+        ' err=' + ft.indexOf('模型目录获取失败') +
+        ' loading=' + ft.indexOf('正在读取模型目录') +
+        ' empty=' + ft.indexOf('模型目录为空或不可用') +
+        ' title=' + ft.indexOf('编辑角色') +
+        ' manualInput=' + ft.indexOf('手工输入 provider id'))
+      const at = ft.indexOf('provider/model 必须成对声明')
+      console.log('DEBUG help: ' + (at === -1 ? '(help text absent)' : ft.slice(at, at + 220)))
+    }
+    check('P11: with no model catalog the provider field falls back to manual input',
+      findNode(tManual, (n) => n.type === 'input' && n.props && n.props.placeholder === '手工输入 provider id') !== undefined)
+    check('P11: the catalog failure is surfaced to the user rather than swallowed',
+      flatten(tManual).indexOf('模型目录获取失败') !== -1)
+
+    catalogOk = true
+    const tForm = await openAgentDialog()
+    const formText = flatten(tForm)
+    const area = findNode(tForm, (n) => n.type === 'textarea')
+    check('P11: the dialog is an editable form, with the persona pre-filled from the role record',
+      area !== undefined && area.props.value === 'SP-OLD-TEXT', area === undefined ? 'no textarea' : JSON.stringify(area.props.value))
+    check('P11: provider and model are offered from the catalog',
+      formText.indexOf('P1 (p1)') !== -1 && formText.indexOf('M1') !== -1)
+    check('P11: the persona label states the REAL semantics (a persona section, not the whole system prompt)',
+      formText.indexOf('persona') !== -1 && formText.indexOf('deployment persona') !== -1)
+    check('P11: the provider/model pairing rule is explained, not merely enforced', formText.indexOf('必须成对声明') !== -1)
+    check('P11: the read-only preset is labelled as discipline, not a sandbox',
+      formText.indexOf('不是沙箱') !== -1 || formText.indexOf('纪律预设') !== -1)
+    check('P11: the dialog never renders the non-existent model.name field', formText.indexOf('undefined') === -1)
+
+    if (area !== undefined) area.props.onChange({ target: { value: 'SP-NEW-TEXT' } })
+    const tEdited = treeOf(board.component)
+    settle()
+    const save = findNode(tEdited, (n) => n.type === 'button' && n.props && n.props.children === '保存' && typeof n.props.onClick === 'function')
+    check('P11: the dialog has a save button (it was 关闭-only before)', save !== undefined)
+    if (save !== undefined) {
+      save.props.onClick()
+      await sleep(20)
+      settle()
+      const body = agentPosts.length ? JSON.parse(agentPosts[agentPosts.length - 1]) : null
+      check('P11: saving POSTs the EDITED persona', body !== null && body.systemPrompt === 'SP-NEW-TEXT', JSON.stringify(body && body.systemPrompt))
+      check('P11: the save updates the SAME role (id carried) instead of creating a new one',
+        body !== null && body.id === 'agt-coder', JSON.stringify(body && body.id))
+      check('P11: the declared route round-trips through the form',
+        body !== null && body.model !== undefined && body.model.provider === 'p1' && body.model.model === 'm1', JSON.stringify(body && body.model))
+    }
+  } catch (e) {
+    check('P11: the role-configuration form is editable and saves', false, String(e && e.message ? e.message : e))
+  }
+
+  // -------------------------------------------------------------------------
   // The progress page, driven from deterministic fixtures.
   const NOW = Date.now()
   // A real /runs record carries nodeStates, and the selector's "N 节点" is derived

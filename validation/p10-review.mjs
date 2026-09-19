@@ -973,8 +973,15 @@ try {
     JSON.stringify((dCoder.reviews || []).map((r) => r.id)))
   check('C9.7 /role 只返回该角色负责的节点（既有断言口径：every agentName === role）',
     (dCoder.nodes || []).every((n) => n.agentName === 'Coder'), JSON.stringify((dCoder.nodes || []).map((n) => n.agentName)))
-  const wantKeys = ['acceptanceCriteria', 'agent', 'agentName', 'dependsOn', 'elapsedMs', 'endedAt', 'error', 'id', 'iteration', 'order', 'output', 'outputLen', 'outputTruncated', 'reasoning', 'reasoningLen', 'requirement', 'review', 'reviewer', 'startedAt', 'status', 'summary', 'taskId', 'taskStatus', 'title', 'tools']
-  check('C9.8 负责人条目的键集合 = 改动前的 24 键 + review（唯一新增键，其余逐键一致）',
+  // P11 added exactly TWO keys to this owner entry -- `route` (the FULL route
+  // record: requested/source/effective/measured/verified/warning/note/efforts/
+  // defaultEffort/timeoutMs) and `persona` (chars + which layers contributed).
+  // The NodeCard is rendered from THIS entry, so without them the card cannot
+  // say what the node really ran on. The assertion stays an EXACT key-set
+  // comparison (not "contains"): the other 25 keys must be unchanged and no
+  // third key may appear without this line being updated in the same edit.
+  const wantKeys = ['acceptanceCriteria', 'agent', 'agentName', 'dependsOn', 'elapsedMs', 'endedAt', 'error', 'id', 'iteration', 'order', 'output', 'outputLen', 'outputTruncated', 'persona', 'reasoning', 'reasoningLen', 'requirement', 'review', 'reviewer', 'route', 'startedAt', 'status', 'summary', 'taskId', 'taskStatus', 'title', 'tools']
+  check('C9.8 负责人条目的键集合 = 改动前的 24 键 + review + route + persona（27 键精确集合，其余逐键一致）',
     eq(Object.keys((dCoder.nodes || [])[0] || {}).sort(), wantKeys),
     Object.keys((dCoder.nodes || [])[0] || {}).sort().join(','))
   // B1 guard (host half): NodeCard is rendered from the OWNER entry, so a review

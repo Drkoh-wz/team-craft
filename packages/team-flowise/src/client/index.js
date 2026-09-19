@@ -37,7 +37,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('span', { style: { color: '#fff', background: statusColor(label), borderRadius: 999, padding: '1px 11px', fontSize: 12, whiteSpace: 'nowrap' } }, label);
   }
 
-  var STYLE = '.tf-root{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937)}.tf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tf-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-text-muted,#6b7280)}.tf-tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.tf-toolbar{display:flex;gap:8px}.tf-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;color:var(--dsw-alias-text,#1f2937)}.tf-btn.primary{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-btn.danger{color:#ef4444;border-color:#ef4444}.tf-btn:disabled{opacity:.5;cursor:default}.tf-board{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}.tf-col{min-width:230px;flex:0 0 230px;background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:12px;padding:10px}.tf-col-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.tf-col-title{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}.tf-count{background:var(--dsw-alias-surface,#fff);border-radius:999px;padding:0 8px;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-card{background:var(--dsw-alias-surface,#fff);border-radius:10px;border:1px solid var(--dsw-alias-border,#e5e7eb);padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:box-shadow .15s,border-color .15s}.tf-card:hover{border-color:#3b82f6;box-shadow:0 4px 14px rgba(0,0,0,.08)}.tf-card-req{font-size:13px;font-weight:600;line-height:1.4;margin-bottom:6px}.tf-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-chip{background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:6px;padding:1px 6px;font-size:11px}.tf-list{background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;padding:12px}.tf-row{display:flex;align-items:center;gap:12px;padding:12px 6px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.tf-row:last-child{border-bottom:none}.tf-row-main{flex:1;min-width:0}.tf-row-title{font-size:13px;font-weight:600}.tf-row-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:2px}.tf-icon-btn{background:none;border:none;cursor:pointer;font-size:16px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-icon-btn:hover{color:#3b82f6}.tf-empty{padding:24px;text-align:center;color:var(--dsw-alias-text-muted,#6b7280);font-size:13px}.tf-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999}.tf-modal-card{background:var(--dsw-alias-surface,#fff);border-radius:14px;padding:20px;width:min(560px,92vw);max-height:88vh;overflow:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}.tf-field{margin-bottom:12px}.tf-field-label{font-size:12px;font-weight:600;margin-bottom:5px;color:var(--dsw-alias-text,#1f2937);display:block}.tf-input,.tf-select,.tf-textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);font-size:13px;background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937)}.tf-textarea{min-height:70px;resize:vertical;font-family:inherit}.tf-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}';
+  var STYLE = '.tf-root{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937)}.tf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tf-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-text-muted,#6b7280)}.tf-tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.tf-toolbar{display:flex;gap:8px}.tf-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;color:var(--dsw-alias-text,#1f2937)}.tf-btn.primary{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-btn.danger{color:#ef4444;border-color:#ef4444}.tf-btn:disabled{opacity:.5;cursor:default}.tf-board{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}.tf-col{min-width:230px;flex:0 0 230px;background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:12px;padding:10px}.tf-col-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.tf-col-title{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}.tf-count{background:var(--dsw-alias-surface,#fff);border-radius:999px;padding:0 8px;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-card{background:var(--dsw-alias-surface,#fff);border-radius:10px;border:1px solid var(--dsw-alias-border,#e5e7eb);padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:box-shadow .15s,border-color .15s}.tf-card:hover{border-color:#3b82f6;box-shadow:0 4px 14px rgba(0,0,0,.08)}.tf-card-req{font-size:13px;font-weight:600;line-height:1.4;margin-bottom:6px}.tf-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-chip{background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:6px;padding:1px 6px;font-size:11px}.tf-list{background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;padding:12px}.tf-row{display:flex;align-items:center;gap:12px;padding:12px 6px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.tf-row:last-child{border-bottom:none}.tf-row-main{flex:1;min-width:0}.tf-row-title{font-size:13px;font-weight:600}.tf-row-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:2px}.tf-icon-btn{background:none;border:none;cursor:pointer;font-size:16px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-icon-btn:hover{color:#3b82f6}.tf-empty{padding:24px;text-align:center;color:var(--dsw-alias-text-muted,#6b7280);font-size:13px}.tf-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999}.tf-modal-card{background:var(--dsw-alias-surface,#fff);border-radius:14px;padding:20px;width:min(560px,92vw);max-height:88vh;overflow:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}.tf-field{margin-bottom:12px}.tf-field-label{font-size:12px;font-weight:600;margin-bottom:5px;color:var(--dsw-alias-text,#1f2937);display:block}.tf-input,.tf-select,.tf-textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);font-size:13px;background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937)}.tf-textarea{min-height:70px;resize:vertical;font-family:inherit}.tf-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-form-row{display:flex;gap:10px;flex-wrap:wrap}.tf-form-col{flex:1 1 180px;min-width:180px}.tf-help{font-size:11px;line-height:1.5;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-ctl-note{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-err{font-size:12px;line-height:1.5;color:#b91c1c;background:#fee2e2;border-radius:8px;padding:6px 9px;margin-bottom:10px}.tf-manual{background:none;border:none;padding:0;cursor:pointer;font-size:11px;color:#3b82f6;text-decoration:underline;margin-top:4px}.tf-manual:hover{color:#1d4ed8}';
 
   function Modal(props) {
     if (!props.open) return null;
@@ -79,12 +79,44 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('div', { className: 'tf-board' }, cols);
   }
 
+  // ---------------------------------------------------------------------------
+  // P11: 角色定义（agentDef）里真实存在的字段投影。
+  //
+  // 这一行以前写的是 `a.model.name` —— agentDefSchema.model 是
+  // { provider, model, reasoningEffort, maxTokens }，**没有 name 键**，所以那个分支
+  // 永远不成立，摘要里从来没有出现过模型名。这里只读真实字段：缺什么就不显示
+  // 什么，绝不把 undefined 印到界面上。
+  // ---------------------------------------------------------------------------
+  function agentModelText(a) {
+    var m = (a && a.model && typeof a.model === 'object') ? a.model : {};
+    var provider = typeof m.provider === 'string' && m.provider !== '' ? m.provider : '';
+    var model = typeof m.model === 'string' && m.model !== '' ? m.model : '';
+    if (provider !== '' && model !== '') return provider + '/' + model;
+    if (model !== '') return model + '（未声明 provider，成对规则下 provider/model 作废）';
+    if (provider !== '') return provider + '（未声明 model，成对规则下 provider/model 作废）';
+    return '';
+  }
+  function agentRouteSummary(a) {
+    var m = (a && a.model && typeof a.model === 'object') ? a.model : {};
+    var parts = [];
+    var mt = agentModelText(a);
+    if (mt !== '') parts.push(mt);
+    if (typeof m.reasoningEffort === 'string' && m.reasoningEffort !== '') parts.push('effort ' + m.reasoningEffort);
+    var preset = a && a.tools && typeof a.tools.preset === 'string' && a.tools.preset !== '' ? a.tools.preset : '';
+    if (preset !== '') parts.push('预设 ' + preset);
+    var sp = typeof (a && a.systemPrompt) === 'string' ? a.systemPrompt : '';
+    if (sp !== '') parts.push('人设 ' + sp.length + ' 字');
+    return parts.join(' · ');
+  }
   function AgentsView(props) {
     var rows = props.agents.length ? props.agents.map(function (a) {
+      var sub = agentRouteSummary(a);
       return React.createElement('div', { key: a.id, className: 'tf-row' },
         React.createElement('div', { className: 'tf-row-main' },
           React.createElement('div', { className: 'tf-row-title' }, a.name),
-          React.createElement('div', { className: 'tf-row-sub' }, (a.role || '') + (a.model && a.model.name ? ' · ' + a.model.name : ''))
+          // 角色说明与真实字段摘要分两行：两者都可能不存在，空的那行不渲染。
+          a.role ? React.createElement('div', { className: 'tf-row-sub' }, a.role) : null,
+          sub !== '' ? React.createElement('div', { className: 'tf-row-sub' }, sub) : null
         ),
         React.createElement('span', { className: 'tf-chip' }, Object.keys(a.tools || {}).length + ' 工具'),
         React.createElement('button', { className: 'tf-btn', onClick: function () { props.onOpenAgent(a); } }, '详情')
@@ -147,6 +179,62 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('div', { className: 'tf-list' }, rows);
   }
 
+  // ---------------------------------------------------------------------------
+  // P11: 模型目录（GET /models）驱动的表单选项。
+  //
+  // 目录只是一个**便利**，不是依赖：这一组函数在任何一步拿不到数据时都返回空
+  // 列表，由调用方退回手工输入。空列表绝不能让表单卡死或抛异常。
+  //   providers: [{ id, name, models:[{ id, name, reasoning:{ efforts:[{id,name}],
+  //                defaultEffort } }] }]
+  // ---------------------------------------------------------------------------
+  var PROVIDER_NONE = '\u0000none';   // 选项 value 用不可打印字符开头，避免与真实 provider 名撞车
+  var PROVIDER_MANUAL = '\u0000manual';
+  function providerListOf(cat) {
+    var list = (cat && Array.isArray(cat.providers)) ? cat.providers : [];
+    return list.filter(function (p) { return p !== null && typeof p === 'object'; });
+  }
+  // 只有恰好一条 provider 时才自动选中它：多条时自动选会在不经意间改写某人的
+  // 路由，这比让用户多点一下昂贵得多。
+  function defaultProvider(list) { return list.length === 1 ? String(list[0].id) : ''; }
+  // 名字可能被手动输入，也可能来自目录里的旧记录，所以两种都认。
+  function findProvider(list, name) {
+    var want = typeof name === 'string' ? name : '';
+    if (want === '') return null;
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].id) === want || String(list[i].name) === want) return list[i];
+    }
+    return null;
+  }
+  function modelsOf(p) { return (p && Array.isArray(p.models)) ? p.models : []; }
+  function findModel(p, id) {
+    var list = modelsOf(p);
+    for (var i = 0; i < list.length; i++) if (String(list[i].id) === String(id)) return list[i];
+    return null;
+  }
+  function effortsOf(p, modelId) {
+    var m = findModel(p, modelId);
+    var r = m && m.reasoning && typeof m.reasoning === 'object' ? m.reasoning : null;
+    return r && Array.isArray(r.efforts) ? r.efforts.filter(function (e) { return e !== null && typeof e === 'object' && e.id !== undefined && e.id !== null; }) : [];
+  }
+  function defaultEffortOf(p, modelId) {
+    var m = findModel(p, modelId);
+    var r = m && m.reasoning && typeof m.reasoning === 'object' ? m.reasoning : null;
+    return r && typeof r.defaultEffort === 'string' ? r.defaultEffort : '';
+  }
+  // Comma-separated text -> a de-duplicated, trimmed list. An empty box means
+  // "declare nothing", i.e. the key is omitted rather than stored as [].
+  function splitList(text) {
+    var out = [];
+    String(text === undefined || text === null ? '' : text).split(',').forEach(function (x) {
+      var t = x.trim();
+      if (t !== '' && out.indexOf(t) === -1) out.push(t);
+    });
+    return out;
+  }
+  function listToText(list) {
+    return Array.isArray(list) ? list.map(function (x) { return String(x); }).join(', ') : '';
+  }
+
   function Board() {
     var st = React.useState({ tab: 'board', a: [], w: [], t: [], r: [], run: null, modal: null, task: null, loading: false, error: null, feedback: '' });
     var s = st[0]; var set = st[1];
@@ -175,6 +263,94 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     }, [patch]);
 
     React.useEffect(function () { load(); var id = setInterval(load, 5000); return function () { clearInterval(id); }; }, [load]);
+
+    // -------------------------------------------------------------------------
+    // P11: 可编辑的 agent 表单草稿 + 模型目录。
+    //
+    // 目录只在弹窗真的打开时取一次（这是**新增**的一次 GET /models；boards 的
+    // 既有轮询一行没动）。取不到不是错误状态：providers 留空，表单退回手工输入。
+    // -------------------------------------------------------------------------
+    var mst = React.useState({ providers: [], errors: [], loaded: false });
+    var models = mst[0]; var setModels = mst[1];
+    React.useEffect(function () {
+      if (s.modal !== 'agent') return undefined;
+      var alive = true;
+      get('/models')
+        .then(function (d) {
+          if (!alive) return;
+          setModels({ providers: providerListOf(d), errors: (d && Array.isArray(d.errors)) ? d.errors : [], loaded: true });
+        })
+        .catch(function (e) {
+          if (!alive) return;
+          // 端点不存在（宿主未重启）/ 500 / 网络失败：都降级为手工输入，
+          // 并把原因如实写出来，而不是把表单变成空的。
+          setModels({ providers: [], errors: ['模型目录获取失败（' + String(e && e.message ? e.message : e) + '）：provider/model/effort 请手工输入'], loaded: true });
+        });
+      return function () { alive = false; };
+    }, [s.modal, setModels]);
+
+    var fst = React.useState(null);
+    var agentDraft = fst[0]; var setAgentDraft = fst[1];
+    var ast = React.useState({ saving: false, error: null });
+    var agentSave = ast[0]; var setAgentSave = ast[1];
+    var patchAgent = React.useCallback(function (p) {
+      setAgentDraft(function (prev) {
+        var next = Object.assign({}, prev || {});
+        var d = typeof p === 'function' ? p(next) : p;
+        if (d === null || d === undefined) return next;
+        return Object.assign(next, d);
+      });
+    }, []);
+
+    function saveAgent() {
+      var d = agentDraft || {};
+      setAgentSave({ saving: true, error: null });
+      patch({ loading: true, error: null });
+      // 完整角色记录（契约）：id 存在即为修改既有角色；model 里空字段一律省略，
+      // 因为 `{}` 必须保持"什么都没声明"，而不是被写成空串。
+      var m = {};
+      if (d.provider) m.provider = d.provider;
+      if (d.model) m.model = d.model;
+      if (d.reasoningEffort) m.reasoningEffort = d.reasoningEffort;
+      var n = parseInt(String(d.maxTokens === undefined ? '' : d.maxTokens).trim(), 10);
+      if (isFinite(n) && n > 0) m.maxTokens = n;
+      var tools = {};
+      if (d.preset) tools.preset = d.preset;
+      var allow = splitList(d.allow);
+      var deny = splitList(d.deny);
+      if (allow.length) tools.allow = allow;
+      if (deny.length) tools.deny = deny;
+      var body = {
+        id: d.id,
+        name: d.name || '',
+        role: d.role || '',
+        systemPrompt: d.systemPrompt || '',
+        model: m,
+        tools: tools,
+        skills: Array.isArray(d.skills) ? d.skills : [],
+        updatedAt: Date.now()
+      };
+      var t = parseInt(String(d.timeoutMs === undefined ? '' : d.timeoutMs).trim(), 10);
+      if (isFinite(t) && t > 0) body.timeoutMs = t; else delete body.timeoutMs;
+      post('/agent', body)
+        .then(function () {
+          // The save itself SUCCEEDED, so report that first and only then refresh.
+          // Chaining .then(load) before this made a failing refresh surface as
+          // "保存失败" -- the UI told the user their edit was lost when it had in
+          // fact been stored. A refresh failure is now attributed to the refresh.
+          patch({ modal: null, agent: null, loading: false });
+          setAgentSave({ saving: false, error: null });
+          return load().catch(function (e) {
+            patch({ error: '角色已保存，但列表刷新失败：' + String(e && e.message ? e.message : e) });
+          });
+        })
+        .catch(function (e) {
+          // 失败必须显示出来：静默关闭弹窗会让人以为改动已经保存。
+          var msg = String(e && e.message ? e.message : e);
+          setAgentSave({ saving: false, error: msg });
+          patch({ loading: false, error: msg });
+        });
+    }
 
     function runAction(fn) {
       patch({ loading: true, error: null });
@@ -210,7 +386,29 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       patch({ modal: 'task', task: t || null });
     }
 
-    function openAgent(a) { patch({ modal: 'agent', agent: a }); }
+    // 打开弹窗时把角色记录投影成表单草稿：字段缺失就是空串/空值，绝不把
+    // undefined 放进受控 input（受控 input 拿到 undefined 会变成非受控并丢值）。
+    function openAgent(a) {
+      var m = (a && a.model && typeof a.model === 'object') ? a.model : {};
+      var t = (a && a.tools && typeof a.tools === 'object') ? a.tools : {};
+      setAgentDraft({
+        id: (a && a.id) || '',
+        name: (a && a.name) || '',
+        role: (a && a.role) || '',
+        systemPrompt: (a && typeof a.systemPrompt === 'string') ? a.systemPrompt : '',
+        provider: (typeof m.provider === 'string') ? m.provider : '',
+        model: (typeof m.model === 'string') ? m.model : '',
+        reasoningEffort: (typeof m.reasoningEffort === 'string') ? m.reasoningEffort : '',
+        maxTokens: (typeof m.maxTokens === 'number' && isFinite(m.maxTokens)) ? String(m.maxTokens) : '',
+        timeoutMs: (typeof a.timeoutMs === 'number' && isFinite(a.timeoutMs)) ? String(a.timeoutMs) : '',
+        preset: (typeof t.preset === 'string') ? t.preset : '',
+        allow: listToText(t.allow),
+        deny: listToText(t.deny),
+        skills: Array.isArray(a && a.skills) ? (a.skills || []).slice() : []
+      });
+      setAgentSave({ saving: false, error: null });
+      patch({ modal: 'agent', agent: a });
+    }
     function startRun(w) { runAction(function () { return post('/run/start', { workflowId: w.id }); }); }
     function deleteWorkflow(w) { runAction(function () { return del('/workflow?id=' + encodeURIComponent(w.id)); }); }
 
@@ -255,21 +453,195 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         )
       );
     } else if (s.modal === 'agent') {
-      var ag = s.agent || {};
-      modalTitle = 'Agent \u00B7 ' + (ag.name || '');
-      var toolKeys = Object.keys(ag.tools || {});
-      modal = React.createElement('div', null,
-        React.createElement('div', { className: 'tf-field' }, React.createElement('label', { className: 'tf-field-label' }, '角色'), React.createElement('div', null, ag.role || '\u2014')),
-        React.createElement('div', { className: 'tf-field' }, React.createElement('label', { className: 'tf-field-label' }, '模型'), React.createElement('div', null, (ag.model && ag.model.name) || '\u2014')),
-        React.createElement('div', { className: 'tf-field' }, React.createElement('label', { className: 'tf-field-label' }, '系统提示'),
-          React.createElement('div', { style: { fontSize: 13, whiteSpace: 'pre-wrap', color: '#374151' } }, ag.systemPrompt || '\u2014')
-        ),
-        React.createElement('div', { className: 'tf-field' }, React.createElement('label', { className: 'tf-field-label' }, '工具'),
-          React.createElement('div', null, (toolKeys.length ? toolKeys.join(', ') : '\u2014'))
-        ),
-        React.createElement('div', { className: 'tf-modal-actions' },
-          React.createElement('button', { className: 'tf-btn', onClick: function () { patch({ modal: null, agent: null }); } }, '关闭')
+      // ---------------------------------------------------------------------
+      // P11: 真正可编辑的角色表单（原来是只读展示 + 一个"关闭"按钮）。
+      //
+      // 字段与控件一一对应 agentDefSchema：名称/角色说明（文本）、systemPrompt
+      // （多行 textarea）、model.provider/.model/.reasoningEffort/.maxTokens、
+      // timeoutMs、tools.preset/.allow/.deny。下拉选项来自 /models，拿不到时
+      // 全部退回手工输入，表单永远不会被空目录卡死。
+      // ---------------------------------------------------------------------
+      var d = agentDraft || {};
+      var provs = providerListOf(models);
+      var pObj = findProvider(provs, d.provider);
+      var pModels = modelsOf(pObj);
+      var curModel = findModel(pObj, d.model);
+      var effortList = effortsOf(pObj, d.model);
+      var defEffort = defaultEffortOf(pObj, d.model);
+      modalTitle = (d.id ? '编辑角色' : '新建角色') + ' \u00B7 ' + (d.name || '');
+      // 目录缺失（拿不到 /models）就整块退回手工输入：provs 为空即全部走 input。
+      // 目录里没有当前存着的 provider 时同样退回手工输入，而不是给一个空下拉——
+      // 空下拉会让人以为值丢了，而且改完一保存就可能把它清掉。
+      var manualProv = provs.length === 0 || d.manualProvider === true || (d.provider !== '' && pObj === null);
+      var modelManual = pModels.length === 0;
+
+      var nameField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, '名称（name，工作流里用它引用该角色）'),
+        React.createElement('input', { className: 'tf-input', value: d.name || '', onChange: function (e) { patchAgent({ name: e.target.value }); } })
+      );
+      var roleField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, '角色说明（role）'),
+        React.createElement('input', { className: 'tf-input', value: d.role || '', onChange: function (e) { patchAgent({ role: e.target.value }); } })
+      );
+      var promptField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, '角色人设（persona，会遮蔽该子代理的 deployment persona 段；不会移除一等公民指引）'),
+        React.createElement('textarea', { className: 'tf-textarea', value: d.systemPrompt || '', onChange: function (e) { patchAgent({ systemPrompt: e.target.value }); } }),
+        React.createElement('div', { className: 'tf-help' }, '这一段作为 persona 的 role 层随派发写入（顺序：role → workflow → node）。它只覆盖 deployment persona 段，不会移除编辑/工具等一等公民指引。')
+      );
+      var noteText = (models.errors && models.errors.length) ? (' /models：' + models.errors.join('；')) : '';
+      var provField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, 'provider'),
+        manualProv
+          ? React.createElement('input', {
+              className: 'tf-input',
+              placeholder: '手工输入 provider id',
+              value: d.provider || '',
+              onChange: function (e) { patchAgent({ provider: e.target.value, model: '', reasoningEffort: '' }); }
+            })
+          : React.createElement('select', {
+              className: 'tf-select tf-select-full',
+              value: d.provider || '',
+              onChange: function (e) {
+                var v = e.target.value;
+                if (v === PROVIDER_MANUAL) { patchAgent({ manualProvider: true }); return; }
+                var np = findProvider(provs, v);
+                var one = modelsOf(np)[0];
+                patchAgent({ manualProvider: false, provider: v === PROVIDER_NONE ? '' : v, model: one ? String(one.id) : '', reasoningEffort: '' });
+              }
+            },
+              React.createElement('option', { value: '' }, '(不声明 provider)'),
+              provs.map(function (p) { return React.createElement('option', { key: String(p.id), value: String(p.id) }, String(p.name || p.id) + (String(p.name || p.id) === String(p.id) ? '' : ' (' + p.id + ')')); }),
+              // A stored provider that is not in the catalog must still be
+              // selectable: without this option a controlled <select> cannot match
+              // its value and the field would LOOK empty right before a save.
+              (d.provider !== '' && pObj === null) ? React.createElement('option', { value: String(d.provider) }, String(d.provider) + '（不在模型目录中）') : null,
+              React.createElement('option', { value: PROVIDER_MANUAL }, '（手工输入…）')
+            ),
+        React.createElement('div', { className: 'tf-help' },
+          'provider/model 必须成对声明：只声明一半时该对作废（不会与父级拼出一条没人声明过的混合路由）。' +
+          (models.loaded === false ? ' 正在读取模型目录…' : '') +
+          (models.loaded === true && provs.length === 0 ? ' 模型目录为空或不可用，请手工输入。' : '') +
+          noteText
         )
+      );
+      var modelField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, 'model'),
+        (pModels.length > 0 && !modelManual)
+          ? React.createElement('select', {
+              className: 'tf-select tf-select-full',
+              value: d.model || '',
+              onChange: function (e) { patchAgent({ model: e.target.value, reasoningEffort: '' }); }
+            },
+              React.createElement('option', { value: '' }, '(不声明 model)'),
+              pModels.map(function (m) {
+                var lab = String(m.name || m.id);
+                if (m.description) lab += ' · ' + String(m.description);
+                if (typeof m.contextWindow === 'number') lab += ' · ctx ' + m.contextWindow;
+                return React.createElement('option', { key: String(m.id), value: String(m.id) }, lab);
+              }),
+              // Same reason as the provider list: a stored model id missing from
+              // the catalog needs a matching option, or the control displays blank.
+              (d.model !== '' && curModel === null) ? React.createElement('option', { value: String(d.model) }, String(d.model) + '（不在模型目录中）') : null
+            )
+          : React.createElement('input', {
+              className: 'tf-input',
+              placeholder: '手工输入 model id',
+              value: d.model || '',
+              onChange: function (e) { patchAgent({ model: e.target.value, reasoningEffort: '' }); }
+            }),
+        React.createElement('div', { className: 'tf-help' },
+          (d.provider ? '当前 provider：' + d.provider + '。' : '尚未选择 provider。') +
+          (curModel && typeof curModel.defaultMaxTokens === 'number' ? ' 该模型默认 maxTokens=' + curModel.defaultMaxTokens + '。' : '') +
+          (pModels.length > 0 && !modelManual ? '' : ' 无目录数据，手工输入。')
+        )
+      );
+      var effortField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, 'reasoningEffort（思考强度）'),
+        effortList.length
+          ? React.createElement('select', {
+              className: 'tf-select tf-select-full',
+              value: d.reasoningEffort || '',
+              onChange: function (e) { patchAgent({ reasoningEffort: e.target.value }); }
+            },
+              React.createElement('option', { value: '' }, '（不指定）'),
+              effortList.map(function (x) { return React.createElement('option', { key: String(x.id), value: String(x.id) }, String(x.name || x.id) + (defEffort === String(x.id) ? '（该模型默认）' : '')); }),
+              // A stored effort that this model does not offer must stay visible
+              // (and selectable) instead of silently rendering as "（不指定）".
+              (d.reasoningEffort !== '' && !effortList.some(function (x) { return String(x.id) === String(d.reasoningEffort); }))
+                ? React.createElement('option', { value: String(d.reasoningEffort) }, String(d.reasoningEffort) + '（不在该模型的 effort 列表中）')
+                : null
+            )
+          : React.createElement('input', {
+              className: 'tf-input',
+              placeholder: '手工输入 effort id（可留空）',
+              value: d.reasoningEffort || '',
+              onChange: function (e) { patchAgent({ reasoningEffort: e.target.value }); }
+            }),
+        React.createElement('div', { className: 'tf-help' },
+          (effortList.length ? '选项来自该模型的 reasoning.efforts。' : '未取到该模型的 effort 列表，可手工输入。') +
+          '若改动了 provider/model 却不声明 effort，运行时会清除继承来的父级 effort，改由该模型默认值决定。'
+        )
+      );
+      var numsField = React.createElement('div', { className: 'tf-form-row' },
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, 'maxTokens（可空）'),
+          React.createElement('input', { className: 'tf-input', inputMode: 'numeric', placeholder: '留空 = 不声明', value: d.maxTokens || '', onChange: function (e) { patchAgent({ maxTokens: e.target.value }); } }),
+          React.createElement('div', { className: 'tf-help' }, '必须是正有限数；留空表示不声明（该层不参与 maxTokens 决策）。')
+        ),
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, 'timeoutMs（可空，宿主会夹紧到上限）'),
+          React.createElement('input', { className: 'tf-input', inputMode: 'numeric', placeholder: '留空 = 用宿主上限', value: d.timeoutMs || '', onChange: function (e) { patchAgent({ timeoutMs: e.target.value }); } }),
+          React.createElement('div', { className: 'tf-help' }, '角色只能收紧自己的超时：宿主把它夹进 [1000ms, 上限]，永远无法把上限抬高。')
+        )
+      );
+      var presetField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, '工具预设（tools.preset）'),
+        React.createElement('select', { className: 'tf-select tf-select-full', value: d.preset || '', onChange: function (e) { patchAgent({ preset: e.target.value }); } },
+          React.createElement('option', { value: '' }, '（不指定预设）'),
+          React.createElement('option', { value: 'full' }, 'full · 不额外加 deny'),
+          React.createElement('option', { value: 'no-write' }, 'no-write · 去掉写文件工具'),
+          React.createElement('option', { value: 'no-shell' }, 'no-shell · 去掉命令行工具'),
+          React.createElement('option', { value: 'read-only' }, 'read-only · no-write + no-shell')
+        ),
+        React.createElement('div', { className: 'tf-help' }, '预设是纪律预设，不是沙箱：它按名字移除最明显的写/执行工具（在派发时展开成 deny 列表），拦不住一个被放行的工具间接写入。')
+      );
+      var toolsField = React.createElement('div', { className: 'tf-form-row' },
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, '工具 allow（逗号分隔）'),
+          React.createElement('input', { className: 'tf-input', placeholder: '例如 read, glob', value: d.allow || '', onChange: function (e) { patchAgent({ allow: e.target.value }); } }),
+          React.createElement('div', { className: 'tf-help' }, '显式白名单；永远不会重新放行被宿主阻断的工具（如客户端 Inspect / 人类提示类）。')
+        ),
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, '工具 deny（逗号分隔）'),
+          React.createElement('input', { className: 'tf-input', placeholder: '例如 pwsh, write', value: d.deny || '', onChange: function (e) { patchAgent({ deny: e.target.value }); } }),
+          React.createElement('div', { className: 'tf-help' }, '逐名追加到派发用的 deny 列表；部署中不存在的名字会被就地记入 toolNote，不会静默丢弃。')
+        )
+      );
+      var skillField = React.createElement('div', { className: 'tf-field' },
+        React.createElement('label', { className: 'tf-field-label' }, '技能 skills（只读展示，本轮不改）'),
+        React.createElement('div', { className: 'tf-kv' }, (Array.isArray(d.skills) && d.skills.length) ? d.skills.join(', ') : '（未声明技能）')
+      );
+      var actions = React.createElement('div', { className: 'tf-modal-actions' },
+        React.createElement('button', { className: 'tf-btn', onClick: function () { patch({ modal: null, agent: null }); } }, '取消'),
+        React.createElement('button', { className: 'tf-btn primary', disabled: agentSave.saving, onClick: saveAgent }, agentSave.saving ? '保存中…' : '保存')
+      );
+
+      // No models catalog at all (host not restarted / endpoint failed): the form
+      // is the SAME form, with every provider/model/effort control falling back to
+      // a free-text input -- never an empty dropdown that blocks saving.
+      modal = React.createElement('div', null,
+        agentSave.error ? React.createElement('div', { className: 'tf-err' }, '保存失败：' + String(agentSave.error)) : null,
+        nameField,
+        roleField,
+        promptField,
+        provField,
+        modelField,
+        effortField,
+        numsField,
+        presetField,
+        toolsField,
+        skillField,
+        actions
       );
     }
 
@@ -315,7 +687,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   // used to carry their own leading <style> and trailing </style>, so the parser
   // saw a malformed first qualified rule (`<style>.tf-root{...}`) and dropped it
   // -- the element's own first rule never applied.
-  var PAGE_STYLE = '.tf-pg{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937);padding:2px}.tf-pg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.tf-pg-title{margin:0;font-size:16px;font-weight:700}.tf-pg-sub{font-size:12px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pg-toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}.tf-pg-sec{margin-top:18px}.tf-pg-sec-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-select{padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937);font-size:12px;max-width:280px}.tf-seq-box{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff)}.tf-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-legend span{display:inline-flex;align-items:center;gap:4px}.tf-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}.tf-chips{display:flex;gap:8px;flex-wrap:wrap}.tf-chip2{display:flex;align-items:center;gap:7px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);border-radius:10px;padding:6px 11px;cursor:pointer;font-size:12px;color:inherit}.tf-chip2:hover{border-color:#3b82f6}.tf-chip2.on{border-color:#3b82f6;box-shadow:inset 0 0 0 1px #3b82f6}.tf-chip2 b{font-weight:700}.tf-ncard{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff);padding:12px 14px;margin-top:10px}.tf-nhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-nid{font-weight:700;font-size:14px}.tf-kv{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-lbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin:12px 0 4px}.tf-pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-surface-2,#f8fafc);border:1px solid var(--dsw-alias-border,#eef2f7);border-radius:8px;padding:10px;max-height:300px;overflow:auto}.tf-pre.tf-reason{border-color:#8b5cf6}.tf-pre.tf-errbox{border-color:#ef4444;color:#b91c1c}.tf-badge2{border-radius:999px;padding:1px 10px;font-size:11px;color:#fff;white-space:nowrap}.tf-empty{color:var(--dsw-alias-text-muted,#6b7280);font-size:13px;padding:14px 0}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-rv-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-rv-verdict{border-radius:999px;padding:1px 10px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.tf-rv-group{margin-top:10px}.tf-rv-group-h{font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:6px}.tf-rv-item{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface-2,#f8fafc)}.tf-rv-item.blocking{border-left:3px solid #ef4444}.tf-rv-item.advisory{border-left:3px solid #f5a623}.tf-rv-dim{display:inline-block;border-radius:999px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);padding:0 7px;font-size:10px;font-weight:700;margin-right:6px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-crit{font-size:12px;font-weight:600}.tf-rv-field{font-size:11px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);margin-top:3px}.tf-rv-field b{font-weight:700;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-note{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;font-weight:700;background:#fee2e2;color:#b91c1c}.tf-rv-unc{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin:2px 0 0}.tf-rv-res{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface,#fff)}.tf-rv-res.yes{border-left:3px solid #22c55e}.tf-rv-res.no{border-left:3px solid #f5a623}.tf-rv-summary{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937)}';
+  var PAGE_STYLE = '.tf-pg{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937);padding:2px}.tf-pg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.tf-pg-title{margin:0;font-size:16px;font-weight:700}.tf-pg-sub{font-size:12px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pg-toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}.tf-pg-sec{margin-top:18px}.tf-pg-sec-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-select{padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937);font-size:12px;max-width:280px}.tf-seq-box{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff)}.tf-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-legend span{display:inline-flex;align-items:center;gap:4px}.tf-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}.tf-chips{display:flex;gap:8px;flex-wrap:wrap}.tf-chip2{display:flex;align-items:center;gap:7px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);border-radius:10px;padding:6px 11px;cursor:pointer;font-size:12px;color:inherit}.tf-chip2:hover{border-color:#3b82f6}.tf-chip2.on{border-color:#3b82f6;box-shadow:inset 0 0 0 1px #3b82f6}.tf-chip2 b{font-weight:700}.tf-ncard{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff);padding:12px 14px;margin-top:10px}.tf-nhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-nid{font-weight:700;font-size:14px}.tf-kv{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-lbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin:12px 0 4px}.tf-pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-surface-2,#f8fafc);border:1px solid var(--dsw-alias-border,#eef2f7);border-radius:8px;padding:10px;max-height:300px;overflow:auto}.tf-pre.tf-reason{border-color:#8b5cf6}.tf-pre.tf-errbox{border-color:#ef4444;color:#b91c1c}.tf-badge2{border-radius:999px;padding:1px 10px;font-size:11px;color:#fff;white-space:nowrap}.tf-empty{color:var(--dsw-alias-text-muted,#6b7280);font-size:13px;padding:14px 0}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-rv-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-rv-verdict{border-radius:999px;padding:1px 10px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.tf-rv-group{margin-top:10px}.tf-rv-group-h{font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:6px}.tf-rv-item{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface-2,#f8fafc)}.tf-rv-item.blocking{border-left:3px solid #ef4444}.tf-rv-item.advisory{border-left:3px solid #f5a623}.tf-rv-dim{display:inline-block;border-radius:999px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);padding:0 7px;font-size:10px;font-weight:700;margin-right:6px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-crit{font-size:12px;font-weight:600}.tf-rv-field{font-size:11px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);margin-top:3px}.tf-rv-field b{font-weight:700;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-note{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;font-weight:700;background:#fee2e2;color:#b91c1c}.tf-rv-unc{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin:2px 0 0}.tf-rv-res{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface,#fff)}.tf-rv-res.yes{border-left:3px solid #22c55e}.tf-rv-res.no{border-left:3px solid #f5a623}.tf-rv-summary{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937)}.tf-select.tf-select-full{width:100%;max-width:none}.tf-mb{display:flex;flex-direction:column;gap:6px}.tf-mb-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-mb-src{border-radius:6px;padding:0 7px;font-size:10px;font-weight:700;background:var(--dsw-alias-surface-2,#f3f4f6);color:var(--dsw-alias-text-muted,#6b7280)}.tf-mb-eff{font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-line{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-note{font-size:11px;line-height:1.5;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 8px}.tf-mb-warn{font-size:11px;line-height:1.5;color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:5px 8px}';
 
   var IDLE_COLOR = '#9aa0a6';
   var RUNNING_COLOR = '#3b82f6';
@@ -686,6 +1058,92 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // P11: 节点卡片上的「实际生效的模型」区块。
+  //
+  // 数据形状（/progress 的轻投影 与 /role 的完整记录都吃）：
+  //   route: { source, effective:{provider,model,reasoningEffort,maxTokens},
+  //            measured, warning } | null
+  //   persona: { chars, layers:[...] } | null
+  //
+  // 两条硬规则：
+  //  1. measured === false 时必须显式写「未能实测（显示的是请求值）」——
+  //     measured 为真才代表子代理自己的请求头真的被读过，那时 effective 就是
+  //     实测值；否则它只是**按层级推导出来的请求值**，说成实测就是伪造证据。
+  //  2. 旧记录（根本没有 route 键 => null）与改动前逐字一致：整块不渲染。
+  // ---------------------------------------------------------------------------
+  var ROUTE_SOURCE_LABEL = { run: '运行覆盖', node: '节点覆盖', workflow: '工作流', role: '角色定义', inherited: '继承' };
+  function routeSourceText(src) {
+    if (typeof src !== 'string' || src === '') return '';
+    var known = ROUTE_SOURCE_LABEL[src];
+    return known ? known : '未知来源 ' + src;
+  }
+  function routeOf(n) { return (n && typeof n.route === 'object' && n.route !== null) ? n.route : null; }
+  function personaOf(n) { return (n && typeof n.persona === 'object' && n.persona !== null) ? n.persona : null; }
+  // provider/model 成对显示：运行时的成对规则让"只有一半"成为一条真实可陈述的
+  // 事实（该对作废），所以这里如实写出来，而不是留一个空位。
+  function pairText(provider, model) {
+    var p = (typeof provider === 'string' && provider !== '') ? provider : '';
+    var m = (typeof model === 'string' && model !== '') ? model : '';
+    if (p !== '' && m !== '') return p + '/' + m;
+    if (m !== '') return m + '（未声明 provider，成对规则下 provider/model 作废）';
+    if (p !== '') return p + '（未声明 model，成对规则下 provider/model 作废）';
+    return '';
+  }
+  // effort 为空是**有意义的**：adapter 用自己的默认值。所以显式写「（未声明，
+  // 由模型/适配器默认值决定）」，而不是留白或写 undefined。
+  function effortText(v) {
+    return (typeof v === 'string' && v !== '') ? String(v) : '（未声明，由模型/适配器默认值决定）';
+  }
+  function ModelRouteBlock(props) {
+    var r = props.route;
+    var persona = props.persona;
+    if (r === null && persona === null) return null;
+    var rows = [];
+    var head = [];
+    if (r !== null) {
+      head.push(React.createElement('span', { className: 'tf-lbl', style: { margin: 0 }, key: 'l' }, '实际生效的模型'));
+      var src = routeSourceText(r.source);
+      if (src !== '') head.push(React.createElement('span', { className: 'tf-mb-src', key: 's' }, src));
+    }
+    rows.push(React.createElement('div', { className: 'tf-mb-head', key: 'h' }, head));
+
+    if (r !== null) {
+      var e = (r.effective && typeof r.effective === 'object') ? r.effective : {};
+      var pm = pairText(e.provider, e.model);
+      if (pm !== '') {
+        rows.push(React.createElement('div', { className: 'tf-mb-line', key: 'pm' },
+          React.createElement('b', null, 'provider/model：'), pm
+        ));
+      } else {
+        rows.push(React.createElement('div', { className: 'tf-mb-line', key: 'pm' },
+          React.createElement('b', null, 'provider/model：'), '（未记录：该节点没有可显示的路由）'
+        ));
+      }
+      rows.push(React.createElement('div', { className: 'tf-mb-eff', key: 'ef' }, 'reasoningEffort: ' + effortText(e.reasoningEffort)));
+      rows.push(React.createElement('div', { className: 'tf-mb-eff', key: 'mt' }, 'maxTokens: ' + ((typeof e.maxTokens === 'number' && isFinite(e.maxTokens)) ? String(e.maxTokens) : '（未声明，沿用父级上限 / 适配器默认值）')));
+      // 这一行是这块存在的理由：请求值 ≠ 实测值，二者必须能被区分。
+      rows.push(React.createElement('div', {
+        className: r.measured === true ? 'tf-kv' : 'tf-mb-note',
+        key: 'ms'
+      }, r.measured === true
+        ? '已实测：读取了该子代理自己的请求头，上面的 provider/model/effort 就是它真实运行的路由。'
+        : '未能实测（显示的是请求值）：没有读到该子代理自己的请求头，上面是按层级推导出的请求路由，不是实测结果。'));
+      if (r.warning) rows.push(React.createElement('div', { className: 'tf-mb-warn', key: 'wn' }, '路由告警：' + String(r.warning)));
+    }
+
+    if (persona !== null) {
+      var chars = (typeof persona.chars === 'number' && isFinite(persona.chars)) ? persona.chars : 0;
+      var layers = Array.isArray(persona.layers) ? persona.layers.filter(function (x) { return typeof x === 'string' && x !== ''; }) : [];
+      var layerText = layers.map(function (x) { return ROUTE_SOURCE_LABEL[x] || x; }).join(' → ');
+      rows.push(React.createElement('div', { className: 'tf-pg-sec-h', key: 'ph', style: { marginTop: 8 } }, '人设段（persona）'));
+      rows.push(React.createElement('div', { className: 'tf-mb-line', key: 'pc' },
+        ('人设字数：' + chars + ' 字') + (layers.length ? ' · 生效层：' + layerText : ' · 没有层贡献文本')
+      ));
+    }
+    return React.createElement('div', { className: 'tf-mb' }, rows);
+  }
+
   // 一个角色的单个节点卡片：任务要求 / 验收标准 / 工具策略 / 思考过程 / 完整产出
   function NodeCard(props) {
     var n = props.node;
@@ -706,6 +1164,13 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       n.dependsOn && n.dependsOn.length ? React.createElement('span', { className: 'tf-kv' }, '依赖: ' + n.dependsOn.join(', ')) : null,
       n.taskId ? React.createElement('span', { className: 'tf-kv' }, 'task ' + String(n.taskId).slice(-6) + ' · ' + (n.taskStatus || '') + (n.iteration ? ' · it' + n.iteration : '')) : null
     ));
+    // P11: 该节点实际生效的模型与人设段。两者都没有（旧记录，没有 route /
+    // persona 键）时整块不渲染，卡片与改动前逐字一致。
+    var nodeRoute = routeOf(n);
+    var nodePersona = personaOf(n);
+    if (nodeRoute !== null || nodePersona !== null) {
+      rows.push(React.createElement(ModelRouteBlock, { key: 'rt', route: nodeRoute, persona: nodePersona }));
+    }
     // P10: the review verdict, its counts, its findings and the reviewer's own
     // trace. Rendered ONLY when the run recorded a review for this node -- an old
     // record (no `review` key => null projection) renders exactly as before.

@@ -22,25 +22,53 @@ export const inject = ['storageDomain', 'agents', 'subagents', 'webServer'];
 const now = () => Date.now();
 const makeId = () => (Math.random().toString(36).slice(2, 10) + now().toString(36));
 
-const modelSchema = z.object({
-  provider: z.string().default('deepseek'),
-  model: z.string().default('deepseek-chat'),
+// P11: a route must be able to say "nothing was declared". With
+// `.default('deepseek')` / `.default('deepseek-chat')` an EMPTY model object was
+// rewritten into a route no author ever wrote -- and `deepseek` has no registered
+// adapter in this deployment, so the persisted record claimed a model that cannot
+// resolve and the whole "who declared what" question lost its input. `{}` now
+// stays `{}`. This is a LOOSENING only: every already-stored record carries
+// explicit strings (all six in ~/.dsh/storages/team_agent_defs.json do), and a
+// string is still a string, so domain open-time validation is unaffected.
+export const modelSchema = z.object({
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  // Adapter-owned reasoning strength id. Validity depends on the exact model and
+  // is NOT checked here: pickRoute must stay a pure function (see verifyRoute).
+  reasoningEffort: z.string().optional(),
   maxTokens: z.number().int().positive().optional(),
 });
 
-const agentDefSchema = z.object({
+// The same shape under the name the route contract uses for it. One definition,
+// two names ON PURPOSE (they must never drift): a "model route" IS the model
+// field of a role, and the same four optional keys are what run / node /
+// workflow layers declare.
+export const modelRouteSchema = modelSchema;
+
+export const agentDefSchema = z.object({
   id: z.string().min(1),
   name: z.string().optional(),
   role: z.string().optional(),
   systemPrompt: z.string().optional(),
-  model: modelSchema,
+  // Optional on purpose. `model` is a route DESCRIPTION, and "this role declares
+  // no route at all" has to be expressible: while it was required, parsing a raw
+  // record that simply has no model key failed outright. Every record written by
+  // upsertAgent carries at least `{}`, so making this optional can only accept
+  // MORE shapes -- it can never make an existing record fail to open.
+  model: modelSchema.optional(),
   skills: z.array(z.string()).default([]),
-  tools: z.object({ allow: z.array(z.string()).optional(), deny: z.array(z.string()).optional() }).optional(),
+  // `preset` is a DISCIPLINE preset, expanded into a deny-list at dispatch time
+  // (TOOL_PRESETS). It is NOT a sandbox: it removes the most obvious write/exec
+  // tools BY NAME and cannot stop an allowed tool from writing indirectly.
+  tools: z.object({ allow: z.array(z.string()).optional(), deny: z.array(z.string()).optional(), preset: z.enum(['full', 'no-write', 'no-shell', 'read-only']).optional() }).optional(),
   permissionPolicy: z.string().optional(),
+  // P11: per-role timeout. Only ever TIGHTENS a bound: timeoutFor() clamps it
+  // against the worker / reviewer ceiling, so it can never raise one.
+  timeoutMs: z.number().int().positive().optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
-const workflowNodeSchema = z.object({
+export const workflowNodeSchema = z.object({
   id: z.string().min(1),
   // A human-readable name for this step. Without one the UI can only show the id
   // ("fix-tabs"), which says nothing about what the work actually was.
@@ -52,13 +80,30 @@ const workflowNodeSchema = z.object({
   mode: z.enum(['once', 'loop']).optional(),
   gate: z.object({ expr: z.string().optional(), condition: z.any().optional() }).optional(),
   maxRework: z.number().int().positive().optional(),
+  // P11 node-level route: this step runs on a different model. OPTIONAL, and so
+  // is every field inside it -- adding a required key here would make every
+  // stored workflow record fail validation the moment a domain opens.
+  route: modelSchema.optional(),
+  // P11 node-level persona ADDON: text appended after the workflow's and the
+  // role's persona segments (role -> workflow -> node).
+  promptAddon: z.string().optional(),
+  // P11: accepted and stored, but deliberately NOT read yet. The timeout is
+  // resolved from the ROLE definition alone (timeoutFor(def, ceiling)): letting a
+  // node re-declare the timeout would give "which layer wins" a second answer.
+  // (Same explicit gap as P11-PLAN section 2.4.)
+  timeoutMs: z.number().int().positive().optional(),
 });
 
-const workflowSchema = z.object({
+export const workflowSchema = z.object({
   id: z.string().min(1),
   name: z.string().optional(),
   description: z.string().optional(),
   nodes: z.record(workflowNodeSchema).default({}),
+  // P11 workflow-level route / persona: every step of this flow shares them,
+  // unless a node declares its own route (node wins) or the run overrides it
+  // (run wins). Purely additive: an old record simply has neither key.
+  route: modelSchema.optional(),
+  prompt: z.string().optional(),
   // P10: workflow-level review settings. OPTIONAL end to end, and every field
   // inside is optional too -- adding a required key here would make every
   // already-stored workflow record fail validation the moment a domain opens.
@@ -167,6 +212,251 @@ const WORKER_DENY_TOOLS = [
   'team_create_agent', 'team_create_task', 'team_create_workflow',
   'team_delegate_agent', 'team_list_agents', 'team_run_workflow', 'team_task_status',
 ];
+
+// ---- P11 role-level configuration: route layering, tool presets, persona ----
+// Everything in this section is a PURE function of its arguments (no ctx, no IO),
+// so each decision can be pinned down without booting the host. The single
+// exception is verifyRoute(), which takes the `llm` service as an explicit
+// argument so a stub can be injected.
+//
+// ROUTE_SOURCES is the ONE source of truth for the layer names and their
+// precedence: run > node > workflow > role > inherited.
+export const ROUTE_SOURCES = ['run', 'node', 'workflow', 'role', 'inherited'];
+const ROUTE_LAYER_ORDER = ['run', 'node', 'workflow', 'role'];
+const ROUTE_KEYS = ['provider', 'model', 'reasoningEffort', 'maxTokens'];
+
+// "Declared" is NOT the same as "present": a whitespace-only string and a
+// zero/negative/non-finite maxTokens are not declarations. Without this a layer
+// holding {provider:'', model:'   '} would beat a layer that really configured a
+// model, and the node would run on a route nobody wrote.
+const routeFieldValue = (key, value) => {
+  if (value === undefined || value === null) return undefined;
+  if (key === 'maxTokens') return (typeof value === 'number' && isFinite(value) && value > 0) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  const t = value.trim();
+  return t === '' ? undefined : t;
+};
+
+// One layer, reduced to the fields it actually declares; null when it declares
+// none (an empty object, only blanks, only an invalid maxTokens...).
+export function normalizeRouteLayer(layer) {
+  if (layer === null || layer === undefined || typeof layer !== 'object' || Array.isArray(layer)) return null;
+  const out = {};
+  for (const key of ROUTE_KEYS) {
+    const v = routeFieldValue(key, layer[key]);
+    if (v !== undefined) out[key] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// The whole layer wins, or nothing does. There is deliberately NO cross-layer
+// field merging: `run = {model:'m1'}` + `role = {provider:'deepseek-official'}`
+// must never compose `deepseek-official/m1`, because that route has no author --
+// it would fail with NO_ADAPTER (or run on a combination nobody chose) and the
+// blame would point at a layer that never participated in the decision.
+export function pickRoute(layers) {
+  const l = layers === null || layers === undefined || typeof layers !== 'object' ? {} : layers;
+  for (const name of ROUTE_LAYER_ORDER) {
+    const norm = normalizeRouteLayer(l[name]);
+    if (norm !== null) return { route: norm, source: name };
+  }
+  return { route: {}, source: 'inherited' };
+}
+
+// Messages only -- no IO, no ctx. `picked` is { route } (or the route itself),
+// `parentRoute` is the route the parent agent is actually running, if known.
+export function routeWarnings(picked, parentRoute) {
+  const out = [];
+  const src = picked && typeof picked === 'object' && picked.route !== undefined ? picked.route : picked;
+  const route = src && typeof src === 'object' ? src : {};
+  const parent = parentRoute && typeof parentRoute === 'object' ? parentRoute : null;
+  const provider = routeFieldValue('provider', route.provider);
+  const model = routeFieldValue('model', route.model);
+  const effort = routeFieldValue('reasoningEffort', route.reasoningEffort);
+  // (a) the pair rule. Keeping the surviving half would merge it with the
+  // parent's other half, producing a route NOBODY wrote.
+  if (provider !== undefined && model === undefined) {
+    out.push('provider/model 必须成对声明：本层只声明了 provider（' + provider + '）、没有 model，因此 provider/model 成对作废，provider 被忽略（保留它会与父级的 model 拼装出没有任何作者声明过的混合路由）；该层其余字段仍单独生效。');
+  } else if (model !== undefined && provider === undefined) {
+    out.push('provider/model 必须成对声明：本层只声明了 model（' + model + '）、没有 provider，因此 provider/model 成对作废，model 被忽略（保留它会与父级的 provider 拼装出没有任何作者声明过的混合路由）；该层其余字段仍单独生效。');
+  }
+  // (b) the runtime's own rule: resolveChildAgentOptions() deletes an inherited
+  // reasoningEffort when the route changed and the request did not name one, so
+  // the parent's effort is dropped and the model default takes over. Not a bug --
+  // but it MUST be said out loud, or "I only changed the model" silently changes
+  // the reasoning strength as well.
+  if (provider !== undefined && model !== undefined && effort === undefined) {
+    const parentProvider = parent === null ? undefined : routeFieldValue('provider', parent.provider);
+    const parentModel = parent === null ? undefined : routeFieldValue('model', parent.model);
+    const parentKnown = parentProvider !== undefined && parentModel !== undefined;
+    if (!parentKnown || provider !== parentProvider || model !== parentModel) {
+      out.push('route 已变更（provider/model ' + (parentKnown ? '与父级 ' + parentProvider + '/' + parentModel + ' 不同' : '父级未知') + '）但未声明 reasoningEffort：父级 effort 会被清除，改由该模型默认值决定。');
+    }
+  }
+  // (c) an unusable maxTokens is dropped, never silently.
+  if (route.maxTokens !== undefined && routeFieldValue('maxTokens', route.maxTokens) === undefined) {
+    out.push('maxTokens 非法（' + JSON.stringify(route.maxTokens) + '）：已忽略该字段（必须是正有限数）。');
+  }
+  return out;
+}
+
+// A canonical, comparable string for logs / dedup. Empty fields do not take part,
+// and field order is fixed so two equal routes always produce one string.
+export function routeSignature(route) {
+  const r = route && typeof route === 'object' ? route : {};
+  const parts = [];
+  const provider = routeFieldValue('provider', r.provider);
+  if (provider !== undefined) parts.push('provider=' + provider);
+  const model = routeFieldValue('model', r.model);
+  if (model !== undefined) parts.push('model=' + model);
+  const effort = routeFieldValue('reasoningEffort', r.reasoningEffort);
+  if (effort !== undefined) parts.push('effort=' + effort);
+  const maxTokens = routeFieldValue('maxTokens', r.maxTokens);
+  if (maxTokens !== undefined) parts.push('maxTokens=' + String(maxTokens));
+  return parts.join(';');
+}
+
+// The persona is built from three text layers, in this fixed order:
+//   role     -> agentDef.systemPrompt        (the role definition)
+//   workflow -> workflowSchema.prompt        (this flow)
+//   node     -> workflowNodeSchema.promptAddon (this step)
+// Joined with a blank line so two sentences can never be glued into one. Blank
+// layers do not participate, and `layers` names only the ones that really
+// contributed, so "no persona at all" stays distinguishable from "an empty one".
+// No semantic rewriting happens here: what the author wrote is what is sent.
+export function mergePersona(layers) {
+  const l = layers === null || layers === undefined || typeof layers !== 'object' ? {} : layers;
+  const texts = [];
+  const used = [];
+  for (const name of ['role', 'workflow', 'node']) {
+    const v = l[name];
+    if (typeof v !== 'string' || v.trim() === '') continue;
+    texts.push(v);
+    used.push(name);
+  }
+  const text = texts.join('\n\n');
+  return { text, layers: used, chars: text.length };
+}
+
+// A role may only ever TIGHTEN its own timeout: the result is clamped into
+// [1000, ceiling], and a missing / zero / nonsensical declaration means "use the
+// ceiling". (0 and negatives are NOT "instant timeout" -- they are typos.)
+export function timeoutFor(def, ceiling) {
+  const limit = typeof ceiling === 'number' && isFinite(ceiling) && ceiling > 0 ? ceiling : 600000;
+  const raw = def ? def.timeoutMs : undefined;
+  // A missing, zero, negative or non-finite declaration is a typo, not an
+  // instruction, so it means "use the ceiling". The earlier `raw || limit`
+  // handled 0 but NOT negatives: -5 survived as a value and was then clamped UP
+  // to the 1000ms floor, i.e. one stray minus sign would have timed every node
+  // out after a second -- the opposite of the documented intent.
+  const declared = typeof raw === 'number' && isFinite(raw) && raw > 0;
+  const n = declared ? raw : limit;
+  return Math.min(limit, Math.max(1000, n));
+}
+
+// The four DISCIPLINE presets, as deny-lists. `full` means "add nothing" (the
+// plugin's own WORKER_DENY_TOOLS still applies -- a worker never gets the
+// client-Inspect / human-prompt tools). Names come from the tool registry this
+// deployment actually ships: dsh-tool-fs registers read/write/edit/read_image,
+// dsh-tool-str-replace-editor registers str_replace_editor, dsh-tool-pwsh and
+// dsh-tool-bash register pwsh/bash. `read-only` is BY CONSTRUCTION the union of
+// `no-write` and `no-shell` (asserted, so one cannot drift from the other).
+export const TOOL_PRESETS = {
+  full: [],
+  'no-write': ['write', 'edit', 'str_replace_editor'],
+  'no-shell': ['pwsh', 'bash'],
+  'read-only': ['write', 'edit', 'str_replace_editor', 'pwsh', 'bash'],
+};
+
+// Expand one preset against the tool names THIS deployment exposes.
+//  * `known` is a Set (from tools.schemas(parent)) -> only names the runtime
+//    really has go into `deny`; the rest come back in `unknown` so the caller can
+//    RECORD them instead of dropping them silently.
+//  * `known` undefined (no `tools` service, or schemas() threw) -> pass every
+//    name through and let the runtime validate: startWorker() then narrows the
+//    filter to exactly the names the runtime reported as unknown.
+export function expandToolPreset(preset, known) {
+  const list = TOOL_PRESETS[preset];
+  if (!Array.isArray(list) || list.length === 0) return { deny: [], unknown: [] };
+  if (known === undefined || known === null || typeof known.has !== 'function') return { deny: list.slice(), unknown: [] };
+  const deny = [];
+  const unknown = [];
+  for (const name of list) {
+    if (known.has(name)) { if (deny.indexOf(name) === -1) deny.push(name); }
+    else if (unknown.indexOf(name) === -1) unknown.push(name);
+  }
+  return { deny, unknown };
+}
+
+// Can this route actually run? Four outcomes, and NONE of them fails the node:
+//   1. llm unavailable            -> ok:true,  verified:false, note (pass through)
+//   2. provider has no adapter    -> ok:false, warning (the caller falls back to
+//   3. model does not resolve        inheriting the parent route and records it)
+//   4. model rejects the effort   -> ok:false, warning
+//   5. verified                   -> ok:true,  verified:true, resolved summary
+// ok:false means "do not set agentOptions at all": a route that cannot run is the
+// ONLY thing worse than no route, because the child's first request dies with
+// NO_ADAPTER and the node looks failed for a reason nobody declared.
+export async function verifyRoute(llm, picked, parentRoute) {
+  void parentRoute; // the parent comparison belongs to routeWarnings(); kept in the signature for symmetry
+  const src = picked && typeof picked === 'object' && picked.route !== undefined ? picked.route : picked;
+  const route = src && typeof src === 'object' ? src : {};
+  const provider = routeFieldValue('provider', route.provider);
+  const model = routeFieldValue('model', route.model);
+  const effort = routeFieldValue('reasoningEffort', route.reasoningEffort);
+  if (llm === undefined || llm === null || typeof llm.resolveModelInfo !== 'function') {
+    return { ok: true, verified: false, resolved: null, warning: null, note: 'llm 服务不可用，route 未经校验直接透传' };
+  }
+  if (provider === undefined || model === undefined) {
+    // Nothing to resolve -- but say WHICH kind of nothing: "no route declared at
+    // all" (inherit the parent) is a different fact from "half a pair declared"
+    // (the pair rule voided it), and both must be readable on the node.
+    const declaredNothing = Object.keys(route).length === 0;
+    const source = picked && typeof picked === 'object' && typeof picked.source === 'string' ? '（source=' + picked.source + '）' : '';
+    return {
+      ok: true, verified: false, resolved: null, warning: null,
+      note: declaredNothing
+        ? '该层未声明任何 route 字段' + source + '，子代理继承父级 route，无需校验'
+        : 'route 未同时声明 provider 与 model（成对规则），provider/model 对作废，无可校验的目标；该层其余字段仍然生效',
+    };
+  }
+  let listed = null;
+  if (typeof llm.listProviders === 'function') {
+    try { const l = llm.listProviders(); listed = Array.isArray(l) ? l : null; } catch (e) { listed = null; }
+  }
+  if (listed !== null) {
+    const has = listed.some((p) => p && p.id === provider);
+    if (!has) {
+      const registered = listed.map((p) => (p && p.id) || '?').join(', ');
+      return {
+        ok: false, verified: false, resolved: null, note: null,
+        warning: '没有注册名为 ' + provider + ' 的 provider 适配器（已注册：' + (registered === '' ? '（无）' : registered) + '）；本节点回退继承父级 route',
+      };
+    }
+  }
+  let resolved = null;
+  try { resolved = await llm.resolveModelInfo(provider, model); }
+  catch (e) {
+    return { ok: false, verified: false, resolved: null, note: null, warning: 'model 无法解析：' + String(e && e.message ? e.message : e) };
+  }
+  const reasoning = resolved && resolved.reasoning && typeof resolved.reasoning === 'object' ? resolved.reasoning : null;
+  const efforts = reasoning && Array.isArray(reasoning.efforts)
+    ? reasoning.efforts.map((x) => (x && typeof x.id === 'string' ? x.id : null)).filter((x) => x !== null && x !== '')
+    : [];
+  const summary = {
+    contextWindow: resolved && resolved.context && typeof resolved.context.contextWindow === 'number' ? resolved.context.contextWindow : null,
+    defaultMaxTokens: resolved && typeof resolved.defaultMaxTokens === 'number' ? resolved.defaultMaxTokens : null,
+    efforts,
+    defaultEffort: reasoning && typeof reasoning.defaultEffort === 'string' ? reasoning.defaultEffort : null,
+  };
+  if (effort !== undefined && efforts.indexOf(effort) === -1) {
+    return {
+      ok: false, verified: false, resolved: summary, note: null,
+      warning: 'model ' + model + ' 不接受 effort ' + effort + '（可选：' + (efforts.length ? efforts.join(', ') : '该模型未声明任何 reasoning effort') + '）',
+    };
+  }
+  return { ok: true, verified: true, resolved: summary, warning: null, note: null };
+}
 
 // ---- P10 review engine: hard limits (pure data, no ctx, unit-testable) ----
 // The ONE placeholder literal for a node nobody owns. /progress's role roll-up and
@@ -567,19 +857,133 @@ export function apply(ctx) {
       return names;
     } catch (e) { return undefined; }
   };
-  // A stored model route is only usable when its provider has a registered
-  // adapter; otherwise the child's very first request dies with NO_ADAPTER.
-  const providerRegistered = (provider) => {
-    const llm = ctx.get('llm');
-    if (llm === undefined || typeof llm.listProviders !== 'function') return true;
+  // The route the caller is ACTUALLY running on, as the runtime recorded it on
+  // its own request header. Used for the effort-clearing warning and for the
+  // "what does the child inherit" projection. Unreadable => null (unknown), never
+  // guessed.
+  const routeConfigOf = (agent) => {
     try {
-      const list = llm.listProviders() || [];
-      return list.some((p) => p && p.id === provider);
-    } catch (e) { return true; }
+      const cfg = agent && agent.session && typeof agent.session.requestHeader === 'function'
+        ? ((agent.session.requestHeader() || {}).config || null)
+        : null;
+      if (cfg === null || typeof cfg !== 'object') return null;
+      return {
+        provider: cfg.provider === undefined ? null : cfg.provider,
+        model: cfg.model === undefined ? null : cfg.model,
+        reasoningEffort: cfg.reasoningEffort === undefined ? null : cfg.reasoningEffort,
+        maxTokens: cfg.maxTokens === undefined ? null : cfg.maxTokens,
+      };
+    } catch (e) { return null; }
   };
-  const spawnSpecFor = (def, parent) => {
-    const model = (def && def.model) || {};
+  // The child's REAL route. `started.run` is the SubagentRun; its `localAgent` is
+  // the live child Agent. This is the only authoritative source ("what did it run
+  // on"), so a read failure is reported as null => measured:false, and the
+  // requested values are never dressed up as measured ones.
+  const measureChildRoute = (started) => {
+    try {
+      const child = started && started.run ? started.run.localAgent : undefined;
+      return routeConfigOf(child);
+    } catch (e) { return null; }
+  };
+  // The child's request header only exists once it has issued its first request,
+  // so a read taken immediately after `start()` may legitimately be empty. Re-read
+  // after the child settles and keep the LAST non-null read: this can add a real
+  // measurement, but it can never turn an absent header into an invented route
+  // (measured stays false until a header was really read).
+  const refreshMeasured = (started, prev) => {
+    const m = measureChildRoute(started);
+    return m !== null ? m : prev;
+  };
+  // Pick the layer that wins, verify it against the real model catalog, and decide
+  // what (if anything) is handed to the runtime. Pure decisions live in the
+  // module-level functions above; this wrapper only adds ctx + the llm service.
+  //
+  // A note on maxTokens: the runtime MERGES child options over the parent's
+  // (`...parentMaxTokens` in resolveChildAgentOptions), so a child that declares
+  // no maxTokens INHERITS the parent's cap. P11 does not change that; `measured`
+  // (the child's own request header) is what makes it visible.
+  const decideRoute = async (def, parent, opts) => {
+    const o = opts || {};
+    const picked = pickRoute({
+      run: o.runRoute,
+      node: o.node ? o.node.route : undefined,
+      workflow: o.workflow ? o.workflow.route : undefined,
+      role: def ? def.model : undefined,
+    });
+    const parentRoute = o.parentRoute === undefined ? routeConfigOf(parent) : o.parentRoute;
+    const verify = await verifyRoute(ctx.get('llm'), picked, parentRoute);
+    const applied = {};
+    if (verify.ok) {
+      // provider/model only EVER travel together: either both or neither. A lone
+      // provider would be merged with the parent's model by the runtime.
+      if (picked.route.provider !== undefined && picked.route.model !== undefined) {
+        applied.provider = picked.route.provider;
+        applied.model = picked.route.model;
+      }
+      // These two are independent of the pair: they do not select an adapter, so
+      // they can be attached on their own (and declaring them does NOT trigger the
+      // runtime's effort-clearing branch unless the provider/model pair moved).
+      if (picked.route.reasoningEffort !== undefined) applied.reasoningEffort = picked.route.reasoningEffort;
+      if (picked.route.maxTokens !== undefined) applied.maxTokens = picked.route.maxTokens;
+    }
+    // ok:false => agentOptions is not set AT ALL: the child inherits the parent
+    // route, exactly the effect the code had before P11. The only safe direction
+    // for a route that cannot run.
+    const pairApplied = applied.provider !== undefined && applied.model !== undefined;
+    const parentProvider = parentRoute ? parentRoute.provider : null;
+    const parentModel = parentRoute ? parentRoute.model : null;
+    const parentEffort = parentRoute ? (parentRoute.reasoningEffort === undefined ? null : parentRoute.reasoningEffort) : null;
+    const parentMaxTokens = parentRoute ? (parentRoute.maxTokens === undefined ? null : parentRoute.maxTokens) : null;
+    const resolved = verify.resolved;
+    let effective;
+    if (!verify.ok) {
+      effective = { provider: parentProvider, model: parentModel, reasoningEffort: parentEffort, maxTokens: parentMaxTokens };
+    } else {
+      const pairChanged = pairApplied && (applied.provider !== parentProvider || applied.model !== parentModel);
+      const defaultEffort = resolved ? resolved.defaultEffort : null;
+      const defaultMaxTokens = resolved ? resolved.defaultMaxTokens : null;
+      effective = {
+        provider: pairApplied ? applied.provider : parentProvider,
+        model: pairApplied ? applied.model : parentModel,
+        // A changed route with no declared effort means the parent's effort is
+        // cleared and the model default takes over (resolveChildAgentOptions).
+        reasoningEffort: applied.reasoningEffort !== undefined
+          ? applied.reasoningEffort
+          : (pairChanged ? defaultEffort : (parentEffort !== null ? parentEffort : defaultEffort)),
+        // An undeclared maxTokens inherits the parent's cap before the adapter default.
+        maxTokens: applied.maxTokens !== undefined ? applied.maxTokens : (parentMaxTokens !== null ? parentMaxTokens : defaultMaxTokens),
+      };
+    }
+    const warns = routeWarnings(picked, parentRoute);
+    const warning = verify.warning !== null && verify.warning !== undefined
+      ? verify.warning
+      : (warns.length ? warns.join(' ') : null);
+    return {
+      picked, verify, applied, effective, warning,
+      note: verify.note === undefined ? null : verify.note,
+      efforts: resolved ? resolved.efforts : null,
+      defaultEffort: resolved ? resolved.defaultEffort : null,
+    };
+  };
+  // The evidence record written onto the node. `measured` says whether the child's
+  // own request header was really read; when it was, that value IS the effective
+  // route (and the projection above is not used at all).
+  const routeRecordOf = (decision, measured, timeoutMs) => clean({
+    requested: Object.keys(decision.picked.route).length ? decision.picked.route : null,
+    source: decision.picked.source,
+    effective: measured !== null ? measured : decision.effective,
+    measured: measured !== null,
+    verified: decision.verify.verified === true,
+    warning: decision.warning === null || decision.warning === undefined ? null : decision.warning,
+    note: decision.note,
+    efforts: decision.efforts,
+    defaultEffort: decision.defaultEffort,
+    timeoutMs,
+  });
+  const spawnSpecFor = (def, parent, opts) => {
+    const o = opts || {};
     const defTools = (def && def.tools) || {};
+    const applied = o.decision ? o.decision.applied : {};
     // Pass EVERY name: the runtime validates a filter against the CHILD's own
     // scope and rejects the whole filter on one unknown name. Pre-filtering
     // against a locally computed view silently produced an EMPTY deny-list --
@@ -587,18 +991,61 @@ export function apply(ctx) {
     // client-Inspect tool this policy exists to withhold.
     const deny = [];
     for (const name of WORKER_DENY_TOOLS) if (deny.indexOf(name) === -1) deny.push(name);
-    for (const name of defTools.deny || []) if (deny.indexOf(name) === -1) deny.push(name);
-    // An explicit allow-list wins, but a blocking tool is never re-admitted.
-    const allow = (defTools.allow || []).filter((n) => WORKER_DENY_TOOLS.indexOf(n) === -1);
-    const spec = {};
-    if (model.provider && model.model) {
-      if (providerRegistered(model.provider)) spec.agentOptions = { provider: model.provider, model: model.model };
-      else console.warn('team-flowise: no adapter registered for provider "' + model.provider + '"; worker inherits the caller route');
+    // P11 tool preset -> deny-list. Expanded against the names this deployment
+    // really exposes; a preset name that is NOT visible here (e.g.
+    // str_replace_editor in a deployment that ships dsh-tool-fs only) is recorded
+    // in the node's toolNote, never dropped in silence.
+    const known = knownToolNames(parent);
+    const preset = defTools.preset;
+    const expanded = expandToolPreset(preset, known);
+    let presetNote = null;
+    if (typeof preset === 'string' && preset !== '' && TOOL_PRESETS[preset] === undefined) {
+      presetNote = '未知工具预设 "' + preset + '"（可选：full, no-write, no-shell, read-only），未展开任何 deny';
+    } else if (expanded.unknown.length) {
+      presetNote = 'preset "' + preset + '" 中的 ' + expanded.unknown.map((n) => '"' + n + '"').join(', ') + ' 在本部署不可见，未加入 deny';
     }
-    if (def && def.systemPrompt) spec.persona = def.systemPrompt;
+    for (const name of expanded.deny) if (deny.indexOf(name) === -1) deny.push(name);
+    for (const name of defTools.deny || []) if (deny.indexOf(name) === -1) deny.push(name);
+    // An explicit allow-list wins over the role's OWN deny list, but never over a
+    // POLICY: neither the plugin's always-blocked set nor a tool preset may be
+    // re-admitted by naming it in `allow`. While only WORKER_DENY_TOOLS was
+    // filtered here, `preset:'read-only'` + `allow:['write']` silently produced a
+    // writer -- the exact opposite of what the preset promises.
+    const policy = WORKER_DENY_TOOLS.concat(expanded.deny);
+    const requestedAllow = defTools.allow || [];
+    const allow = requestedAllow.filter((n) => policy.indexOf(n) === -1);
+    const strippedAllow = requestedAllow.filter((n) => policy.indexOf(n) !== -1);
+    if (strippedAllow.length) {
+      presetNote = (presetNote === null ? '' : presetNote + ' | ') + 'allow 中的 ' + strippedAllow.join(', ') + ' 属于策略禁项，未被重新放行';
+    }
+    const spec = {};
+    if (applied.provider !== undefined && applied.model !== undefined) {
+      spec.agentOptions = { provider: applied.provider, model: applied.model };
+    }
+    if (applied.reasoningEffort !== undefined) spec.agentOptions = Object.assign(spec.agentOptions || {}, { reasoningEffort: applied.reasoningEffort });
+    if (applied.maxTokens !== undefined) spec.agentOptions = Object.assign(spec.agentOptions || {}, { maxTokens: applied.maxTokens });
+    // Persona: role -> workflow -> node. The reviewer's `node` layer is null on
+    // purpose (see runReview): the reviewed node's promptAddon describes the
+    // worker, not the judge.
+    const persona = mergePersona({ role: def && def.systemPrompt, workflow: o.workflow ? o.workflow.prompt : undefined, node: o.node ? o.node.promptAddon : undefined });
+    // The runtime renders a section through strict `{{variable}}` interpolation
+    // and THROWS on a malformed or unknown reference (dsh-system-prompt:
+    // "malformed prompt variable reference" / "unknown prompt variable"), which
+    // would kill the child before it ever starts. A lone `{{` with no later `}}`
+    // is documented as literal prose, but instead of reasoning about which groups
+    // are inert we neutralise the sequence itself: the persona is KEPT in full and
+    // only `{{` becomes `{ {`. The earlier behaviour dropped the entire persona --
+    // throwing away a user's whole custom prompt over two characters.
+    const safePersona = persona.text.split('{{').join('{ {');
+    if (safePersona !== '') spec.persona = safePersona;
     if (allow.length) spec.toolFilter = { allow };
     else if (deny.length) spec.toolFilter = { deny };
-    return spec;
+    const personaState = persona.text === '' ? null : clean({
+      chars: persona.chars,
+      layers: persona.layers,
+      warning: safePersona === persona.text ? null : '人设段含 {{，已替换为 { { 以避免被运行时当作插值引用（否则该子代理会因未知变量而启动失败）',
+    });
+    return { spec, persona: personaState, presetNote };
   };
   // Reported per node purely as evidence of what the runtime saw: an empty or
   // missing view here is what used to collapse the deny-list to nothing.
@@ -685,7 +1132,7 @@ export function apply(ctx) {
 
   // ---- catalog ----
   const upsertAgent = async (def) => {
-    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, updatedAt: now() }));
+    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, timeoutMs: def && def.timeoutMs, updatedAt: now() }));
     await withTable('team_agent_defs', 'defs', (t) => t.put(rec.id, rec)); return rec;
   };
   const listAgents = async () => withTable('team_agent_defs', 'defs', (t) => [...t.entries()].map(([, v]) => v));
@@ -697,7 +1144,9 @@ export function apply(ctx) {
     // `review` setting unreachable through the real API and through the
     // team_create_workflow tool: a workflow could declare "the Reviewer reviews
     // every node" and nothing would ever be reviewed.
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, review: wf && wf.review, updatedAt: now() }));
+    // P11 adds `route` / `prompt` to the same write path for the same reason:
+    // declared-but-unstored is exactly the defect this comment was written about.
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
@@ -767,6 +1216,32 @@ export function apply(ctx) {
       reviewerName: rv.reviewerName === undefined ? null : rv.reviewerName,
       elapsedMs: typeof rv.elapsedMs === 'number' ? rv.elapsedMs : null,
       summary: rv.summary === undefined ? null : rv.summary,
+    };
+  };
+  // P11 light projections for the poll payload. Every field is defaulted (never
+  // omitted) so the client can read the shape without existence checks, and a
+  // missing record is `null` -- "no route was recorded" must stay distinguishable
+  // from "a route record that happens to be empty".
+  const lightRoute = (r) => {
+    if (r === null || r === undefined || typeof r !== 'object') return null;
+    const e = r.effective && typeof r.effective === 'object' ? r.effective : {};
+    return {
+      source: r.source === undefined ? null : r.source,
+      effective: {
+        provider: e.provider === undefined ? null : e.provider,
+        model: e.model === undefined ? null : e.model,
+        reasoningEffort: e.reasoningEffort === undefined ? null : e.reasoningEffort,
+        maxTokens: e.maxTokens === undefined ? null : e.maxTokens,
+      },
+      measured: r.measured === true,
+      warning: r.warning === undefined ? null : r.warning,
+    };
+  };
+  const lightPersona = (p) => {
+    if (p === null || p === undefined || typeof p !== 'object') return null;
+    return {
+      chars: typeof p.chars === 'number' ? p.chars : 0,
+      layers: Array.isArray(p.layers) ? p.layers.slice() : [],
     };
   };
   // Node status -> the six totals buckets. `reviewing` and `rework` MUST be
@@ -851,6 +1326,16 @@ export function apply(ctx) {
         brief: brief(def.taskTemplate && def.taskTemplate.requirement, 110),
         title: nodeTitle(def, def.taskTemplate && def.taskTemplate.requirement) || null,
         summary: st.summary === undefined ? null : st.summary,
+        // P11: the route this node actually ran on, LIGHTLY. /progress is a
+        // 3-second poll, so this carries only what the card needs to be honest
+        // (which layer won, what it really ran, whether that was MEASURED, and
+        // why not) -- never the efforts list. `null` for a run recorded before
+        // P11 (no route key at all), so old records keep rendering as they did.
+        route: lightRoute(st.route),
+        // Persona SHAPE only (which layers contributed + how long). The text
+        // itself can be thousands of characters and belongs to the role
+        // definition, not to a poll payload.
+        persona: lightPersona(st.persona),
       });
     });
     const total = nodes.length;
@@ -994,6 +1479,12 @@ export function apply(ctx) {
           reviewedSummary: summary,
           taskId: task ? task.id : (st.taskId === undefined ? null : st.taskId),
           ...reviewView(rv, { reviewer: def.reviewer === undefined ? null : def.reviewer, startedAt, endedAt, elapsedMs }),
+          // P11: WHICH route judged this artifact, and whose persona the judge
+          // used. A SIBLING of the verdict fields (namespace-consistent with the
+          // node record), not a key inside `review`: the verdict is about the
+          // artifact, the route is about the judge.
+          reviewRoute: st.reviewRoute === undefined ? null : st.reviewRoute,
+          reviewPersona: st.reviewPersona === undefined ? null : st.reviewPersona,
         }));
       }
       if (!isOwner) continue;
@@ -1028,6 +1519,13 @@ export function apply(ctx) {
         taskId: task ? task.id : (st.taskId === undefined ? null : st.taskId),
         taskStatus: task ? task.status : null,
         iteration: task ? task.iteration : null,
+        // P11 (this entry is what NodeCard renders from): the FULL route record of
+        // the worker -- requested / source / effective / measured / verified /
+        // warning / note / efforts / defaultEffort / timeoutMs -- plus the persona
+        // SHAPE (chars + which layers contributed + any discard warning). `null`
+        // for a run recorded before P11, so an old run's card is unchanged.
+        route: st.route === undefined ? null : st.route,
+        persona: st.persona === undefined ? null : st.persona,
       }));
     }
     return clean({
@@ -1106,7 +1604,12 @@ export function apply(ctx) {
   reapStale();
 
   // ---- DAG workflow scheduler (real: topology waves, delegate via subagents) ----
-  const runWorkflow = async (workflowId, input, onCreated) => {
+  // `opts.route` is the P11 RUN-level override: the operator's explicit choice
+  // for this round. It is the highest-priority route layer and the only layer an
+  // HTTP caller / tool caller can set. Omitted (or unusable) -> the layers below
+  // decide, exactly as they did before P11.
+  const runWorkflow = async (workflowId, input, onCreated, opts) => {
+    const runRoute = opts ? opts.route : undefined;
     const wf = await withTable('team_workflows', 'flows', (t) => t.get(workflowId));
     if (!wf) throw new Error('team-flowise: workflow not found ' + workflowId);
     const nodes = (wf.nodes || {});
@@ -1135,6 +1638,11 @@ export function apply(ctx) {
       let runRework = 0;
       const subagents = ctx.get('subagents');
       const parent = resolveParentAgent(ctx);
+      // The caller's own route, read ONCE from its request header. It is the
+      // baseline every layer is compared against ("did the route really change?")
+      // and the fallback a degraded node inherits. Unreadable => null, which is
+      // reported as "parent unknown" rather than assumed.
+      const parentRoute = routeConfigOf(parent);
       const agentDefs = await listAgents();
       // Reviewer and title names must use the SAME canonical role name the board
       // already groups by (`roleNamer`), otherwise one reviewer shows up twice.
@@ -1167,6 +1675,14 @@ export function apply(ctx) {
         const def = agentDefs.find((d) => d.id === ref || d.name === ref) || null;
         const startedAt = now();
         let text = ''; let reasoning = ''; let toolNote = ''; let error = null;
+        // P11: the reviewer's OWN route and persona, resolved from its own role
+        // definition. `node` is deliberately null: the reviewed node's
+        // promptAddon describes the worker being judged, not the judge, and its
+        // node-level route belongs to that step's worker. `reviewRoute` is the
+        // measured/derived evidence and is recorded as a SIBLING of `review`
+        // (a reviewer's route is not part of the verdict about the artifact).
+        let reviewRoute = null;
+        let reviewPersona = null;
         const artifact = String(output === undefined || output === null ? '' : output);
         const truncated = artifact.length > REVIEW_LIMITS.artifactMax;
         const prompt = buildReviewPrompt({
@@ -1182,9 +1698,23 @@ export function apply(ctx) {
             // The REVIEWER derives its own model/persona from its own definition.
             // The reviewed node's deny-list or persona must never be applied to
             // it: those describe the worker being judged, not the judge.
-            const started = await startWorker(subagents, { label: nid + ':review', prompt: [{ type: 'text', text: prompt }], parent, signal: ctl.signal }, spawnSpecFor(def, parent), parentToolNote(parent));
-            toolNote = started.note;
-            const result = await withTimeout(started.run.result, REVIEW_LIMITS.timeoutMs, 'review of node ' + nid);
+            const reviewDef = def;
+            const decision = await decideRoute(reviewDef, parent, { runRoute, node: null, workflow: wf, parentRoute });
+            const built = spawnSpecFor(reviewDef, parent, { node: null, workflow: wf, decision });
+            const reviewTimeoutMs = timeoutFor(reviewDef, REVIEW_LIMITS.timeoutMs);
+            // Recorded BEFORE the dispatch, so a reviewer that never starts still
+            // leaves evidence of which route was asked for (measured:false).
+            reviewRoute = routeRecordOf(decision, null, reviewTimeoutMs);
+            reviewPersona = built.persona;
+            if (reviewRoute.warning) console.warn('team-flowise: node ' + nid + ' review route: ' + reviewRoute.warning);
+            const started = await startWorker(subagents, { label: nid + ':review', prompt: [{ type: 'text', text: prompt }], parent, signal: ctl.signal }, built.spec, parentToolNote(parent));
+            toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
+            if (built.presetNote) console.warn('team-flowise: reviewer of node ' + nid + ' tools: ' + built.presetNote);
+            let reviewMeasured = measureChildRoute(started);
+            reviewRoute = routeRecordOf(decision, reviewMeasured, reviewTimeoutMs);
+            const result = await withTimeout(started.run.result, reviewTimeoutMs, 'review of node ' + nid);
+            reviewMeasured = refreshMeasured(started, reviewMeasured);
+            reviewRoute = routeRecordOf(decision, reviewMeasured, reviewTimeoutMs);
             const blocks = result.output || [];
             text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
             // The reviewer's thinking is part of the audit trail, same as a
@@ -1216,8 +1746,9 @@ export function apply(ctx) {
           error, parseError: norm.parseError, toolNote: toolNote === '' ? null : toolNote,
         };
         // `st` is the whole node-level review record; the caller keeps it for
-        // every subsequent state write for this node.
-        return { st };
+        // every subsequent state write for this node. `route`/`persona` describe
+        // the REVIEWER and are written as siblings of that record.
+        return { st, route: reviewRoute, persona: reviewPersona };
       };
       for (let round = 0; round < 1000; round++) {
         const ready = nodeIds.filter((nid) => {
@@ -1248,6 +1779,22 @@ export function apply(ctx) {
           // reviewing/rework/completed patch that omitted `review` would erase
           // the verdict the moment the next state write landed.
           let reviewState = null;
+          // P11: the route THIS node's worker actually runs on, plus the shape of
+          // the persona segment it was given. Same lifetime rule as `reviewState`:
+          // every later write for this node re-sends them, or the next write would
+          // erase the evidence.
+          let routeState = null;
+          let personaState = null;
+          // The last REAL route measurement for this node's worker (null until a
+          // child header was actually read). Kept across dispatches so a rework's
+          // re-read can only replace it with another real measurement.
+          let workerMeasured = null;
+          // P11: the REVIEWER's route/persona from the last review round. Recorded
+          // as a SIBLING of `review` (never inside it): `review` is the verdict
+          // about the artifact, and "which model judged it" is not part of that
+          // verdict. The /role review entry projects it.
+          let reviewRouteState = null;
+          let reviewerPersonaState = null;
           // Tools the WORKER could not use. Collected only to describe the
           // WORKER in a rework prompt; it is never applied to the reviewer.
           let deny = [];
@@ -1273,6 +1820,10 @@ export function apply(ctx) {
               taskId: taskId || null, error: errText,
               ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}),
               ...(reviewState ? { review: reviewState } : {}),
+              ...(routeState ? { route: routeState } : {}),
+              ...(personaState ? { persona: personaState } : {}),
+              ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}),
+              ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}),
             } } });
           };
           try {
@@ -1286,10 +1837,30 @@ export function apply(ctx) {
               const who = (def && (def.name || def.role)) || node.agent || 'team';
               const prompt = 'You are the ' + who + ' agent. Task: ' + (task.requirement || '') + (task.acceptanceCriteria ? '\nAcceptance criteria: ' + task.acceptanceCriteria : '') + (input && Object.keys(input).length ? '\nInput: ' + JSON.stringify(input) : '');
               nodeCtl.signal.throwIfAborted();
-              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, spawnSpecFor(def, parent), parentToolNote(parent));
-              toolNote = started.note;
+              // P11: run > node > workflow > role, then verify. A route that
+              // cannot run is NOT applied (the child inherits the parent route --
+              // the pre-P11 effect) but is recorded and warned about, never
+              // silently dropped and never allowed to fail the node.
+              const workerDecision = await decideRoute(def, parent, { runRoute, node, workflow: wf, parentRoute });
+              const built = spawnSpecFor(def, parent, { node, workflow: wf, decision: workerDecision });
+              const workerTimeoutMs = timeoutFor(def, NODE_TIMEOUT_MS);
+              personaState = built.persona;
+              routeState = routeRecordOf(workerDecision, null, workerTimeoutMs);
+              if (routeState.warning) console.warn('team-flowise: node ' + nid + ' route: ' + routeState.warning);
+              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent));
+              toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
+              if (built.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + built.presetNote);
+              // The ONLY authoritative answer to "what did it run on": the child's
+              // own request header. Reading it must never affect the dispatch, and
+              // an unreadable one is recorded as measured:false, never invented.
+              workerMeasured = measureChildRoute(started);
+              routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
               deny = (((def && def.tools) || {}).deny || []).slice();
-              const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'workflow node ' + nid);
+              const result = await withTimeout(started.run.result, workerTimeoutMs, 'workflow node ' + nid);
+              // Re-read now that the child has certainly issued its first request
+              // (the header only exists from then on); the last real read wins.
+              workerMeasured = refreshMeasured(started, workerMeasured);
+              routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
               const blocks = result.output || [];
               output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
               // Reasoning blocks were already produced by the adapter and simply
@@ -1319,6 +1890,10 @@ export function apply(ctx) {
               const rv = await runReview(nid, node, output, rnd, knownBlocking, task);
               if (rv === null) break; // no reviewer in effect: behave exactly as before P10
               reviewState = rv.st;
+              // P11: the reviewer's own route/persona for THIS round (last round
+              // wins -- the record answers "which route judged the final artifact").
+              reviewRouteState = rv.route;
+              reviewerPersonaState = rv.persona;
               reviews[nid] = lightReview(reviewState);
               // Publish "being reviewed" with the verdict already attached, then
               // immediately overwrite with the outcome: a poll landing during the
@@ -1359,9 +1934,22 @@ export function apply(ctx) {
                 blocking: reviewState.findings.filter((f) => f.severity === 'blocking'),
                 round: rnd - 1,
               }) + (deny.length ? '\n\n注意：以下工具对本次派发不可用，不要尝试调用它们：' + deny.join(', ') : '');
-              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, spawnSpecFor(agentDefs.find((d) => d.id === node.agent || d.name === node.agent), parent), parentToolNote(parent));
-              toolNote = restarted.note;
-              const again = await withTimeout(restarted.run.result, NODE_TIMEOUT_MS, 'workflow node ' + nid + ' rework ' + rnd);
+              // A rework re-dispatches the SAME role on the SAME layers: re-pick
+              // (cheap, no IO beyond the llm check) so the rework prompt's tool
+              // policy and the route evidence stay truthful for THIS dispatch too.
+              const reworkDef = agentDefs.find((d) => d.id === node.agent || d.name === node.agent);
+              const reworkDecision = await decideRoute(reworkDef, parent, { runRoute, node, workflow: wf, parentRoute });
+              const reworkBuilt = spawnSpecFor(reworkDef, parent, { node, workflow: wf, decision: reworkDecision });
+              const reworkTimeoutMs = timeoutFor(reworkDef, NODE_TIMEOUT_MS);
+              if (reworkBuilt.persona) personaState = reworkBuilt.persona;
+              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, reworkBuilt.spec, parentToolNote(parent));
+              toolNote = restarted.note + (reworkBuilt.presetNote ? ' | ' + reworkBuilt.presetNote : '');
+              if (reworkBuilt.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + reworkBuilt.presetNote);
+              workerMeasured = measureChildRoute(restarted);
+              routeState = routeRecordOf(reworkDecision, workerMeasured, reworkTimeoutMs);
+              const again = await withTimeout(restarted.run.result, reworkTimeoutMs, 'workflow node ' + nid + ' rework ' + rnd);
+              workerMeasured = refreshMeasured(restarted, workerMeasured);
+              routeState = routeRecordOf(reworkDecision, workerMeasured, reworkTimeoutMs);
               const blocks2 = again.output || [];
               output = blocks2.filter((b) => b.type === 'text').map((b) => b.text).join('');
               reasoning = blocks2.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
@@ -1375,13 +1963,15 @@ export function apply(ctx) {
             // The single completion write. With no reviewer in effect it carries
             // exactly the keys it always did (`reviewState` stays null, so the
             // spread contributes nothing) -- unchanged field set, unchanged shape.
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}) } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}) } } });
+            // A failed node keeps its route evidence too: "it died on THIS route"
+            // is exactly what a diagnoser needs, and dropping it would hide it.
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}) } } });
           }
         }));
       }
@@ -1404,10 +1994,46 @@ export function apply(ctx) {
     const taskItem = { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, status: { type: 'string' }, iteration: { type: 'number' }, assignee: { type: 'string' } } };
     disposers.push(mk('team_create_task', { requirement: { type: 'string', required: true }, acceptanceCriteria: { type: 'string', required: true }, assignee: { type: 'string', required: true }, reviewer: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'created task ' + v.id + ' [' + v.status + ']' }], async (args) => { const t = await createTask(args); return clean({ ok: true, id: t.id, status: t.status }); }));
     disposers.push(mk('team_task_status', {}, { ok: { type: 'boolean', required: true }, taskCount: { type: 'number', required: true }, tasks: { type: 'array', required: true, items: taskItem } }, (_a, v) => [{ type: 'text', text: 'tasks=' + v.taskCount }], async () => { const tasks = await listTasks(); return clean({ ok: true, taskCount: tasks.length, tasks: tasks.map((t) => clean({ id: t.id, status: t.status, iteration: t.iteration, assignee: t.assignee })) }); }));
-    disposers.push(mk('team_run_workflow', { workflowId: { type: 'string', required: true }, input: { type: 'object', additionalProperties: false } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input); return clean({ ok: true, runId: r.id, status: r.status }); }));
+    disposers.push(mk('team_run_workflow', { workflowId: { type: 'string', required: true }, input: { type: 'object', additionalProperties: false }, route: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' } } } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input, undefined, { route: args.route }); return clean({ ok: true, runId: r.id, status: r.status }); }));
     disposers.push(mk('team_list_agents', {}, { ok: { type: 'boolean', required: true }, agents: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } } } }, (_a, v) => [{ type: 'text', text: 'agents=' + v.agents.length }], async () => { const a = await listAgents(); return clean({ ok: true, agents: a.map((x) => clean({ id: x.id, name: x.name, role: x.role })) }); }));
-    disposers.push(mk('team_create_agent', { name: { type: 'string', required: true }, role: { type: 'string' }, systemPrompt: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'created agent ' + v.name + ' -> ' + v.id }], async (args) => { const a = await upsertAgent({ name: args.name, role: args.role, systemPrompt: args.systemPrompt, model: (args.provider || args.model) ? { provider: args.provider || 'deepseek', model: args.model || 'deepseek-chat' } : undefined }); return clean({ ok: true, id: a.id, name: a.name }); }));
-    disposers.push(mk('team_create_workflow', { name: { type: 'string', required: true }, description: { type: 'string' }, nodes: { type: 'object', additionalProperties: true } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {} }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
+    // P11: `id` (modify an existing role instead of always creating a new one),
+    // the reasoning / token / timeout knobs, and the tool preset. The old
+    // `provider || 'deepseek'` / `model || 'deepseek-chat'` fallbacks are GONE:
+    // when only one half is given the other is NOT invented -- the pair rule
+    // handles it (that half is ignored, with an explicit warning).
+    disposers.push(mk('team_create_agent', { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' }, systemPrompt: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' }, timeoutMs: { type: 'number' }, toolsPreset: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' }, timeoutMs: { type: 'number' }, toolsPreset: { type: 'string' }, warning: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'upserted agent ' + v.name + ' -> ' + v.id + (v.warning ? ' [' + v.warning + ']' : '') }], async (args) => {
+      // An id that is already stored means MODIFY: fields the caller did not
+      // mention keep their current value instead of being wiped (that is what
+      // "modify this role" has to mean).
+      const existing = args.id ? (await listAgents()).find((x) => x.id === args.id) || null : null;
+      const pick = (v, fallback) => (v === undefined || v === null ? fallback : v);
+      const routeFields = (args.provider !== undefined || args.model !== undefined || args.reasoningEffort !== undefined || args.maxTokens !== undefined)
+        ? clean({ provider: args.provider, model: args.model, reasoningEffort: args.reasoningEffort, maxTokens: args.maxTokens })
+        : undefined;
+      const modelField = routeFields !== undefined ? routeFields : (existing ? existing.model : undefined);
+      // Warn at WRITE time about a half-declared pair (that half will never take
+      // effect). The effort-clearing warning is a dispatch-time concern, so a
+      // fully declared pair is compared against itself here (= no warning).
+      const pairWarn = routeFields !== undefined && routeFields !== null
+        ? routeWarnings({ route: routeFields }, (routeFields.provider !== undefined && routeFields.model !== undefined) ? routeFields : null)
+        : [];
+      const a = await upsertAgent({
+        id: args.id,
+        name: pick(args.name, existing ? existing.name : (args.role || undefined)),
+        role: pick(args.role, existing ? existing.role : undefined),
+        systemPrompt: pick(args.systemPrompt, existing ? existing.systemPrompt : undefined),
+        model: modelField,
+        skills: existing ? existing.skills : undefined,
+        tools: args.toolsPreset !== undefined
+          ? Object.assign({}, existing ? existing.tools : {}, { preset: args.toolsPreset })
+          : (existing ? existing.tools : undefined),
+        timeoutMs: pick(args.timeoutMs, existing ? existing.timeoutMs : undefined),
+        permissionPolicy: existing ? existing.permissionPolicy : undefined,
+      });
+      const am = a.model || {};
+      return clean({ ok: true, id: a.id, name: a.name || a.role || a.id, provider: am.provider, model: am.model, reasoningEffort: am.reasoningEffort, maxTokens: am.maxTokens, timeoutMs: a.timeoutMs, toolsPreset: a.tools && a.tools.preset, warning: pairWarn.length ? pairWarn.join(' ') : undefined });
+    }));
+    disposers.push(mk('team_create_workflow', { name: { type: 'string', required: true }, description: { type: 'string' }, nodes: { type: 'object', additionalProperties: true }, route: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' } } }, prompt: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
     disposers.push(mk('team_delegate_agent', { agent: { type: 'string', required: true }, task: { type: 'string', required: true }, acceptanceCriteria: { type: 'string' }, reviewer: { type: 'string' } }, { ok: { type: 'boolean', required: true }, taskId: { type: 'string', required: true }, status: { type: 'string', required: true }, output: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'delegated -> task ' + v.taskId + ' [' + v.status + ']' }], async (args) => {
       const agentsList = await listAgents();
       const def = agentsList.find((a) => a.id === args.agent || a.name === args.agent);
@@ -1422,7 +2048,12 @@ export function apply(ctx) {
         try {
           const who = (def && (def.name || def.role)) || assignee;
           const prompt = 'You are the ' + who + ' agent. Task: ' + (t.requirement || '') + (t.acceptanceCriteria ? '\nAcceptance criteria: ' + t.acceptanceCriteria : '');
-          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, spawnSpecFor(def, dParent), parentToolNote(dParent));
+          // P11: a free delegation has no workflow / node / run layer, so the
+          // ROLE definition is the only route layer -- exactly what this path
+          // used before P11, plus the same verification and the same pair rule.
+          const dDecision = await decideRoute(def, dParent, { parentRoute: routeConfigOf(dParent) });
+          const dBuilt = spawnSpecFor(def, dParent, { decision: dDecision });
+          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''));
           const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'delegated task ' + t.id);
           output = (result.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (result.stopReason !== 'completed') throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + ' [' + started.note + ']');
@@ -1483,6 +2114,61 @@ export function apply(ctx) {
     };
     const query = (url, key) => { try { return new URL(url, 'http://localhost').searchParams.get(key); } catch { return null; } };
 
+    // P11 model catalog for the role form. NEVER 500s: every failure mode is
+    // reported as data inside {ok:true, providers, errors} so the form can fall
+    // back to manual entry while still telling the truth about what is missing.
+    //  * llm missing          -> providers:[], errors explains why
+    //  * listProviders throws -> providers:[], errors
+    //  * one provider's listModels throws/times out -> THAT provider is skipped
+    //    and named in errors; the others are still returned
+    //  * one model's resolveModelInfo throws -> the model is still returned, with
+    //    null context/defaults and empty reasoning, and errors names it
+    // Providers are queried CONCURRENTLY: serial awaits would stack N timeouts.
+    const MODELS_TIMEOUT_MS = 5000;
+    const modelsCatalog = async () => {
+      const llm = ctx.get('llm');
+      if (llm === undefined || llm === null || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+        return { ok: true, providers: [], errors: ['llm 服务不可用（缺少 listProviders/listModels），无法列出模型目录'] };
+      }
+      let list = [];
+      try { const l = llm.listProviders(); list = Array.isArray(l) ? l : []; }
+      catch (e) { return { ok: true, providers: [], errors: ['listProviders 失败：' + String(e && e.message ? e.message : e)] }; }
+      const errors = [];
+      const settled = await Promise.allSettled(list.map(async (p) => {
+        const id = p && typeof p.id === 'string' ? p.id : null;
+        if (id === null) throw new Error('provider 条目缺少 id');
+        const models = await withTimeout(Promise.resolve(llm.listModels(id)), MODELS_TIMEOUT_MS, 'listModels ' + id);
+        const out = [];
+        for (const m of (Array.isArray(models) ? models : [])) {
+          const mid = m && typeof m.id === 'string' ? m.id : null;
+          if (mid === null) continue;
+          let resolved = null;
+          try { resolved = await withTimeout(Promise.resolve(llm.resolveModelInfo(id, mid)), MODELS_TIMEOUT_MS, 'resolveModelInfo ' + id + '/' + mid); }
+          catch (e) { errors.push('provider "' + id + '" model "' + mid + '": resolveModelInfo 失败：' + String(e && e.message ? e.message : e)); }
+          const reasoning = resolved && resolved.reasoning && typeof resolved.reasoning === 'object' ? resolved.reasoning : null;
+          const efforts = reasoning && Array.isArray(reasoning.efforts)
+            ? reasoning.efforts.map((x) => ({ id: x && x.id !== undefined ? x.id : null, name: x && x.name !== undefined ? x.name : (x && x.id !== undefined ? x.id : null) })).filter((x) => x.id !== null)
+            : [];
+          out.push({
+            id: mid,
+            name: m && typeof m.name === 'string' && m.name !== '' ? m.name : mid,
+            description: m && typeof m.description === 'string' ? m.description : null,
+            contextWindow: resolved && resolved.context && typeof resolved.context.contextWindow === 'number' ? resolved.context.contextWindow : null,
+            defaultMaxTokens: resolved && typeof resolved.defaultMaxTokens === 'number' ? resolved.defaultMaxTokens : null,
+            reasoning: { efforts, defaultEffort: reasoning && typeof reasoning.defaultEffort === 'string' ? reasoning.defaultEffort : null },
+          });
+        }
+        return { id, name: p && typeof p.name === 'string' && p.name !== '' ? p.name : id, models: out };
+      }));
+      const providers = [];
+      for (let i = 0; i < settled.length; i++) {
+        const s = settled[i];
+        if (s.status === 'fulfilled') providers.push(s.value);
+        else errors.push('provider "' + ((list[i] && list[i].id) || '?') + '": listModels 失败：' + String(s.reason && s.reason.message ? s.reason.message : s.reason));
+      }
+      return { ok: true, providers, errors };
+    };
+
     const route = (kind, path, handler) => {
       const dispose = web.register({ kind, path, handler });
       disposers.push(dispose);
@@ -1513,6 +2199,9 @@ export function apply(ctx) {
       if (!id) return { ok: false, error: 'missing id' };
       return { ok: true, run: await getRun(id) };
     }));
+    // P11: the model catalog (providers -> models -> efforts) that the role form
+    // needs. Read-only, so no loopback guard -- same as /progress, /role, /agents.
+    route('exact', '/api/team-flowise/models', wrap(async () => modelsCatalog()));
 
     // write endpoints (loopback-fenced)
     route('exact', '/api/team-flowise/agent', wrap(async (req, res) => {
@@ -1553,7 +2242,8 @@ export function apply(ctx) {
       const published = new Promise((resolve) => { publish = (r) => { rec = r; resolve(r); }; });
       // Runs in the background: the scheduler owns the run record from here, so
       // the response reports the id and the board follows it through `/runs`.
-      runWorkflow(body.workflowId, body.input || {}, publish).catch(async (e) => {
+      // `body.route` is the P11 run-level override (highest-priority layer).
+      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route }).catch(async (e) => {
         console.error('team-flowise: run failed', String(e));
         if (!rec) return;
         try {
