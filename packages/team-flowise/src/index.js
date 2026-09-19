@@ -162,6 +162,12 @@ const WORKER_DENY_TOOLS = [
 // runtimes: plan 2m, code 9m, review 3m, test >10m), so the bound is set well
 // above them.
 const NODE_TIMEOUT_MS = 30 * 60 * 1000;
+// The role view shows the worker's COMPLETE report. The task ledger already
+// stores it verbatim, so this cap bounds only what one HTTP response carries.
+const NODE_OUTPUT_MAX = 60000;
+// A reasoning block can be very large at high effort. Keep a bounded trace and
+// report its true length, so a capped trace is never mistaken for a short one.
+const REASONING_MAX = 12000;
 const withTimeout = (p, ms, label) => {
   let timer;
   const guard = new Promise((_res, rej) => {
@@ -349,18 +355,33 @@ export function apply(ctx) {
     }
     return best;
   };
+  // A node's `agent` may be a definition id or a name -- workflows written at
+  // different times use either -- so the UI must group by ONE canonical role
+  // name, or a single role shows up as two separate columns.
+  const roleNamer = async () => {
+    const defs = await listAgents();
+    return (ref) => {
+      if (ref === undefined || ref === null || ref === '') return null;
+      const d = defs.find((x) => x.id === ref || x.name === ref);
+      return (d && (d.name || d.role)) || String(ref);
+    };
+  };
+  const brief = (s, n) => { const t = typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : ''; return t.length > n ? t.slice(0, n) + '…' : t; };
+  const ownerOf = (st, def) => (st.assignee !== undefined ? st.assignee : (def.agent !== undefined ? def.agent : null));
+
   const progressSummary = async (runId) => {
     const run = runId ? await getRun(runId) : await latestRun();
-    if (!run) return { ok: true, run: null, nodes: [], totals: { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 } };
+    if (!run) return { ok: true, run: null, nodes: [], roles: [], totals: { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 } };
     const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
     const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
     const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
     // A deleted/renamed workflow must not blank the board: fall back to whatever
     // the run itself recorded.
     const ids = defs ? Object.keys(defs) : Object.keys(states);
+    const nameOf = await roleNamer();
     const at = now();
     let completed = 0; let failed = 0; let working = 0; let pending = 0;
-    const nodes = ids.map((nid) => {
+    const nodes = ids.map((nid, order) => {
       const def = (defs && defs[nid]) || {};
       const st = states[nid] && typeof states[nid] === 'object' ? states[nid] : {};
       const status = typeof st.status === 'string' ? st.status : 'pending';
@@ -372,19 +393,101 @@ export function apply(ctx) {
       const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
       // Live elapsed for a node still in flight; null until it has started.
       const elapsedMs = startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt);
-      const agent = st.assignee !== undefined ? st.assignee : (def.agent !== undefined ? def.agent : null);
-      return clean({ id: nid, agent, status, startedAt, endedAt, elapsedMs, output: st.output === undefined ? null : st.output, error: st.error });
+      const agent = ownerOf(st, def);
+      return clean({
+        id: nid, order, agent, agentName: nameOf(agent), status, startedAt, endedAt, elapsedMs,
+        output: st.output === undefined ? null : st.output, error: st.error,
+        // Enough of the DAG to draw the interaction diagram, and a short brief
+        // for its edge labels -- the full text is fetched by /role on demand.
+        reviewer: def.reviewer === undefined ? null : def.reviewer,
+        dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
+        brief: brief(def.taskTemplate && def.taskTemplate.requirement, 110),
+      });
     });
     const total = nodes.length;
+    // Per-role roll-up, so the page can show a team summary without re-deriving
+    // it and without a second request.
+    const roles = [];
+    for (const n of nodes) {
+      const key = n.agentName === undefined || n.agentName === null ? '(未指派)' : n.agentName;
+      let r = roles.find((x) => x.name === key);
+      if (!r) { r = { name: key, total: 0, completed: 0, failed: 0, working: 0, pending: 0, elapsedMs: 0 }; roles.push(r); }
+      r.total += 1;
+      if (n.status === 'completed') r.completed += 1;
+      else if (n.status === 'failed') r.failed += 1;
+      else if (n.status === 'working') r.working += 1;
+      else r.pending += 1;
+      if (typeof n.elapsedMs === 'number') r.elapsedMs += n.elapsedMs;
+    }
     // `clean` drops undefined, so normalise every envelope field to null: a run
     // that is still in flight must still expose `endedAt` as a key, otherwise a
     // client reading `run.endedAt` on a fixed shape breaks.
     const num = (v) => (typeof v === 'number' ? v : null);
     return clean({
       ok: true,
-      run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, status: run.status === undefined ? null : run.status, startedAt: num(run.startedAt), endedAt: num(run.endedAt) },
+      run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, workflowName: (wf && wf.name) || null, status: run.status === undefined ? null : run.status, startedAt: num(run.startedAt), endedAt: num(run.endedAt) },
       nodes,
+      roles,
       totals: { total, completed, failed, working, pending, percent: total === 0 ? 0 : Math.round((completed / total) * 100) },
+    });
+  };
+
+  // Full detail for ONE role in one run. Deliberately split from `/progress`:
+  // the page polls the light summary every few seconds, while a role's complete
+  // report (thousands of characters) is fetched only when it is actually opened.
+  const roleDetail = async (runId, role) => {
+    const run = runId ? await getRun(runId) : await latestRun();
+    if (!run) return { ok: true, run: null, role: role || null, nodes: [] };
+    const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
+    const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
+    const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
+    const ids = defs ? Object.keys(defs) : Object.keys(states);
+    const nameOf = await roleNamer();
+    const tasks = await listTasks();
+    const at = now();
+    const out = [];
+    for (let order = 0; order < ids.length; order++) {
+      const nid = ids[order];
+      const def = (defs && defs[nid]) || {};
+      const st = states[nid] && typeof states[nid] === 'object' ? states[nid] : {};
+      const agent = ownerOf(st, def);
+      const agentName = nameOf(agent);
+      if (role && agentName !== role) continue;
+      const owned = tasks.filter((t) => t && t.workflowId === run.workflowId && t.nodeId === nid);
+      owned.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      const task = owned[0] || null;
+      // The ledger keeps the worker's COMPLETE report; the run record keeps a
+      // 200-char slice of it, so prefer the ledger and fall back to the slice.
+      const full = task && typeof task.output === 'string' ? task.output : (typeof st.output === 'string' ? st.output : '');
+      const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
+      const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
+      out.push(clean({
+        id: nid, order, agent, agentName,
+        status: typeof st.status === 'string' ? st.status : 'pending',
+        startedAt, endedAt,
+        elapsedMs: startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt),
+        requirement: (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement) || null,
+        acceptanceCriteria: (def.taskTemplate && def.taskTemplate.acceptanceCriteria) || (task && task.acceptanceCriteria) || null,
+        reviewer: def.reviewer === undefined ? null : def.reviewer,
+        dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
+        output: full === '' ? null : full.slice(0, NODE_OUTPUT_MAX),
+        outputLen: full.length,
+        outputTruncated: full.length > NODE_OUTPUT_MAX,
+        reasoning: typeof st.reasoning === 'string' && st.reasoning !== '' ? st.reasoning : null,
+        reasoningLen: typeof st.reasoningLen === 'number' ? st.reasoningLen : null,
+        tools: st.tools === undefined ? null : st.tools,
+        error: st.error === undefined ? null : st.error,
+        taskId: task ? task.id : (st.taskId === undefined ? null : st.taskId),
+        taskStatus: task ? task.status : null,
+        iteration: task ? task.iteration : null,
+        history: task && Array.isArray(task.history) ? task.history : [],
+      }));
+    }
+    return clean({
+      ok: true,
+      run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, workflowName: (wf && wf.name) || null, status: run.status === undefined ? null : run.status, startedAt: typeof run.startedAt === 'number' ? run.startedAt : null, endedAt: typeof run.endedAt === 'number' ? run.endedAt : null },
+      role: role || null,
+      nodes: out,
     });
   };
 
@@ -503,6 +606,7 @@ export function apply(ctx) {
             taskId = task.id;
             await submitTask(task.id); await startTask(task.id);
             let output = 'no delegate';
+            let reasoning = '';
             if (subagents && node.agent) {
               const def = agentDefs.find((d) => d.id === node.agent || d.name === node.agent);
               const who = (def && (def.name || def.role)) || node.agent || 'team';
@@ -511,7 +615,11 @@ export function apply(ctx) {
               const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, spawnSpecFor(def, parent), parentToolNote(parent));
               toolNote = started.note;
               const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'workflow node ' + nid);
-              output = (result.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+              const blocks = result.output || [];
+              output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+              // Reasoning blocks were already produced by the adapter and simply
+              // thrown away here, which is why a role's "thinking" was invisible.
+              reasoning = blocks.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
               // A worker that did not finish cleanly must not be reported as a
               // successful node: without this an instantly-failing child (e.g.
               // NO_ADAPTER) looked like a completed node with empty output.
@@ -521,13 +629,13 @@ export function apply(ctx) {
             }
             await completeTask(taskId, output, null);
             outputs[nid] = output; completed[nid] = true; succeeded[nid] = true;
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), tools: toolNote } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote, taskId: taskId || null } } });
           }
         }));
       }
@@ -648,6 +756,9 @@ export function apply(ctx) {
     // the workflow definition. GET + no body => directly consumable by
     // Invoke-RestMethod and by the client board's poll loop.
     route('exact', '/api/team-flowise/progress', wrap(async (req) => progressSummary(query(req.url, 'runId'))));
+    // Heavy per-role detail (the complete worker report + reasoning trace),
+    // fetched only when a role is opened rather than on every poll.
+    route('exact', '/api/team-flowise/role', wrap(async (req) => roleDetail(query(req.url, 'runId'), query(req.url, 'agent'))));
     route('exact', '/api/team-flowise/run', wrap(async (req) => {
       const id = query(req.url, 'id');
       if (!id) return { ok: false, error: 'missing id' };

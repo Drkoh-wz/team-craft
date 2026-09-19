@@ -19,8 +19,15 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     { key: 'reworked', label: '需返工', color: '#ef4444' }
   ];
   function statusColor(s) { for (var i = 0; i < STATUS_COLUMNS.length; i++) { if (STATUS_COLUMNS[i].key === s) return STATUS_COLUMNS[i].color; } return '#9aa0a6'; }
-  function Badge(s) {
-    return React.createElement('span', { style: { color: '#fff', background: statusColor(s), borderRadius: 999, padding: '1px 11px', fontSize: 12, whiteSpace: 'nowrap' } }, String(s || ''));
+  // A function component is called with a PROPS OBJECT. This was declared as
+  // `Badge(s)` while every caller wrote `createElement(Badge, null, status)`, so
+  // `s` was `{children: status}`: statusColor() never matched a key and the label
+  // stringified to the literal text "[object Object]". Every status badge in the
+  // board has therefore been rendering that grey placeholder.
+  function Badge(props) {
+    var s = props && props.value !== undefined ? props.value : (props ? props.children : undefined);
+    var label = s === undefined || s === null ? '' : String(s);
+    return React.createElement('span', { style: { color: '#fff', background: statusColor(label), borderRadius: 999, padding: '1px 11px', fontSize: 12, whiteSpace: 'nowrap' } }, label);
   }
 
   var STYLE = '<style>.tf-root{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937)}.tf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tf-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-text-muted,#6b7280)}.tf-tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.tf-toolbar{display:flex;gap:8px}.tf-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;color:var(--dsw-alias-text,#1f2937)}.tf-btn.primary{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-btn.danger{color:#ef4444;border-color:#ef4444}.tf-btn:disabled{opacity:.5;cursor:default}.tf-board{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}.tf-col{min-width:230px;flex:0 0 230px;background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:12px;padding:10px}.tf-col-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.tf-col-title{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}.tf-count{background:var(--dsw-alias-surface,#fff);border-radius:999px;padding:0 8px;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-card{background:var(--dsw-alias-surface,#fff);border-radius:10px;border:1px solid var(--dsw-alias-border,#e5e7eb);padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:box-shadow .15s,border-color .15s}.tf-card:hover{border-color:#3b82f6;box-shadow:0 4px 14px rgba(0,0,0,.08)}.tf-card-req{font-size:13px;font-weight:600;line-height:1.4;margin-bottom:6px}.tf-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-chip{background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:6px;padding:1px 6px;font-size:11px}.tf-list{background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;padding:12px}.tf-row{display:flex;align-items:center;gap:12px;padding:12px 6px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.tf-row:last-child{border-bottom:none}.tf-row-main{flex:1;min-width:0}.tf-row-title{font-size:13px;font-weight:600}.tf-row-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:2px}.tf-icon-btn{background:none;border:none;cursor:pointer;font-size:16px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-icon-btn:hover{color:#3b82f6}.tf-empty{padding:24px;text-align:center;color:var(--dsw-alias-text-muted,#6b7280);font-size:13px}.tf-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999}.tf-modal-card{background:var(--dsw-alias-surface,#fff);border-radius:14px;padding:20px;width:min(560px,92vw);max-height:88vh;overflow:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}.tf-field{margin-bottom:12px}.tf-field-label{font-size:12px;font-weight:600;margin-bottom:5px;color:var(--dsw-alias-text,#1f2937);display:block}.tf-input,.tf-select,.tf-textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);font-size:13px;background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937)}.tf-textarea{min-height:70px;resize:vertical;font-family:inherit}.tf-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}</style>';
@@ -113,7 +120,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         React.createElement('div', { style: { width: 90 } },
           React.createElement('div', { className: 'tf-progress' }, React.createElement('div', { className: 'tf-progress-bar', style: { width: pct + '%' } }))
         ),
-        React.createElement(Badge, null, x.status)
+        React.createElement(Badge, { value: x.status })
       );
     }) : [React.createElement('div', { key: 'e', className: 'tf-empty' }, '暂无运行')];
     return React.createElement('div', { className: 'tf-list' }, rows);
@@ -126,7 +133,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
           React.createElement('div', { className: 'tf-row-title' }, t.requirement),
           React.createElement('div', { className: 'tf-row-sub' }, (t.assignee || '') + (t.reviewer ? ' · 评审:' + t.reviewer : '') + ' · it' + (t.iteration || 1))
         ),
-        React.createElement(Badge, null, t.status),
+        React.createElement(Badge, { value: t.status }),
         React.createElement('button', { className: 'tf-icon-btn', onClick: function () { props.onOpenTask(t); } }, '\u270E')
       );
     }) : [React.createElement('div', { key: 'e', className: 'tf-empty' }, '暂无任务')];
@@ -280,48 +287,38 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   }
 
   // ---------------------------------------------------------------------------
-  // P7-B2 常驻进度面板（shell.overlay / team-progress）
-  // 它与 settings.section 的看板是两个各自独立的 slots.register 条目：独立组件、独立
-  // state、独立 fetch（只打 /api/team-flowise/progress），既不调用看板的 load/patch，
-  // 也不读写看板的任何模块级可变状态。因此它自己的 3s 轮询在结构上不可能改变看板页
-  // 的可见交互状态（标签、弹窗、表单草稿、loading、错误横幅）。
+  // P8: 团队进度注册进侧边栏，取代原先覆盖整帧的浮层。
+  //
+  // 选型依据是实际 SlotMap，并在已安装的 ui-sidebar / ui-layout bundle 里核对了调用链
+  // （不是猜的）：
+  //   sidebar.panellist — kind:list, scope:root, replaceRisk:none；catalog 原文
+  //     "Global panel icons. Each list id addresses the matching main panel;
+  //      the sidebar owns the button and resolves its label from list metadata."
+  //     ownerProps: { size: number; active: boolean }
+  //   main — kind:keyed, scope:root；"Central panel selected by sidebar entry id."
+  // 所以用同一个 id 'team-progress' 注册这两处：侧边栏多出一个图标按钮，点击后
+  // 中央列切到本页。页面占据中央列，结构上不可能遮盖其它元素——原先的
+  // shell.overlay 注册（"遮盖住页面其他案件" 的来源）连同其面板实现已删除。
   // ---------------------------------------------------------------------------
-  var POLL_MS = 3000;
-  var PANEL_COLLAPSED_KEY = 'tf-progress-collapsed';
-  var panelCollapsedMemory = null;  // localStorage 不可用时的模块内回退
+  var POLL_MS = 3000;         // /progress 轻量轮询：只有状态与计时
+  var ROLE_POLL_MS = 5000;    // 角色详情仅在仍有节点在跑时跟着刷新
+  var ORCH = '编排器';
 
-  var PANEL_STYLE = '<style>.tf-pp{position:absolute;right:16px;bottom:16px;width:260px;max-height:40vh;overflow:auto;box-sizing:border-box;background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.16);padding:10px 12px;pointer-events:auto;z-index:1;font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);font-size:12px;color:var(--dsw-alias-text,#1f2937)}.tf-pp.collapsed{display:inline-flex;align-items:center;gap:6px;width:auto;max-width:260px;padding:5px 10px;border-radius:999px;cursor:pointer}.tf-pp-head{display:flex;align-items:center;gap:6px}.tf-pp-title{font-size:12px;font-weight:700;white-space:nowrap}.tf-pp-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tf-pp-spacer{flex:1 1 auto}.tf-pp-badge{border-radius:999px;padding:1px 8px;font-size:11px;color:#fff;white-space:nowrap}.tf-pp-toggle{border:none;background:transparent;cursor:pointer;font-size:11px;line-height:1;padding:2px 4px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pp-toggle:hover{color:#3b82f6}.tf-pp-body{margin-top:8px}.tf-pp-counts{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:6px}.tf-pp-nodes{margin-top:8px;display:flex;flex-direction:column;gap:4px}.tf-pp-node{display:flex;align-items:center;gap:6px;font-size:11px}.tf-pp-node-id{font-weight:600;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tf-pp-node-meta{color:var(--dsw-alias-text-muted,#6b7280);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tf-pp-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;display:inline-block}.tf-pp-err{font-size:11px;color:#ef4444;margin-top:6px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}</style>';
-
-  // 收起状态：优先 localStorage（跨刷新记住），受限上下文/隐私模式下退化为模块内变量。
-  function readPanelCollapsed() {
-    try {
-      if (typeof localStorage !== 'undefined' && localStorage) {
-        var raw = localStorage.getItem(PANEL_COLLAPSED_KEY);
-        if (raw === '1') return true;
-        if (raw === '0') return false;
-      }
-    } catch (e) { /* 存储不可用：用模块内记忆 */ }
-    return panelCollapsedMemory === true;
-  }
-  function writePanelCollapsed(value) {
-    panelCollapsedMemory = value === true;
-    try {
-      if (typeof localStorage !== 'undefined' && localStorage) localStorage.setItem(PANEL_COLLAPSED_KEY, value === true ? '1' : '0');
-    } catch (e) { /* 同上 */ }
-  }
+  var PAGE_STYLE = '<style>.tf-pg{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937);padding:2px}.tf-pg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.tf-pg-title{margin:0;font-size:16px;font-weight:700}.tf-pg-sub{font-size:12px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pg-toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}.tf-pg-sec{margin-top:18px}.tf-pg-sec-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-select{padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937);font-size:12px;max-width:280px}.tf-seq-box{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff)}.tf-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-legend span{display:inline-flex;align-items:center;gap:4px}.tf-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}.tf-chips{display:flex;gap:8px;flex-wrap:wrap}.tf-chip2{display:flex;align-items:center;gap:7px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);border-radius:10px;padding:6px 11px;cursor:pointer;font-size:12px;color:inherit}.tf-chip2:hover{border-color:#3b82f6}.tf-chip2.on{border-color:#3b82f6;box-shadow:inset 0 0 0 1px #3b82f6}.tf-chip2 b{font-weight:700}.tf-ncard{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff);padding:12px 14px;margin-top:10px}.tf-nhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-nid{font-weight:700;font-size:14px}.tf-kv{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-lbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin:12px 0 4px}.tf-pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-surface-2,#f8fafc);border:1px solid var(--dsw-alias-border,#eef2f7);border-radius:8px;padding:10px;max-height:300px;overflow:auto}.tf-pre.tf-reason{border-color:#8b5cf6}.tf-pre.tf-errbox{border-color:#ef4444;color:#b91c1c}.tf-badge2{border-radius:999px;padding:1px 10px;font-size:11px;color:#fff;white-space:nowrap}.tf-empty{color:var(--dsw-alias-text-muted,#6b7280);font-size:13px;padding:14px 0}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}</style>';
 
   var IDLE_COLOR = '#9aa0a6';
   var RUNNING_COLOR = '#3b82f6';
   var FAILED_COLOR = '#ef4444';
+  var DONE_COLOR = '#22c55e';
   var NODE_STATUS = {
-    pending: { label: '等待', color: IDLE_COLOR },
-    working: { label: '进行中', color: RUNNING_COLOR },
-    completed: { label: '已完成', color: '#22c55e' },
-    failed: { label: '失败', color: FAILED_COLOR }
+    pending: { label: '等待', color: IDLE_COLOR, mark: 'tf-ar-i' },
+    working: { label: '进行中', color: RUNNING_COLOR, mark: 'tf-ar-w' },
+    completed: { label: '已完成', color: DONE_COLOR, mark: 'tf-ar-c' },
+    failed: { label: '失败', color: FAILED_COLOR, mark: 'tf-ar-f' }
   };
   var RUN_STATUS = {
     running: { label: '运行中', color: RUNNING_COLOR },
-    completed: { label: '已完成', color: '#22c55e' },
+    completed: { label: '已完成', color: DONE_COLOR },
     failed: { label: '失败', color: FAILED_COLOR },
     cancelled: { label: '已取消', color: IDLE_COLOR },
     interrupted: { label: '已中断', color: IDLE_COLOR }
@@ -336,107 +333,393 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     if (min < 60) return min + 'm' + (sec % 60 ? String(sec % 60) + 's' : '');
     return Math.floor(min / 60) + 'h' + (min % 60) + 'm';
   }
+  function fmtClock(ts) {
+    if (typeof ts !== 'number' || !isFinite(ts)) return '—';
+    try { return new Date(ts).toLocaleTimeString(); } catch (e) { return '—'; }
+  }
+  function roleOf(n) { return n && n.agentName ? String(n.agentName) : '未指派'; }
+  function Dot(props) { return React.createElement('span', { className: 'tf-dot', style: { background: props.color } }); }
+  // NOTE: a function component receives a PROPS OBJECT. Declaring this as
+  // `function StatusBadge(status)` and calling it via createElement(status) —
+  // the shape the shipped `Badge` above uses — makes nodeInfo() see
+  // `{children: 'completed'}` and render the fallback for every status.
+  function StatusBadge(props) {
+    var info = nodeInfo(props && props.status);
+    return React.createElement('span', { className: 'tf-badge2', style: { background: info.color } }, info.label);
+  }
 
-  // 常驻面板：定义在模块作用域（不在 Board 内），因此不会随看板重挂载，也不继承看板的闭包。
-  function ProgressPanel() {
-    var st = React.useState({ data: null, error: null });
-    var state = st[0]; var setState = st[1];
-    var cs = React.useState(readPanelCollapsed);
-    var collapsed = cs[0]; var setCollapsed = cs[1];
+  // 调度波次：同一波次的节点是并发跑的。时序图按 (波次, 定义顺序) 排列，这样
+  // 图里节点的先后关系与调度器真实的 dependsOn 波次一致，而不是文件里的顺序。
+  function waveOrder(nodes) {
+    var byId = {};
+    for (var i = 0; i < nodes.length; i++) byId[nodes[i].id] = nodes[i];
+    var level = {};
+    function lvl(id, seen) {
+      if (level[id] !== undefined) return level[id];
+      if (seen[id]) return 0;
+      seen[id] = true;
+      var deps = (byId[id] && byId[id].dependsOn) || [];
+      var m = 0;
+      for (var d = 0; d < deps.length; d++) if (byId[deps[d]]) m = Math.max(m, lvl(deps[d], seen) + 1);
+      level[id] = m;
+      return m;
+    }
+    for (var j = 0; j < nodes.length; j++) lvl(nodes[j].id, {});
+    var out = nodes.slice();
+    out.sort(function (a, b) {
+      var la = level[a.id] || 0; var lb = level[b.id] || 0;
+      if (la !== lb) return la - lb;
+      return (a.order || 0) - (b.order || 0);
+    });
+    return out;
+  }
 
-    // 面板唯一的数据来源：/api/team-flowise/progress。不请求 /agents /tasks /runs /workflows，
-    // 所以面板的每次轮询都不会触碰看板的数据面（可被桩 fetch 逐条证明）。
-    var tick = React.useCallback(function () {
-      return get('/progress').then(function (d) {
-        setState(function () { return { data: d, error: null }; });
-      }).catch(function (e) {
-        var msg = e && e.message ? e.message : String(e);
-        setState(function (prev) { return { data: prev.data, error: msg }; });
-      });
+  // ---------------------------------------------------------------------------
+  // UML 时序图（SVG）。参与者 = 编排器 + 该工作流里出现过的每个角色；消息 =
+  // 每个节点的一次派发（实线）与一次交付（虚线）。
+  //
+  // 只画调度器真实存在的那两条交互：它按 dependsOn 波次把任务交给 node.agent，
+  // 等子代理结束后收回产出。`reviewer` 只是记录在任务上的元数据——调度器并不
+  // 为它起一步——所以这里不画评审箭头，画了就是伪造。
+  // ---------------------------------------------------------------------------
+  function SequenceDiagram(props) {
+    var nodes = waveOrder(props.nodes || []);
+    var names = [ORCH];
+    for (var i = 0; i < nodes.length; i++) {
+      var who = roleOf(nodes[i]);
+      if (names.indexOf(who) === -1) names.push(who);
+    }
+    var LANE_W = 176; var LEFT = 100; var RIGHT = 64;
+    var HEAD_H = 46; var ROW_H = 42; var TOP = 14; var BOTTOM = 20;
+    var width = LEFT + Math.max(0, names.length - 1) * LANE_W + RIGHT;
+    // 每个节点占两行：第 2k 行是派发，第 2k+1 行是交付。
+    var height = HEAD_H + TOP + nodes.length * 2 * ROW_H + BOTTOM;
+    var laneX = function (name) { var idx = names.indexOf(name); return LEFT + (idx < 0 ? 0 : idx) * LANE_W; };
+    var rowY = function (k) { return HEAD_H + TOP + k * ROW_H + 16; };
+    var kids = [];
+
+    kids.push(React.createElement('defs', { key: 'defs' },
+      React.createElement('marker', { id: 'tf-ar-i', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, React.createElement('path', { d: 'M0,0 L10,5 L0,10 z', fill: IDLE_COLOR })),
+      React.createElement('marker', { id: 'tf-ar-w', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, React.createElement('path', { d: 'M0,0 L10,5 L0,10 z', fill: RUNNING_COLOR })),
+      React.createElement('marker', { id: 'tf-ar-c', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, React.createElement('path', { d: 'M0,0 L10,5 L0,10 z', fill: DONE_COLOR })),
+      React.createElement('marker', { id: 'tf-ar-f', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, React.createElement('path', { d: 'M0,0 L10,5 L0,10 z', fill: FAILED_COLOR }))
+    ));
+
+    // 生命线 + 参与者头（角色头可点击）
+    for (var p = 0; p < names.length; p++) {
+      (function (nm, idx) {
+        var x = laneX(nm);
+        var isSel = props.selected === nm;
+        var isOrch = nm === ORCH;
+        kids.push(React.createElement('line', { key: 'll' + idx, x1: x, y1: HEAD_H, x2: x, y2: height - BOTTOM, stroke: 'var(--dsw-alias-border,#e5e7eb)', strokeDasharray: '4 4', strokeWidth: 1 }));
+        kids.push(React.createElement('g', {
+          key: 'hd' + idx,
+          style: { cursor: isOrch ? 'default' : 'pointer' },
+          onClick: isOrch ? null : function () { props.onSelect(nm); }
+        },
+          React.createElement('rect', { x: x - 66, y: 8, width: 132, height: 30, rx: 9, fill: isSel ? '#3b82f6' : 'var(--dsw-alias-surface-2,#f3f4f6)', stroke: isSel ? '#3b82f6' : 'var(--dsw-alias-border,#e5e7eb)' }),
+          React.createElement('text', { x: x, y: 27, textAnchor: 'middle', fontSize: 12, fontWeight: 600, fill: isSel ? '#fff' : 'var(--dsw-alias-text,#1f2937)' }, isOrch ? nm : nm + (props.working && props.working[nm] ? ' ●' : ''))
+        ));
+      })(names[p], p);
+    }
+
+    // 消息
+    for (var k = 0; k < nodes.length; k++) {
+      (function (n, k) {
+        var who = roleOf(n);
+        var info = nodeInfo(n.status);
+        var xRole = laneX(who); var xOrch = laneX(ORCH);
+        var yCall = rowY(2 * k); var yRet = rowY(2 * k + 1);
+
+        // 激活条：该角色在这两个消息之间处于活动状态
+        kids.push(React.createElement('rect', { key: 'act' + k, x: xRole - 5, y: yCall - 8, width: 10, height: (yRet - yCall) + 16, rx: 3, fill: info.color, opacity: 0.85 }));
+
+        // 派发：编排器 -> 角色（<title> 提供悬停全文，line 本身不能带子元素）
+        kids.push(React.createElement('g', { key: 'c' + k },
+          React.createElement('title', null, '「' + n.id + '」派发给 ' + who + (n.brief ? '：' + n.brief : '')),
+          React.createElement('line', { x1: xOrch, y1: yCall, x2: xRole, y2: yCall, stroke: info.color, strokeWidth: 1.5, markerEnd: 'url(#' + info.mark + ')' })
+        ));
+        kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fontWeight: 600, fill: info.color }, '«task» ' + n.id));
+        kids.push(React.createElement('text', { key: 'cs' + k, x: (xOrch + xRole) / 2, y: yCall + 13, textAnchor: 'middle', fontSize: 10, fill: 'var(--dsw-alias-text-muted,#6b7280)' }, n.brief ? (n.brief.length > 34 ? n.brief.slice(0, 34) + '…' : n.brief) : ''));
+
+        // 交付：角色 -> 编排器（虚线）
+        var retLabel = '«' + (n.status === 'failed' ? 'failed' : 'result') + '» ' + info.label + (typeof n.elapsedMs === 'number' ? ' · ' + fmtElapsed(n.elapsedMs) : '');
+        kids.push(React.createElement('line', { key: 'r' + k, x1: xRole, y1: yRet, x2: xOrch, y2: yRet, stroke: info.color, strokeWidth: 1.3, strokeDasharray: '5 4', markerEnd: 'url(#' + info.mark + ')' }));
+        kids.push(React.createElement('text', { key: 'rl' + k, x: (xOrch + xRole) / 2, y: yRet - 6, textAnchor: 'middle', fontSize: 11, fill: info.color }, retLabel));
+      })(nodes[k], k);
+    }
+
+    return React.createElement('div', { className: 'tf-seq-box' },
+      React.createElement('svg', { width: width, height: height, viewBox: '0 0 ' + width + ' ' + height, style: { display: 'block' } }, kids)
+    );
+  }
+
+  // 一个角色的单个节点卡片：任务要求 / 验收标准 / 工具策略 / 思考过程 / 完整产出
+  function NodeCard(props) {
+    var n = props.node;
+    var info = nodeInfo(n.status);
+    var rows = [];
+    rows.push(React.createElement('div', { className: 'tf-nhead', key: 'h' },
+      React.createElement('span', { className: 'tf-nid' }, n.id),
+      React.createElement(StatusBadge, { key: 'b', status: n.status }),
+      React.createElement('span', { className: 'tf-kv' }, (n.elapsedMs !== null && n.elapsedMs !== undefined ? fmtElapsed(n.elapsedMs) : '—') + ' · ' + fmtClock(n.startedAt) + ' → ' + fmtClock(n.endedAt)),
+      n.reviewer ? React.createElement('span', { className: 'tf-kv' }, '评审(仅记录): ' + n.reviewer) : null,
+      n.dependsOn && n.dependsOn.length ? React.createElement('span', { className: 'tf-kv' }, '依赖: ' + n.dependsOn.join(', ')) : null,
+      n.taskId ? React.createElement('span', { className: 'tf-kv' }, 'task ' + String(n.taskId).slice(-6) + ' · ' + (n.taskStatus || '') + (n.iteration ? ' · it' + n.iteration : '')) : null
+    ));
+
+    if (n.requirement) rows.push(React.createElement('div', { key: 'req' },
+      React.createElement('div', { className: 'tf-lbl' }, '任务要求'),
+      React.createElement('pre', { className: 'tf-pre' }, n.requirement)
+    ));
+    if (n.acceptanceCriteria) rows.push(React.createElement('div', { key: 'ac' },
+      React.createElement('div', { className: 'tf-lbl' }, '验收标准'),
+      React.createElement('pre', { className: 'tf-pre' }, n.acceptanceCriteria)
+    ));
+    if (n.tools) rows.push(React.createElement('div', { key: 'tl' },
+      React.createElement('div', { className: 'tf-lbl' }, '工具策略'),
+      React.createElement('div', { className: 'tf-kv', style: { wordBreak: 'break-word' } }, n.tools)
+    ));
+
+    // 思考过程：来自子代理 result.output 里的 reasoning 块。以前这一路被直接丢弃，
+    // 所以角色"在想什么"完全不可见。
+    rows.push(React.createElement('div', { key: 'rs' },
+      React.createElement('div', { className: 'tf-lbl' }, '思考过程 (reasoning)' + (n.reasoningLen ? ' · ' + n.reasoningLen + ' 字' + (n.reasoningLen > (n.reasoning || '').length ? '（已截断）' : '') : '')),
+      n.reasoning
+        ? React.createElement('pre', { className: 'tf-pre tf-reason' }, n.reasoning)
+        : React.createElement('div', { className: 'tf-kv' }, '本次未产生可记录的推理块（该模型/该次调用没有返回 reasoning 内容）。以下完整产出仍是该角色真实的工作结果。')
+    ));
+
+    if (n.error) rows.push(React.createElement('div', { key: 'er' },
+      React.createElement('div', { className: 'tf-lbl' }, '失败原因'),
+      React.createElement('pre', { className: 'tf-pre tf-errbox' }, n.error)
+    ));
+
+    rows.push(React.createElement('div', { key: 'out' },
+      React.createElement('div', { className: 'tf-lbl' }, '完整产出' + (n.outputLen ? ' · ' + n.outputLen + ' 字' + (n.outputTruncated ? '（超出上限，已截断）' : '') : '')),
+      n.output
+        ? React.createElement('pre', { className: 'tf-pre' }, n.output)
+        : React.createElement('div', { className: 'tf-kv' }, '该节点还没有产出。')
+    ));
+
+    return React.createElement('div', { className: 'tf-ncard' }, rows);
+  }
+
+  function RoleDetail(props) {
+    var detail = props.detail;
+    var nodes = (detail && detail.nodes) || [];
+    if (props.error) return React.createElement('div', { className: 'tf-ncard' }, React.createElement('div', { className: 'tf-kv', style: { color: '#ef4444' } }, '角色详情获取失败: ' + props.error));
+    if (!detail) return React.createElement('div', { className: 'tf-empty' }, '正在载入 ' + (props.role || '') + ' 的详情…');
+    if (!nodes.length) return React.createElement('div', { className: 'tf-empty' }, '该角色在本次运行里没有节点。');
+    var head = React.createElement('div', { className: 'tf-pg-head', key: 'h' },
+      React.createElement('h3', { className: 'tf-pg-title', style: { fontSize: 14 } }, String(props.role || '')),
+      React.createElement('span', { className: 'tf-kv' }, nodes.length + ' 个节点'),
+      React.createElement('span', { className: 'tf-kv' }, '合计 ' + fmtElapsed(nodes.reduce(function (a, n) { return a + (typeof n.elapsedMs === 'number' ? n.elapsedMs : 0); }, 0)))
+    );
+    return React.createElement('div', null, head, nodes.map(function (n) { return React.createElement(NodeCard, { key: n.id, node: n }); }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 主面板：团队进度。注册进 main(keyed) 的 'team-progress' 单元，由侧边栏
+  // sidebar.panellist 的同名条目选中。它只读 /progress（轻量轮询）与 /role
+  // （点开某角色时按需取，带完整报告），不触碰看板的任何状态。
+  // ---------------------------------------------------------------------------
+  function TeamProgressPage() {
+    var st = React.useState({ data: null, error: null, role: null, detail: null, detailError: null, runs: [] });
+    var s = st[0]; var set = st[1];
+    var rs = React.useState(null); var runId = rs[0]; var setRunId = rs[1];
+
+    // 只做函数式更新：把渲染期快照合并回去，长生命周期的轮询回调就会用旧值
+    // 覆盖新值（看板标签回退那次事故的根因）。
+    var patch = React.useCallback(function (p) {
+      set(function (prev) { return Object.assign({}, prev, typeof p === 'function' ? p(prev) : p); });
     }, []);
 
-    // 展开时每 3s 轮询；收起时不挂定时器（挂载/展开时立即取一次）。
+    var tick = React.useCallback(function () {
+      var q = runId ? ('?runId=' + encodeURIComponent(runId)) : '';
+      return get('/progress' + q).then(function (d) {
+        patch({ data: d, error: null });
+      }).catch(function (e) {
+        var msg = e && e.message ? e.message : String(e);
+        patch(function (prev) { return { data: prev.data, error: msg }; });
+      });
+    }, [runId, patch]);
+
     React.useEffect(function () {
       tick();
-      if (collapsed) return undefined;
       var id = setInterval(tick, POLL_MS);
       return function () { clearInterval(id); };
-    }, [tick, collapsed]);
+    }, [tick]);
 
-    function toggle() { var next = !collapsed; setCollapsed(next); writePanelCollapsed(next); }
+    // 运行列表只取一次，用于切换查看历史运行。
+    React.useEffect(function () {
+      get('/runs').then(function (d) { patch({ runs: d.runs || [] }); }).catch(function () { /* 运行列表不是必需 */ });
+    }, [patch]);
 
-    var data = state.data || null;
-    var run = data !== null && data.run ? data.run : null;
-    var nodes = data !== null && data.nodes ? data.nodes : [];
-    var totals = data !== null && data.totals ? data.totals : { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 };
-    var failed = totals.failed || 0;
+    var nodes = (s.data && s.data.nodes) || [];
+    var roles = (s.data && s.data.roles) || [];
+
+    // 选中角色是派生值，不是状态：这样数据刷新后不可能出现"选中了一个已经不存在
+    // 的角色"这种悬空引用，也不需要 effect 去同步。
+    var selected = null;
+    if (s.role && roles.some(function (r) { return r.name === s.role; })) selected = s.role;
+    else if (roles.length) {
+      var busy0 = roles.filter(function (r) { return r.working > 0; })[0];
+      selected = busy0 ? busy0.name : roles[0].name;
+    }
+    var selectedRef = React.useRef(null);
+    selectedRef.current = selected;
+
+    var loadDetail = React.useCallback(function (roleName) {
+      if (!roleName) { patch({ detail: null }); return Promise.resolve(); }
+      var q = '?agent=' + encodeURIComponent(roleName) + (runId ? '&runId=' + encodeURIComponent(runId) : '');
+      return get('/role' + q).then(function (d) {
+        patch({ detail: d, detailError: null });
+      }).catch(function (e) {
+        patch({ detailError: e && e.message ? e.message : String(e) });
+      });
+    }, [runId, patch]);
+
+    React.useEffect(function () {
+      if (!selected) { patch({ detail: null }); return; }
+      patch({ detail: null, detailError: null });
+      loadDetail(selected);
+    }, [selected, loadDetail, patch]);
+
+    var busy = selected !== null && nodes.some(function (n) { return roleOf(n) === selected && n.status === 'working'; });
+    React.useEffect(function () {
+      if (!selected || !busy) return undefined;
+      var id = setInterval(function () { loadDetail(selectedRef.current); }, ROLE_POLL_MS);
+      return function () { clearInterval(id); };
+    }, [selected, busy, loadDetail]);
+
+    var data = s.data || null;
+    var run = data && data.run ? data.run : null;
+    var totals = (data && data.totals) || { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 };
     var percent = totals.percent || 0;
-    var isFailed = (run !== null && run.status === 'failed') || failed > 0;
-    var accent = run === null ? IDLE_COLOR : (isFailed ? FAILED_COLOR : (run.status === 'running' ? RUNNING_COLOR : runInfo(run.status).color));
-    var shortId = run !== null && run.id ? String(run.id).slice(-6) : '';
-    var styleEl = React.createElement('style', { key: 'css' }, PANEL_STYLE);
+    var isFailed = (run !== null && run.status === 'failed') || (totals.failed || 0) > 0;
+    var barColor = run === null ? IDLE_COLOR : (isFailed ? FAILED_COLOR : (run.status === 'running' ? RUNNING_COLOR : runInfo(run.status).color));
 
-    // 收起态：一行紧凑胶囊；与展开态共用同一个组件类型与同一个根节点类型（div），
-    // 所以切换不会丢 hook 状态。
-    if (collapsed) {
-      return React.createElement('div', { className: 'tf-pp collapsed', style: { pointerEvents: 'auto' }, title: '多角色运行进度（点击展开）', onClick: toggle },
-        styleEl,
-        React.createElement('span', { className: 'tf-pp-dot', style: { background: accent } }),
-        React.createElement('span', { className: 'tf-pp-title' }, '多角色运行'),
-        React.createElement('span', { className: 'tf-pp-sub' }, run === null ? '暂无运行' : (percent + '%' + (failed ? ' · 失败' + failed : (totals.working ? ' · 进行' + totals.working : ''))))
+    var header = React.createElement('div', { className: 'tf-pg-head' },
+      React.createElement('h2', { className: 'tf-pg-title' }, '多 Agent 团队进度'),
+      run === null ? React.createElement('span', { className: 'tf-pg-sub' }, '暂无运行') : React.createElement('span', { className: 'tf-badge2', style: { background: runInfo(run.status).color } }, runInfo(run.status).label),
+      run === null ? null : React.createElement('span', { className: 'tf-pg-sub' }, (run.workflowName || run.workflowId || '(未知工作流)') + ' · #' + String(run.id).slice(-6)),
+      React.createElement('div', { className: 'tf-pg-toolbar' },
+        React.createElement('select', {
+          className: 'tf-select',
+          value: runId || '',
+          onChange: function (e) { setRunId(e.target.value || null); }
+        },
+          React.createElement('option', { value: '' }, '最新运行'),
+          (s.runs || []).slice(0, 40).map(function (x) {
+            return React.createElement('option', { key: x.id, value: x.id }, (x.workflowId || '?') + ' · #' + String(x.id).slice(-6) + ' · ' + (runInfo(x.status).label));
+          })
+        ),
+        React.createElement('button', { className: 'tf-btn', onClick: function () { tick(); if (selectedRef.current) loadDetail(selectedRef.current); } }, '刷新')
+      )
+    );
+
+    var content;
+    if (run === null) {
+      content = React.createElement('div', { className: 'tf-empty' }, s.error ? ('进度获取失败: ' + s.error) : '暂无运行。启动一个工作流后，这里会显示每个角色的交互时序与产出。');
+    } else {
+      content = React.createElement('div', null,
+        React.createElement('div', { className: 'tf-pg-sec', key: 'sum' },
+          React.createElement('div', { className: 'tf-kv' }, percent + '% · 完成 ' + (totals.completed || 0) + '/' + (totals.total || 0) + ' · 失败 ' + (totals.failed || 0) + ' · 进行中 ' + (totals.working || 0) + ' · 等待 ' + (totals.pending || 0) + ' · 开始 ' + fmtClock(run.startedAt) + (run.endedAt ? ' · 结束 ' + fmtClock(run.endedAt) : '')),
+          React.createElement('div', { className: 'tf-progress' }, React.createElement('div', { className: 'tf-progress-bar', style: { width: percent + '%', background: barColor } }))
+        ),
+        React.createElement('div', { className: 'tf-pg-sec', key: 'seq' },
+          React.createElement('div', { className: 'tf-pg-sec-h' }, '角色交互时序（UML sequence · 按 dependsOn 波次线性化，同波次为并发）'),
+          React.createElement('div', { className: 'tf-legend' },
+            React.createElement('span', null, React.createElement(Dot, { color: DONE_COLOR }), ' 已完成'),
+            React.createElement('span', null, React.createElement(Dot, { color: RUNNING_COLOR }), ' 进行中'),
+            React.createElement('span', null, React.createElement(Dot, { color: FAILED_COLOR }), ' 失败'),
+            React.createElement('span', null, React.createElement(Dot, { color: IDLE_COLOR }), ' 等待'),
+            React.createElement('span', null, '实线=派发任务，虚线=交付产出；点角色名查看其思考过程与完整产出')
+          ),
+          React.createElement(SequenceDiagram, {
+            nodes: nodes,
+            selected: selected,
+            working: (function () { var m = {}; roles.forEach(function (r) { if (r.working > 0) m[r.name] = true; }); return m; })(),
+            onSelect: function (nm) { patch({ role: nm }); }
+          })
+        ),
+        React.createElement('div', { className: 'tf-pg-sec', key: 'roles' },
+          React.createElement('div', { className: 'tf-pg-sec-h' }, '角色（点击查看该角色的思考过程与任务进展）'),
+          React.createElement('div', { className: 'tf-chips' }, roles.map(function (r) {
+            var c = r.failed > 0 ? FAILED_COLOR : (r.working > 0 ? RUNNING_COLOR : (r.completed === r.total ? DONE_COLOR : IDLE_COLOR));
+            return React.createElement('button', {
+              key: r.name,
+              className: 'tf-chip2' + (r.name === selected ? ' on' : ''),
+              onClick: function () { patch({ role: r.name }); }
+            },
+              React.createElement(Dot, { color: c }),
+              React.createElement('b', null, r.name),
+              React.createElement('span', { className: 'tf-kv' }, r.completed + '/' + r.total + (r.working ? ' · 进行中' + r.working : '') + (r.failed ? ' · 失败' + r.failed : '') + (r.elapsedMs ? ' · ' + fmtElapsed(r.elapsedMs) : ''))
+            );
+          }))
+        ),
+        React.createElement('div', { className: 'tf-pg-sec', key: 'detail' },
+          React.createElement('div', { className: 'tf-pg-sec-h' }, '角色详情'),
+          React.createElement(RoleDetail, { role: selected, detail: s.detail, error: s.detailError })
+        )
       );
     }
 
-    var rows = [];
-    rows.push(React.createElement('div', { className: 'tf-pp-head', key: 'head' },
-      React.createElement('span', { className: 'tf-pp-title' }, '多角色运行'),
-      React.createElement('span', { className: 'tf-pp-sub' }, run === null ? '暂无运行' : ('#' + shortId)),
-      React.createElement('span', { className: 'tf-pp-spacer' }),
-      run === null ? null : React.createElement('span', { className: 'tf-pp-badge', style: { background: runInfo(run.status).color } }, runInfo(run.status).label),
-      React.createElement('button', { className: 'tf-pp-toggle', title: '收起面板', onClick: toggle }, '收起')
-    ));
+    return React.createElement('div', { className: 'tf-pg' },
+      React.createElement('style', null, PAGE_STYLE),
+      header,
+      s.error && run !== null ? React.createElement('div', { className: 'tf-kv', style: { color: '#ef4444', marginTop: 6 } }, '进度获取失败: ' + s.error) : null,
+      content
+    );
+  }
 
-    // 无运行时只显示空闲态：不画 0% 进度条，避免被误读为「跑起来了但没进展」。
-    if (run === null) {
-      rows.push(React.createElement('div', { className: 'tf-pp-body', key: 'idle' }, '暂无运行'));
-    } else {
-      rows.push(React.createElement('div', { className: 'tf-pp-body', key: 'body' },
-        React.createElement('div', { className: 'tf-pp-sub' }, String(run.workflowId || '(未知工作流)')),
-        React.createElement('div', { className: 'tf-progress' },
-          React.createElement('div', { className: 'tf-progress-bar', style: { width: percent + '%', background: isFailed ? FAILED_COLOR : RUNNING_COLOR } })
-        ),
-        React.createElement('div', { className: 'tf-pp-counts' }, percent + '% · 完成 ' + (totals.completed || 0) + '/' + (totals.total || 0) + ' · 失败 ' + failed + ' · 进行中 ' + (totals.working || 0) + ' · 等待 ' + (totals.pending || 0)),
-        nodes.length ? React.createElement('div', { className: 'tf-pp-nodes' }, nodes.map(function (n) {
-          var info = nodeInfo(n.status);
-          var tail = n.status === 'pending' ? '等待' : (fmtElapsed(n.elapsedMs) || info.label);
-          return React.createElement('div', { key: n.id, className: 'tf-pp-node' },
-            React.createElement('span', { className: 'tf-pp-dot', style: { background: info.color } }),
-            React.createElement('span', { className: 'tf-pp-node-id' }, String(n.id)),
-            React.createElement('span', { className: 'tf-pp-node-meta' }, (n.agent ? String(n.agent) + ' · ' : '') + info.label + (tail === info.label ? '' : ' · ' + tail))
-          );
-        })) : null
-      ));
-    }
-    if (state.error) rows.push(React.createElement('div', { className: 'tf-pp-err', key: 'err' }, '进度获取失败: ' + state.error));
-
-    return React.createElement('div', { className: 'tf-pp', style: { pointerEvents: 'auto' } }, styleEl, rows);
+  // sidebar.panellist 的 ownerProps 只有 { size, active }：侧边栏拥有这个按钮，
+  // 我们只负责图标本身，所以这里不取任何数据、不挂任何定时器。
+  function TeamIcon(props) {
+    var size = typeof props.size === 'number' && props.size > 0 ? props.size : 20;
+    var c = props.active ? '#3b82f6' : 'currentColor';
+    return React.createElement('svg', {
+      width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+      stroke: c, strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
+      'aria-hidden': 'true', focusable: 'false'
+    },
+      React.createElement('title', null, '多 Agent 团队进度'),
+      React.createElement('circle', { cx: 12, cy: 5.5, r: 2.6 }),
+      React.createElement('circle', { cx: 5, cy: 17.5, r: 2.6 }),
+      React.createElement('circle', { cx: 19, cy: 17.5, r: 2.6 }),
+      React.createElement('path', { d: 'M10.6 7.9 6.4 15.2' }),
+      React.createElement('path', { d: 'M13.4 7.9 17.6 15.2' }),
+      React.createElement('path', { d: 'M7.6 17.5h8.8' })
+    );
   }
 
   function apply(ctx) {
     var slots = ctx.get('slots');
     if (slots === undefined) return;
-    // 两个条目共存：list 类槽位是叠加而非替换，所以看板与新面板互不干扰。
+    // 同一个 id 注册两处，正是 shell 自己的机制（已在已安装的 bundle 里逐行核对）：
+    //   ui-sidebar 对每个 panellist 条目渲染
+    //     renderSlot("sidebar.panellist", { size, active }, { only: id })
+    //     并 onClick: () => selectPanel(id)
+    //   ui-layout 的 MainPanel = renderSlot("main", {}, { entryKey: activePanelId ?? "conversation" })
+    //   且 hasMainPanel = (id) => entries("main").some(e => e.options.key === id)
+    // 关键耦合：selectPanel 在没有同名 main 条目时**直接抛错**
+    //   (layout.selectPanel: main panel "X" is not registered)
+    // 所以 id 与 key 必须完全一致，且两者必须同时注册——少一个，点图标就是抛异常。
+    slots.inject('sidebar.panellist', function () {
+      var un = slots.register({ name: 'sidebar.panellist', id: 'team-progress', order: 800, label: '多 Agent 团队进度' }, TeamIcon);
+      return function () { un(); };
+    });
+    slots.inject('main', function () {
+      var un = slots.register({ name: 'main', key: 'team-progress' }, TeamProgressPage);
+      return function () { un(); };
+    });
+    // settings.section 的看板保持原样：它是一个独立页面，与进度页互不影响。
     slots.inject('settings.section', function () {
       var un = slots.register({ name: 'settings.section', id: 'team', order: 500, label: '多 Agent 团队' }, Board);
       return function () { un(); };
     });
-    // shell.overlay：kind:'list'、scope:'root' 的全帧浮层，位于所有列之上、在各列滚动
-    // 容器之外且始终挂载；该层本身 click-through，条目必须自己 opt-in 指针事件
-    // （面板容器已显式 pointer-events:auto）。新 id 'team-progress' 是叠加注册。
-    slots.inject('shell.overlay', function () {
-      var un = slots.register({ name: 'shell.overlay', id: 'team-progress', order: 900 }, ProgressPanel);
-      return function () { un(); };
-    });
   }
+
   exports.name = 'team-flowise-client'; exports.inject = ['slots', 'locale']; exports.apply = apply; return module.exports;
 } });
