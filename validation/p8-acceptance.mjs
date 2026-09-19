@@ -107,6 +107,9 @@ try { bundle = evaluateBundle(clientSource); check('client bundle evaluates with
 catch (e) { check('client bundle evaluates without throwing', false, String(e && e.message ? e.message : e)) }
 
 if (bundle) {
+  check('bundle exposes a real plugin face (name / inject / apply)',
+    typeof bundle.face.apply === 'function' && Array.isArray(bundle.face.inject) && typeof bundle.face.name === 'string',
+    typeof bundle.face.name === 'string' ? bundle.face.name : typeof bundle.face)
   const applied = captureSlots(bundle.face)
   check('face.apply(ctx) does not throw', applied.error === undefined, applied.error ? String(applied.error) : '')
 
@@ -139,8 +142,14 @@ if (bundle) {
     check('sidebar icon reflects the active state', icon !== null && String(icon.props.stroke) === '#3b82f6', String(icon && icon.props && icon.props.stroke))
     const iconIdle = bundle.react.mount(bundle.react.createElement(iconReg.component, { size: 18, active: false }))
     check('sidebar icon falls back to currentColor when inactive', String(iconIdle.props.stroke) === 'currentColor', String(iconIdle.props.stroke))
-    check('sidebar icon does not fetch anything (ownership: the sidebar owns the button)',
-      flatten(icon).indexOf('progress') === -1)
+    // A real check: the previous one asserted a substring was absent from a text
+    // dump, which a component that fetched would still satisfy.
+    const iconFetches = []
+    const fetchBefore = globalThis.fetch
+    globalThis.fetch = (input) => { iconFetches.push(String(typeof input === 'string' ? input : input.url)); return Promise.resolve({ ok: false, json: () => Promise.resolve({}) }) }
+    bundle.react.mount(bundle.react.createElement(iconReg.component, { size: 20, active: false }))
+    globalThis.fetch = fetchBefore
+    check('sidebar icon performs no fetch of its own', iconFetches.length === 0, JSON.stringify(iconFetches))
   }
 
   // -------------------------------------------------------------------------
@@ -215,6 +224,10 @@ if (bundle) {
     { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000, brief: '修复标签回退缺陷', dependsOn: ['plan'], reviewer: 'Reviewer', output: 'CODE-SLICE' },
     { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000, brief: '建造侧边栏进度页', dependsOn: ['fix-tabs'], reviewer: null, output: null },
     { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000, brief: '独立验收', dependsOn: ['panel'], reviewer: null, output: null },
+    // A node with no agent is legal. It is the case where the server roll-up and
+    // the client's lane label must agree on one placeholder literal, and it is
+    // never dispatched -- so it must get NO arrow.
+    { id: 'docs', order: 4, agent: null, agentName: null, status: 'pending', startedAt: null, endedAt: null, elapsedMs: null, brief: '撰写文档', dependsOn: ['verify'], reviewer: null, output: null },
   ]
   const PROGRESS_FIXTURE = {
     ok: true, run: RUN,
@@ -222,9 +235,10 @@ if (bundle) {
       { name: 'Planner', total: 1, completed: 1, failed: 0, working: 0, pending: 0, elapsedMs: 600000 },
       { name: 'Coder', total: 2, completed: 1, failed: 0, working: 1, pending: 0, elapsedMs: 240000 },
       { name: 'Validator', total: 1, completed: 0, failed: 1, working: 0, pending: 0, elapsedMs: 20000 },
+      { name: '(未指派)', total: 1, completed: 0, failed: 0, working: 0, pending: 1, elapsedMs: 0 },
     ],
     nodes: NODES,
-    totals: { total: 4, completed: 2, failed: 1, working: 1, pending: 0, percent: 50 },
+    totals: { total: 5, completed: 2, failed: 1, working: 1, pending: 1, percent: 40 },
   }
   const DETAIL = [
     { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000,
@@ -233,8 +247,8 @@ if (bundle) {
       tools: 'visible=41 filter={...}', error: null, taskId: 'vqmv3f31', taskStatus: 'completed', iteration: 0, history: [] },
     { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000,
       requirement: 'REQ-FIXTABS 修复标签', acceptanceCriteria: 'AC-FIXTABS', reviewer: 'Reviewer', dependsOn: ['plan'],
-      output: 'CODE-FULL-REPORT-BODY', outputLen: 6780, outputTruncated: false, reasoning: 'CODE-REASONING-TRACE', reasoningLen: 21,
-      tools: 'visible=41 filter={...}', error: null, taskId: 'ate14pml', taskStatus: 'completed', iteration: 0, history: [] },
+      output: 'CODE-FULL-REPORT-BODY', outputLen: 90000, outputTruncated: true, reasoning: 'CODE-REASONING-TRACE', reasoningLen: 21,
+      tools: 'visible=41 filter={...}', error: null, taskId: 'ate14pml', taskStatus: 'completed', iteration: 0 },
     { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000,
       requirement: 'REQ-PANEL 建造进度页', acceptanceCriteria: 'AC-PANEL', reviewer: null, dependsOn: ['fix-tabs'],
       output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
@@ -242,7 +256,11 @@ if (bundle) {
     { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000,
       requirement: 'REQ-VERIFY 独立验收', acceptanceCriteria: 'AC-VERIFY', reviewer: null, dependsOn: ['panel'],
       output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
-      tools: 'visible=41 filter={...}', error: 'VERIFY-FAILURE-TEXT', taskId: 'y1', taskStatus: 'settle', iteration: 0, history: [] },
+      tools: 'visible=41 filter={...}', error: 'VERIFY-FAILURE-TEXT', taskId: 'y1', taskStatus: 'settle', iteration: 0 },
+    { id: 'docs', order: 4, agent: null, agentName: null, status: 'pending', startedAt: null, endedAt: null, elapsedMs: null,
+      requirement: 'REQ-DOCS 撰写文档', acceptanceCriteria: 'AC-DOCS', reviewer: null, dependsOn: ['verify'],
+      output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
+      tools: null, error: null, taskId: null, taskStatus: null, iteration: null },
   ]
   const roleCalls = []
   globalThis.fetch = (input) => {
@@ -252,7 +270,9 @@ if (bundle) {
     else if (url.pathname === '/api/team-flowise/role') {
       const agent = url.searchParams.get('agent')
       roleCalls.push(agent)
-      body = { ok: true, run: RUN, role: agent, nodes: DETAIL.filter((n) => n.agentName === agent) }
+      // Mirror the host: a node with no agent is served under the '(未指派)' role.
+      const keyOf = (n) => (n.agentName === null || n.agentName === undefined ? '(未指派)' : n.agentName)
+      body = { ok: true, run: RUN, role: agent, nodes: DETAIL.filter((n) => keyOf(n) === agent) }
     } else if (url.pathname === '/api/team-flowise/runs') body = { runs: [RUN] }
     else body = { agents: [], workflows: [], tasks: [] }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
@@ -289,20 +309,33 @@ if (bundle) {
     const svg = findNode(page, (n) => n.type === 'svg')
     check('UML diagram renders as an <svg>', svg !== undefined, svg === undefined ? 'none' : 'w=' + String(svg.props.width) + ' h=' + String(svg.props.height))
 
-    // Every node contributes exactly two messages: one dispatch, one delivery.
+    // An arrow asserts that an interaction HAPPENED. Exactly: two for a node that
+    // returned (completed/failed), one for a node still running, none for a node
+    // never dispatched.
     let arrows = 0
     let headers = 0
     walk(page, (n) => {
       if (n.type === 'line' && n.props && n.props.markerEnd !== undefined) arrows += 1
       if (n.type === 'rect' && n.props && n.props.rx === 9) headers += 1
     })
-    check('one dispatch + one delivery arrow per node (2 x 4)', arrows === NODES.length * 2, 'arrows=' + arrows)
-    check('one lifeline header per participant (编排器 + 3 roles)', headers === 4, 'headers=' + headers)
+    const expectedArrows = NODES.reduce((a, n) => a + (n.status === 'completed' || n.status === 'failed' ? 2 : n.status === 'working' ? 1 : 0), 0)
+    check('arrow count equals what the scheduler has actually done (2 returned / 1 running / 0 pending)',
+      arrows === expectedArrows, 'arrows=' + arrows + ' expected=' + expectedArrows)
+    check('a never-dispatched node is labelled as such rather than given an arrow',
+      findNode(page, (n) => n.type === 'text' && String(n.props.children || '').indexOf('尚未派发') !== -1) !== undefined)
+    check('a running node is shown as not yet delivered',
+      findNode(page, (n) => n.type === 'text' && String(n.props.children || '').indexOf('尚未交付') !== -1) !== undefined)
 
-    for (const nm of ['编排器', 'Planner', 'Coder', 'Validator']) {
-      check('diagram shows participant "' + nm + '"', text.indexOf(nm) !== -1)
-    }
-    for (const n of NODES) {
+    // B2 guard: the lanes must be EXACTLY the server's role roll-up plus the
+    // orchestrator. A second placeholder literal for an unassigned node would
+    // render one role under two different names.
+    const expectedParticipants = ['编排器'].concat(PROGRESS_FIXTURE.roles.map((r) => r.name))
+    check('one lifeline per participant, matching /progress roles exactly (no second placeholder literal)',
+      headers === expectedParticipants.length, 'headers=' + headers + ' expected=' + JSON.stringify(expectedParticipants))
+    check('every /progress role appears as a lane', expectedParticipants.every((nm) => text.indexOf(nm) !== -1),
+      JSON.stringify(expectedParticipants.filter((nm) => text.indexOf(nm) === -1)))
+
+    for (const n of NODES.filter((x) => x.status !== 'pending')) {
       check('diagram labels the dispatch of node "' + n.id + '"', text.indexOf('«task» ' + n.id) !== -1)
     }
     check('diagram distinguishes a failed node from a delivered one',
@@ -318,11 +351,13 @@ if (bundle) {
     check('role detail shows the tool policy note', text.indexOf('visible=41') !== -1)
     check('role detail is honest when a node produced no reasoning block', text.indexOf('本次未产生可记录的推理块') !== -1)
     check('role detail marks a recorded-only reviewer as such', text.indexOf('评审(仅记录)') !== -1)
+    check('role detail discloses a truncated report instead of passing it off as whole',
+      text.indexOf('超出上限，已截断') !== -1)
 
     // Clicking another role must fetch THAT role and swap the detail.
     const chips = []
     walk(page, (n) => { if (n.type === 'button' && String(n.props.className || '').indexOf('tf-chip2') === 0) chips.push(n) })
-    check('one role chip per role', chips.length === 3, 'chips=' + chips.length)
+    check('one role chip per role', chips.length === PROGRESS_FIXTURE.roles.length, 'chips=' + chips.length)
     const plannerChip = chips.filter((c) => flatten(c).indexOf('Planner') !== -1)[0]
     try {
       plannerChip.props.onClick()
@@ -338,7 +373,20 @@ if (bundle) {
     }
 
     check('run selector lists the run', flatten(page).indexOf('P8 夹具工作流') !== -1)
-    check('page shows the aggregate the sidebar summary needs', flatten(page).indexOf('50%') !== -1)
+    check('page shows the aggregate the sidebar summary needs', flatten(page).indexOf('40%') !== -1)
+
+    // The unassigned lane's detail must resolve rather than reporting "no nodes".
+    const unassignedChip = chips.filter((c) => flatten(c).indexOf('(未指派)') !== -1)[0]
+    try {
+      unassignedChip.props.onClick()
+      settle()
+      page = await pump()
+      const t3 = flatten(page)
+      check('the unassigned role chip shows its own node detail',
+        t3.indexOf('REQ-DOCS 撰写文档') !== -1 && t3.indexOf('该角色在本次运行里没有节点') === -1)
+    } catch (e) {
+      check('the unassigned role chip shows its own node detail', false, String(e && e.message ? e.message : e))
+    }
   }
 
   for (const d of allDisposers) if (d && typeof d.dispose === 'function') { try { d.dispose() } catch { /* ignore */ } }
@@ -371,18 +419,27 @@ if (prog.status === 401 || prog.status === 404) {
       'this process still serves the pre-P8 payload; restart required')
     deferred('/api/team-flowise/role (per-role detail)', 'the route is not registered in this process; restart required')
   } else {
-    const withoutName = (p.nodes || []).filter((n) => n.agentName === undefined)
-    check('every node carries a normalized agentName (role grouping works)', withoutName.length === 0,
-      withoutName.length ? JSON.stringify(withoutName[0]) : '')
+    // `clean()` drops only undefined and roleNamer returns null (never undefined)
+    // for an unassigned node, so filtering on `=== undefined` could never fail and
+    // could never catch the placeholder mismatch that B2 was.
+    const badName = (p.nodes || []).filter((n) => !('agentName' in n) || (n.agentName !== null && typeof n.agentName !== 'string'))
+    check('every node carries agentName as a string or null', badName.length === 0, badName.length ? JSON.stringify(badName[0]) : '')
     const withoutDag = (p.nodes || []).filter((n) => !Array.isArray(n.dependsOn))
     check('every node carries dependsOn (the diagram needs the DAG)', withoutDag.length === 0)
-    check('run envelope carries workflowName', p.run === null || 'workflowName' in (p.run || {}), JSON.stringify(p.run))
+    check('/progress exposes a workflowName key on the run envelope', p.run === null || 'workflowName' in (p.run || {}), JSON.stringify(p.run))
+    // The live form of the B2 guard: the server's roll-up names must be exactly the
+    // normalised node roles, so one role cannot appear under two literals.
+    const rollUpNames = (p.roles || []).map((r) => r.name).sort()
+    const nodeNames = [...new Set((p.nodes || []).map((n) => (n.agentName === null ? '(未指派)' : n.agentName)))].sort()
+    check('roles roll-up names exactly the node roles (one placeholder literal)',
+      rollUpNames.length === nodeNames.length && nodeNames.every((x) => rollUpNames.includes(x)),
+      'roles=' + JSON.stringify(rollUpNames) + ' nodes=' + JSON.stringify(nodeNames))
     check('roles roll-up agrees with the node counts', (p.roles || []).reduce((a, r) => a + r.total, 0) === (p.nodes || []).length,
       'roles=' + JSON.stringify(p.roles))
     console.log('       run=' + JSON.stringify(p.run))
     for (const n of (p.nodes || [])) console.log('       node ' + String(n.id).padEnd(14) + String(n.status).padEnd(11) + String(n.agentName).padEnd(12) + 'brief=' + String(n.brief).slice(0, 28))
 
-    const role = (p.nodes || []).filter((n) => n.status === 'completed')[0]
+    const role = (p.nodes || []).filter((n) => n.status === 'completed' && typeof n.agentName === 'string')[0]
     if (role === undefined) deferred('/api/team-flowise/role', 'no completed node to read a role for yet')
     else {
       const r = await get('/api/team-flowise/role?agent=' + encodeURIComponent(role.agentName))
@@ -460,6 +517,16 @@ if (process.argv.includes('--smoke')) {
       !!(st && typeof st.startedAt === 'number' && typeof st.endedAt === 'number'),
       JSON.stringify(st && { startedAt: st.startedAt, endedAt: st.endedAt }))
     check('the settled node recorded its taskId', !!(st && typeof st.taskId === 'string'), String(st && st.taskId))
+    // B1 guard: /role must serve THIS run's task. Joining on (workflowId, nodeId)
+    // and taking the newest would silently serve a later run's report instead.
+    if (st && typeof st.taskId === 'string') {
+      const b1 = await get('/api/team-flowise/role?agent=' + encodeURIComponent('Validator') + '&runId=' + encodeURIComponent(runId))
+      const b1n = ((b1.json || {}).nodes || []).filter((n) => n.id === 'ping')[0]
+      check('B1: /role serves THIS run\'s task (joined by recorded taskId, not newest-for-node)',
+        b1n !== undefined && b1n.taskId === st.taskId, 'role taskId=' + String(b1n && b1n.taskId) + ' run taskId=' + st.taskId)
+      check('B1: /role echoes the run it was asked about',
+        ((b1.json || {}).run || {}).id === runId, JSON.stringify((b1.json || {}).run))
+    }
 
     const sr = await get('/api/team-flowise/role?agent=' + encodeURIComponent('Validator'))
     const sn = ((sr.json || {}).nodes || []).filter((n) => n.id === 'ping')[0]
@@ -486,4 +553,9 @@ if (pending.length) {
   for (const p of pending) console.log('  - ' + p)
 }
 console.log(failures === 0 ? '\nRESULT: PASS' + (pending.length ? ' with ' + pending.length + ' restart-gated item(s)' : '') : '\nRESULT: FAIL')
+// Let undici's keep-alive sockets and any closing async handle go idle first. On
+// Windows an abrupt process.exit() while libuv handles are mid-close trips
+// `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)` in async.c, which
+// reports a spurious failure out of an otherwise perfectly clean run.
+await sleep(400)
 process.exit(failures === 0 ? 0 : 1)

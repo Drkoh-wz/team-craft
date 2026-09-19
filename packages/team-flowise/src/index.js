@@ -165,6 +165,9 @@ const NODE_TIMEOUT_MS = 30 * 60 * 1000;
 // The role view shows the worker's COMPLETE report. The task ledger already
 // stores it verbatim, so this cap bounds only what one HTTP response carries.
 const NODE_OUTPUT_MAX = 60000;
+// ...and bound the whole /role response too, not just each node: a role with
+// many nodes is otherwise re-sent in full on every 5s poll.
+const NODE_OUTPUT_MAX_TOTAL = 120000;
 // A reasoning block can be very large at high effort. Keep a bounded trace and
 // report its true length, so a capped trace is never mistaken for a short one.
 const REASONING_MAX = 12000;
@@ -446,6 +449,7 @@ export function apply(ctx) {
     const tasks = await listTasks();
     const at = now();
     const out = [];
+    let budget = NODE_OUTPUT_MAX_TOTAL;
     for (let order = 0; order < ids.length; order++) {
       const nid = ids[order];
       const def = (defs && defs[nid]) || {};
@@ -453,12 +457,24 @@ export function apply(ctx) {
       const agent = ownerOf(st, def);
       const agentName = nameOf(agent);
       if (role && agentName !== role) continue;
-      const owned = tasks.filter((t) => t && t.workflowId === run.workflowId && t.nodeId === nid);
-      owned.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      const task = owned[0] || null;
+      // Tasks carry (workflowId, nodeId) but NO run id, and every run creates a
+      // FRESH task per node -- so "the newest task for this node" can belong to a
+      // different run of the same workflow, which would present another run's
+      // deliverable as this one's. Prefer the task id this run actually recorded;
+      // only fall back to a ledger scan bounded by the run's own time window, for
+      // runs recorded before that id existed.
+      let task = null;
+      if (typeof st.taskId === 'string' && st.taskId !== '') task = await getTask(st.taskId);
+      if (!task) {
+        const owned = tasks.filter((t) => t && t.workflowId === run.workflowId && t.nodeId === nid);
+        owned.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        task = owned.filter((t) => typeof t.createdAt === 'number' && t.createdAt >= run.startedAt && (typeof run.endedAt !== 'number' || t.createdAt <= run.endedAt))[0] || null;
+      }
       // The ledger keeps the worker's COMPLETE report; the run record keeps a
       // 200-char slice of it, so prefer the ledger and fall back to the slice.
       const full = task && typeof task.output === 'string' ? task.output : (typeof st.output === 'string' ? st.output : '');
+      const take = Math.max(0, Math.min(NODE_OUTPUT_MAX, budget));
+      budget -= Math.min(full.length, take);
       const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
       const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
       out.push(clean({
@@ -470,9 +486,9 @@ export function apply(ctx) {
         acceptanceCriteria: (def.taskTemplate && def.taskTemplate.acceptanceCriteria) || (task && task.acceptanceCriteria) || null,
         reviewer: def.reviewer === undefined ? null : def.reviewer,
         dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
-        output: full === '' ? null : full.slice(0, NODE_OUTPUT_MAX),
+        output: full === '' ? null : full.slice(0, take),
         outputLen: full.length,
-        outputTruncated: full.length > NODE_OUTPUT_MAX,
+        outputTruncated: full.length > take,
         reasoning: typeof st.reasoning === 'string' && st.reasoning !== '' ? st.reasoning : null,
         reasoningLen: typeof st.reasoningLen === 'number' ? st.reasoningLen : null,
         tools: st.tools === undefined ? null : st.tools,
@@ -480,7 +496,6 @@ export function apply(ctx) {
         taskId: task ? task.id : (st.taskId === undefined ? null : st.taskId),
         taskStatus: task ? task.status : null,
         iteration: task ? task.iteration : null,
-        history: task && Array.isArray(task.history) ? task.history : [],
       }));
     }
     return clean({
@@ -594,6 +609,10 @@ export function apply(ctx) {
           // What tool policy the worker actually started under; recorded on the
           // node so a silently-unfiltered worker is visible instead of inferred.
           let toolNote = '';
+          // Declared OUTSIDE the try so the catch below can persist it too: a node
+          // that fails after emitting reasoning DID produce a trace, and the role
+          // view would otherwise state that it produced none.
+          let reasoning = '';
           // This node's own lifetime. `startedAt` is captured ONCE, here, and then
           // re-sent with every later write for this node: setRunState merges
           // `nodeStates` one level deep (`{...cur.nodeStates, ...patch.nodeStates}`),
@@ -606,7 +625,6 @@ export function apply(ctx) {
             taskId = task.id;
             await submitTask(task.id); await startTask(task.id);
             let output = 'no delegate';
-            let reasoning = '';
             if (subagents && node.agent) {
               const def = agentDefs.find((d) => d.id === node.agent || d.name === node.agent);
               const who = (def && (def.name || def.role)) || node.agent || 'team';
@@ -635,7 +653,7 @@ export function apply(ctx) {
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote, taskId: taskId || null } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
           }
         }));
       }
