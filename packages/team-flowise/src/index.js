@@ -42,6 +42,9 @@ const agentDefSchema = z.object({
 
 const workflowNodeSchema = z.object({
   id: z.string().min(1),
+  // A human-readable name for this step. Without one the UI can only show the id
+  // ("fix-tabs"), which says nothing about what the work actually was.
+  title: z.string().optional(),
   agent: z.string().optional(),
   taskTemplate: z.object({ requirement: z.string().optional(), acceptanceCriteria: z.string().optional() }).optional(),
   dependsOn: z.array(z.string()).default([]),
@@ -370,6 +373,23 @@ export function apply(ctx) {
     };
   };
   const brief = (s, n) => { const t = typeof s === 'string' ? s.replace(/\s+/g, ' ').trim() : ''; return t.length > n ? t.slice(0, n) + '…' : t; };
+  // A readable name for one node, so the UI never has to lead with a raw id.
+  // Preference: an explicit node title, then the 【…】/[…] tag a requirement
+  // conventionally opens with, then the requirement's own opening words.
+  const nodeTitle = (def, requirement) => {
+    if (def && typeof def.title === 'string' && def.title.trim() !== '') return def.title.trim();
+    const req = typeof requirement === 'string' ? requirement : '';
+    const tag = req.match(/[【\[]([^】\]]{2,40})[】\]]/);
+    if (tag) return tag[1].trim();
+    return brief(req, 40);
+  };
+  // The worker's own opening line is the most honest one-line summary of what it
+  // produced, and cheap enough to keep on every node for the light payload.
+  const firstLine = (s, n) => {
+    const line = String(s === undefined || s === null ? '' : s).split('\n').map((x) => x.trim()).filter((x) => x !== '')[0] || '';
+    const plain = line.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim();
+    return plain.length > n ? plain.slice(0, n) + '…' : plain;
+  };
   const ownerOf = (st, def) => (st.assignee !== undefined ? st.assignee : (def.agent !== undefined ? def.agent : null));
 
   const progressSummary = async (runId) => {
@@ -405,6 +425,8 @@ export function apply(ctx) {
         reviewer: def.reviewer === undefined ? null : def.reviewer,
         dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
         brief: brief(def.taskTemplate && def.taskTemplate.requirement, 110),
+        title: nodeTitle(def, def.taskTemplate && def.taskTemplate.requirement) || null,
+        summary: st.summary === undefined ? null : st.summary,
       });
     });
     const total = nodes.length;
@@ -482,6 +504,8 @@ export function apply(ctx) {
         status: typeof st.status === 'string' ? st.status : 'pending',
         startedAt, endedAt,
         elapsedMs: startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt),
+        title: nodeTitle(def, (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement)) || null,
+        summary: st.summary === undefined ? null : st.summary,
         requirement: (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement) || null,
         acceptanceCriteria: (def.taskTemplate && def.taskTemplate.acceptanceCriteria) || (task && task.acceptanceCriteria) || null,
         reviewer: def.reviewer === undefined ? null : def.reviewer,
@@ -647,13 +671,13 @@ export function apply(ctx) {
             }
             await completeTask(taskId, output, null);
             outputs[nid] = output; completed[nid] = true; succeeded[nid] = true;
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
           }
         }));
       }

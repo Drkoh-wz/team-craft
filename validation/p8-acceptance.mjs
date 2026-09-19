@@ -78,22 +78,31 @@ function evaluateBundle(source) {
 // Own capture stub: the harness's applyToSlots keys entries by `name/id`, which
 // collapses every KEYED slot (main) into `main/undefined` and would hide the
 // very registration this phase exists to check.
-function captureSlots(face) {
+function captureSlots(face, withTabs) {
   const regs = []
   const injected = []
+  const tabTypes = []
   const slots = {
     inject(name, cb) { injected.push(name); return cb() },
     register(options, component) { regs.push({ options, component }); return () => {} },
   }
   const locale = { register() { return () => {} } }
   const ctx = {
-    get(name) { if (name === 'slots') return slots; if (name === 'locale') return locale; return undefined },
+    get(name) {
+      if (name === 'slots') return slots
+      if (name === 'locale') return locale
+      if (name === 'sidebarRightTabs') {
+        if (withTabs === false) return undefined
+        return { register(definition) { tabTypes.push(definition); return () => {} } }
+      }
+      return undefined
+    },
     effect(cb) { const d = cb(); return () => {} },
     logger: { warn() {}, error() {}, info() {} },
   }
   let error
   try { face.apply(ctx) } catch (e) { error = e }
-  return { regs, injected, error }
+  return { regs, injected, tabTypes, error }
 }
 
 // ===========================================================================
@@ -129,7 +138,52 @@ if (bundle) {
   check('no shell.overlay registration remains (that was the covering overlay)',
     byName('shell.overlay').length === 0, JSON.stringify(byName('shell.overlay').map((r) => r.options.id)))
   check('kanban page still registered (settings.section/team)', !!board && board.options.id === 'team', board ? String(board.options.id) : 'none')
-  check('exactly three slot entries are contributed', applied.regs.length === 3, 'n=' + applied.regs.length)
+  check('five slot entries are contributed (panellist, main, pane body, pane title, kanban)',
+    applied.regs.length === 5, 'n=' + applied.regs.length)
+
+  // -------------------------------------------------------------------------
+  // The docked right-sidebar pane (the actual "sidebar" surface).
+  const paneId = applied.tabTypes.length ? applied.tabTypes[0].id : null
+  check('registers exactly one right-sidebar tab type', applied.tabTypes.length === 1, 'n=' + applied.tabTypes.length)
+  check('the tab type has a non-empty id and kind',
+    !!paneId && typeof applied.tabTypes[0].kind === 'string' && applied.tabTypes[0].kind.length > 0,
+    JSON.stringify(applied.tabTypes[0] && { id: applied.tabTypes[0].id, kind: applied.tabTypes[0].kind }))
+  check('the tab type resolves a human title()', (() => {
+    const t = applied.tabTypes[0] && applied.tabTypes[0].title
+    return typeof t === 'function' && typeof t() === 'string' && t().length > 0
+  })(), String(applied.tabTypes[0] && applied.tabTypes[0].title && applied.tabTypes[0].title()))
+  // The guide entry IS the user's way in: GuideBody's onPick calls
+  // tab.actions.openTab(entry.kind), so a guide entry needs no address pattern.
+  const guide = (applied.tabTypes[0] && applied.tabTypes[0].guide) || []
+  check('the tab type contributes a guide entry (the click-to-open path)',
+    guide.length === 1 && typeof guide[0].title === 'function' && typeof guide[0].description === 'function' && typeof guide[0].icon === 'function' && typeof guide[0].order === 'number',
+    JSON.stringify(guide.map((g) => ({ order: g.order, title: typeof g.title === 'function' ? g.title() : g.title, icon: typeof g.icon }))))
+  check('the guide icon is a component that renders an <svg>', (() => {
+    if (!guide.length || typeof guide[0].icon !== 'function') return false
+    const node = bundle.react.mount(bundle.react.createElement(guide[0].icon, { size: 16, className: 'x' }))
+    return node !== null && node.type === 'svg' && node.props.width === 16
+  })())
+  check('the pane body registers under the tab type id (the keyed dispatch contract)',
+    byName('sidebar.right.pane.tab').length === 1 && byName('sidebar.right.pane.tab')[0].options.key === paneId,
+    JSON.stringify(byName('sidebar.right.pane.tab').map((r) => r.options.key)))
+  check('the pane chip title registers under the same id',
+    byName('sidebar.right.pane.tab.title').length === 1 && byName('sidebar.right.pane.tab.title')[0].options.key === paneId,
+    JSON.stringify(byName('sidebar.right.pane.tab.title').map((r) => r.options.key)))
+  check('the pane body renders without throwing',
+    (() => { try { return bundle.react.mount(bundle.react.createElement(byName('sidebar.right.pane.tab')[0].component)) !== null } catch (e) { return false } })())
+  check('the pane chip title renders the readable name, not an id', (() => {
+    try {
+      const node = bundle.react.mount(bundle.react.createElement(byName('sidebar.right.pane.tab.title')[0].component))
+      return flatten(node).indexOf('多 Agent 进度') !== -1
+    } catch (e) { return false }
+  })())
+
+  // If the right-sidebar package is absent the plugin must still work: the pane is
+  // an optional capability, not a hard dependency.
+  const withoutTabs = captureSlots(bundle.face, false)
+  check('without sidebarRightTabs the plugin still applies and keeps its other surfaces',
+    withoutTabs.error === undefined && withoutTabs.regs.length === 3 && withoutTabs.tabTypes.length === 0,
+    'error=' + String(withoutTabs.error) + ' regs=' + withoutTabs.regs.length)
 
   // -------------------------------------------------------------------------
   // The sidebar icon: sidebar.panellist hands over ONLY { size, active }.
@@ -218,16 +272,25 @@ if (bundle) {
   // -------------------------------------------------------------------------
   // The progress page, driven from deterministic fixtures.
   const NOW = Date.now()
-  const RUN = { id: 'runp8fixture', workflowId: 'wf-p8', workflowName: 'P8 夹具工作流', status: 'running', startedAt: NOW - 900000, endedAt: null }
+  // A real /runs record carries nodeStates, and the selector's "N 节点" is derived
+  // from it -- so the fixture must carry it too.
+  const RUN = {
+    id: 'runp8fixture', workflowId: 'wf-p8', workflowName: 'P8 夹具工作流', status: 'running',
+    startedAt: NOW - 900000, endedAt: null,
+    nodeStates: {
+      plan: { status: 'completed' }, 'fix-tabs': { status: 'completed' }, panel: { status: 'working' },
+      verify: { status: 'failed' }, docs: { status: 'pending' },
+    },
+  }
   const NODES = [
-    { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000, brief: '制定实施计划', dependsOn: [], reviewer: null, output: 'PLAN-SLICE' },
-    { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000, brief: '修复标签回退缺陷', dependsOn: ['plan'], reviewer: 'Reviewer', output: 'CODE-SLICE' },
-    { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000, brief: '建造侧边栏进度页', dependsOn: ['fix-tabs'], reviewer: null, output: null },
-    { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000, brief: '独立验收', dependsOn: ['panel'], reviewer: null, output: null },
+    { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000, title: 'P7 计划', summary: '计划已写入 P7-PLAN.md', brief: '制定实施计划', dependsOn: [], reviewer: null, output: 'PLAN-SLICE' },
+    { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000, title: 'P7-A 修复标签回退缺陷', summary: '唯一改动 client/index.js', brief: '修复标签回退缺陷', dependsOn: ['plan'], reviewer: 'Reviewer', output: 'CODE-SLICE' },
+    { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000, title: 'P7-B1 进度数据面', summary: null, brief: '建造侧边栏进度页', dependsOn: ['fix-tabs'], reviewer: null, output: null },
+    { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000, title: 'P7 独立验收', summary: '失败：VERIFY-FAILURE-TEXT', brief: '独立验收', dependsOn: ['panel'], reviewer: null, output: null },
     // A node with no agent is legal. It is the case where the server roll-up and
     // the client's lane label must agree on one placeholder literal, and it is
     // never dispatched -- so it must get NO arrow.
-    { id: 'docs', order: 4, agent: null, agentName: null, status: 'pending', startedAt: null, endedAt: null, elapsedMs: null, brief: '撰写文档', dependsOn: ['verify'], reviewer: null, output: null },
+    { id: 'docs', order: 4, agent: null, agentName: null, status: 'pending', startedAt: null, endedAt: null, elapsedMs: null, title: '撰写文档', summary: null, brief: '撰写文档', dependsOn: ['verify'], reviewer: null, output: null },
   ]
   const PROGRESS_FIXTURE = {
     ok: true, run: RUN,
@@ -242,22 +305,27 @@ if (bundle) {
   }
   const DETAIL = [
     { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000,
+      title: 'P7 计划', summary: '计划已写入 P7-PLAN.md',
       requirement: 'REQ-PLAN 制定计划', acceptanceCriteria: 'AC-PLAN', reviewer: null, dependsOn: [],
       output: 'PLAN-FULL-REPORT-BODY', outputLen: 2000, outputTruncated: false, reasoning: 'PLAN-REASONING-TRACE', reasoningLen: 20,
       tools: 'visible=41 filter={...}', error: null, taskId: 'vqmv3f31', taskStatus: 'completed', iteration: 0, history: [] },
     { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000,
+      title: 'P7-A 修复标签回退缺陷', summary: '唯一改动 client/index.js',
       requirement: 'REQ-FIXTABS 修复标签', acceptanceCriteria: 'AC-FIXTABS', reviewer: 'Reviewer', dependsOn: ['plan'],
       output: 'CODE-FULL-REPORT-BODY', outputLen: 90000, outputTruncated: true, reasoning: 'CODE-REASONING-TRACE', reasoningLen: 21,
       tools: 'visible=41 filter={...}', error: null, taskId: 'ate14pml', taskStatus: 'completed', iteration: 0 },
     { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000,
+      title: 'P7-B1 进度数据面', summary: null,
       requirement: 'REQ-PANEL 建造进度页', acceptanceCriteria: 'AC-PANEL', reviewer: null, dependsOn: ['fix-tabs'],
       output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
       tools: 'visible=41 filter={...}', error: null, taskId: 'x1', taskStatus: 'working', iteration: 0, history: [] },
     { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000,
+      title: 'P7 独立验收', summary: '失败：VERIFY-FAILURE-TEXT',
       requirement: 'REQ-VERIFY 独立验收', acceptanceCriteria: 'AC-VERIFY', reviewer: null, dependsOn: ['panel'],
       output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
       tools: 'visible=41 filter={...}', error: 'VERIFY-FAILURE-TEXT', taskId: 'y1', taskStatus: 'settle', iteration: 0 },
     { id: 'docs', order: 4, agent: null, agentName: null, status: 'pending', startedAt: null, endedAt: null, elapsedMs: null,
+      title: '撰写文档', summary: null,
       requirement: 'REQ-DOCS 撰写文档', acceptanceCriteria: 'AC-DOCS', reviewer: null, dependsOn: ['verify'],
       output: null, outputLen: 0, outputTruncated: false, reasoning: null, reasoningLen: null,
       tools: null, error: null, taskId: null, taskStatus: null, iteration: null },
@@ -274,6 +342,7 @@ if (bundle) {
       const keyOf = (n) => (n.agentName === null || n.agentName === undefined ? '(未指派)' : n.agentName)
       body = { ok: true, run: RUN, role: agent, nodes: DETAIL.filter((n) => keyOf(n) === agent) }
     } else if (url.pathname === '/api/team-flowise/runs') body = { runs: [RUN] }
+    else if (url.pathname === '/api/team-flowise/workflows') body = { workflows: [{ id: 'wf-p8', name: 'P8 夹具工作流', nodes: {} }] }
     else body = { agents: [], workflows: [], tasks: [] }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
   }
@@ -336,8 +405,12 @@ if (bundle) {
       JSON.stringify(expectedParticipants.filter((nm) => text.indexOf(nm) === -1)))
 
     for (const n of NODES.filter((x) => x.status !== 'pending')) {
-      check('diagram labels the dispatch of node "' + n.id + '"', text.indexOf('«task» ' + n.id) !== -1)
+      check('diagram labels the dispatch of "' + n.title + '" by its readable title', text.indexOf('«task» ' + n.title) !== -1)
     }
+    check('the diagram keeps the raw node id as secondary metadata, not as the label',
+      text.indexOf('#fix-tabs') !== -1)
+    check('a returned node shows its own output summary in the diagram',
+      text.indexOf('唯一改动 client/index.js') !== -1)
     check('diagram distinguishes a failed node from a delivered one',
       text.indexOf('«failed»') !== -1 && text.indexOf('«result»') !== -1)
     check('diagram carries the node briefs', text.indexOf('修复标签回退缺陷') !== -1)
@@ -373,6 +446,9 @@ if (bundle) {
     }
 
     check('run selector lists the run', flatten(page).indexOf('P8 夹具工作流') !== -1)
+    check('the run selector is readable (workflow name + node count, not a bare id)',
+      flatten(page).indexOf('5 节点') !== -1)
+    check('the node card surfaces a 产出摘要 section', flatten(page).indexOf('产出摘要') !== -1)
     check('page shows the aggregate the sidebar summary needs', flatten(page).indexOf('40%') !== -1)
 
     // The unassigned lane's detail must resolve rather than reporting "no nodes".
@@ -426,6 +502,19 @@ if (prog.status === 401 || prog.status === 404) {
     check('every node carries agentName as a string or null', badName.length === 0, badName.length ? JSON.stringify(badName[0]) : '')
     const withoutDag = (p.nodes || []).filter((n) => !Array.isArray(n.dependsOn))
     check('every node carries dependsOn (the diagram needs the DAG)', withoutDag.length === 0)
+    // Title is derived from the workflow definition at read time, so it exists for
+    // runs recorded long before this change -- unlike `summary`, which the run
+    // engine only started writing now (asserted in the smoke phase instead).
+    const hasTitles = (p.nodes || []).some((n) => 'title' in n)
+    if (!hasTitles) {
+      deferred('node titles (readable step names)', 'the running host predates the naming change; restart required')
+    } else {
+      const noTitle = (p.nodes || []).filter((n) => typeof n.title !== 'string' || n.title === '')
+      check('every node carries a readable title, not just an id', noTitle.length === 0, JSON.stringify(noTitle.map((n) => n.id)))
+      const idEcho = (p.nodes || []).filter((n) => n.title === n.id)
+      check('the title is a real name rather than the raw id echoed back', idEcho.length === 0, JSON.stringify(idEcho.map((n) => n.id)))
+      console.log('       titles: ' + JSON.stringify((p.nodes || []).map((n) => n.id + ' -> ' + n.title)))
+    }
     check('/progress exposes a workflowName key on the run envelope', p.run === null || 'workflowName' in (p.run || {}), JSON.stringify(p.run))
     // The live form of the B2 guard: the server's roll-up names must be exactly the
     // normalised node roles, so one role cannot appear under two literals.
@@ -533,6 +622,9 @@ if (process.argv.includes('--smoke')) {
     check('/role serves the smoke node', sn !== undefined)
     if (sn) {
       check('the smoke node reports the requirement it was given', typeof sn.requirement === 'string' && sn.requirement.length > 0)
+      check('the smoke node carries a readable title', typeof sn.title === 'string' && sn.title !== '', String(sn.title))
+      check('the smoke node carries its own output summary (recorded by the run engine)',
+        typeof sn.summary === 'string' && sn.summary.length > 0, String(sn.summary))
       check('the smoke node reports a full output length', typeof sn.outputLen === 'number' && sn.outputLen > 0, 'outputLen=' + String(sn.outputLen))
       if (sn.reasoning) {
         check('a reasoning trace was captured and served', sn.reasoning.length > 0, 'reasoningLen=' + String(sn.reasoningLen))

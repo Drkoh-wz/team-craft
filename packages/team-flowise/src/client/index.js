@@ -347,6 +347,15 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   // mismatch renders one role as two different labels -- and makes `busy` never
   // true for it, so its detail would never refresh while a node is running.
   function roleOf(n) { return n && n.agentName ? String(n.agentName) : '(未指派)'; }
+  // Never lead with a raw id like "fix-tabs": prefer the readable title the host
+  // derives (explicit node title, then the 【…】 tag, then the requirement's own
+  // opening words), and keep the id as secondary metadata.
+  function nodeLabel(n) { return (n && typeof n.title === 'string' && n.title !== '') ? n.title : String((n && n.id) || '?'); }
+  function clip(s, n) { var t = typeof s === 'string' ? s : ''; return t.length > n ? t.slice(0, n) + '…' : t; }
+  function runStamp(ts) {
+    if (typeof ts !== 'number' || !isFinite(ts)) return '';
+    try { var d = new Date(ts); return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + d.toLocaleTimeString(); } catch (e) { return ''; }
+  }
   function Dot(props) { return React.createElement('span', { className: 'tf-dot', style: { background: props.color } }); }
   // NOTE: a function component receives a PROPS OBJECT. Declaring this as
   // `function StatusBadge(status)` and calling it via createElement(status) —
@@ -456,15 +465,18 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         // 派发：编排器 -> 角色（<title> 提供悬停全文，line 本身不能带子元素）
         if (dispatched) {
           kids.push(React.createElement('g', { key: 'c' + k },
-            React.createElement('title', null, '「' + n.id + '」派发给 ' + who + (n.brief ? '：' + n.brief : '')),
+            React.createElement('title', null, '「' + nodeLabel(n) + '」(' + n.id + ') 派发给 ' + who + (n.brief ? '：' + n.brief : '')),
             React.createElement('line', { x1: xOrch, y1: yCall, x2: xRole, y2: yCall, stroke: info.color, strokeWidth: 1.5, markerEnd: 'url(#' + info.mark + ')' })
           ));
-          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fontWeight: 600, fill: info.color }, '«task» ' + n.id));
+          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fontWeight: 600, fill: info.color }, '«task» ' + clip(nodeLabel(n), 22)));
         } else {
           kids.push(React.createElement('line', { key: 'c' + k, x1: xOrch, y1: yCall, x2: xOrch + 26, y2: yCall, stroke: IDLE_COLOR, strokeWidth: 1.2, strokeDasharray: '2 3' }));
-          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fill: IDLE_COLOR }, '「' + n.id + '」尚未派发（等待依赖）'));
+          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fill: IDLE_COLOR }, '「' + clip(nodeLabel(n), 22) + '」尚未派发（等待依赖）'));
         }
-        kids.push(React.createElement('text', { key: 'cs' + k, x: (xOrch + xRole) / 2, y: yCall + 13, textAnchor: 'middle', fontSize: 10, fill: 'var(--dsw-alias-text-muted,#6b7280)' }, n.brief ? (n.brief.length > 34 ? n.brief.slice(0, 34) + '…' : n.brief) : ''));
+        // 第二行给出「这一步在做什么 / 做出了什么」：优先 worker 自己产出的摘要，
+        // 没有摘要时退回需求的开头，最后才是节点 id。
+        var sub = n.summary ? n.summary : n.brief;
+        kids.push(React.createElement('text', { key: 'cs' + k, x: (xOrch + xRole) / 2, y: yCall + 13, textAnchor: 'middle', fontSize: 10, fill: 'var(--dsw-alias-text-muted,#6b7280)' }, clip('#' + n.id + (sub ? ' · ' + sub : ''), 48)));
 
         // 交付：只有真的回来了才画回程箭头。
         if (returned) {
@@ -489,12 +501,17 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var info = nodeInfo(n.status);
     var rows = [];
     rows.push(React.createElement('div', { className: 'tf-nhead', key: 'h' },
-      React.createElement('span', { className: 'tf-nid' }, n.id),
+      React.createElement('span', { className: 'tf-nid' }, nodeLabel(n)),
+      React.createElement('span', { className: 'tf-kv', style: { fontFamily: 'ui-monospace,Menlo,Consolas,monospace' } }, '#' + n.id),
       React.createElement(StatusBadge, { key: 'b', status: n.status }),
       React.createElement('span', { className: 'tf-kv' }, (n.elapsedMs !== null && n.elapsedMs !== undefined ? fmtElapsed(n.elapsedMs) : '—') + ' · ' + fmtClock(n.startedAt) + ' → ' + fmtClock(n.endedAt)),
       n.reviewer ? React.createElement('span', { className: 'tf-kv' }, '评审(仅记录): ' + n.reviewer) : null,
       n.dependsOn && n.dependsOn.length ? React.createElement('span', { className: 'tf-kv' }, '依赖: ' + n.dependsOn.join(', ')) : null,
       n.taskId ? React.createElement('span', { className: 'tf-kv' }, 'task ' + String(n.taskId).slice(-6) + ' · ' + (n.taskStatus || '') + (n.iteration ? ' · it' + n.iteration : '')) : null
+    ));
+    if (n.summary) rows.push(React.createElement('div', { key: 'sm' },
+      React.createElement('div', { className: 'tf-lbl' }, '产出摘要'),
+      React.createElement('div', { className: 'tf-kv', style: { lineHeight: 1.6, color: 'var(--dsw-alias-text,#1f2937)' } }, n.summary)
     ));
 
     if (n.requirement) rows.push(React.createElement('div', { key: 'req' },
@@ -556,8 +573,9 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   // sidebar.panellist 的同名条目选中。它只读 /progress（轻量轮询）与 /role
   // （点开某角色时按需取，带完整报告），不触碰看板的任何状态。
   // ---------------------------------------------------------------------------
-  function TeamProgressPage() {
-    var st = React.useState({ data: null, error: null, role: null, detail: null, detailError: null, runs: [] });
+  function TeamProgressPage(props) {
+    var compact = !!(props && props.compact);
+    var st = React.useState({ data: null, error: null, role: null, detail: null, detailError: null, runs: [], wfs: [] });
     var s = st[0]; var set = st[1];
     var rs = React.useState(null); var runId = rs[0]; var setRunId = rs[1];
 
@@ -583,10 +601,18 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       return function () { clearInterval(id); };
     }, [tick]);
 
-    // 运行列表只取一次，用于切换查看历史运行。
+    // 运行列表与工作流名只取一次：运行记录里只存 workflowId，而选择器要显示
+    // 人能读的工作流名字，所以两张表都要。
     React.useEffect(function () {
       get('/runs').then(function (d) { patch({ runs: d.runs || [] }); }).catch(function () { /* 运行列表不是必需 */ });
+      get('/workflows').then(function (d) { patch({ wfs: d.workflows || [] }); }).catch(function () { /* 名字不是必需 */ });
     }, [patch]);
+
+    var wfName = function (id) {
+      var list = s.wfs || [];
+      for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === id) return list[i].name || id || '未命名工作流';
+      return id || '未命名工作流';
+    };
 
     var nodes = (s.data && s.data.nodes) || [];
     var roles = (s.data && s.data.roles) || [];
@@ -633,18 +659,20 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var barColor = run === null ? IDLE_COLOR : (isFailed ? FAILED_COLOR : (run.status === 'running' ? RUNNING_COLOR : runInfo(run.status).color));
 
     var header = React.createElement('div', { className: 'tf-pg-head' },
-      React.createElement('h2', { className: 'tf-pg-title' }, '多 Agent 团队进度'),
+      React.createElement(compact ? 'h3' : 'h2', { className: 'tf-pg-title' }, compact ? '多 Agent 进度' : '多 Agent 团队进度'),
       run === null ? React.createElement('span', { className: 'tf-pg-sub' }, '暂无运行') : React.createElement('span', { className: 'tf-badge2', style: { background: runInfo(run.status).color } }, runInfo(run.status).label),
-      run === null ? null : React.createElement('span', { className: 'tf-pg-sub' }, (run.workflowName || run.workflowId || '(未知工作流)') + ' · #' + String(run.id).slice(-6)),
+      // 领先显示「哪个工作流 · 几个节点 · 何时开始」，短 id 只作为次级信息。
+      run === null ? null : React.createElement('span', { className: 'tf-pg-sub' }, (run.workflowName || wfName(run.workflowId)) + ' · ' + (totals.total || 0) + ' 个节点 · ' + runStamp(run.startedAt) + ' · #' + String(run.id).slice(-6)),
       React.createElement('div', { className: 'tf-pg-toolbar' },
-        React.createElement('select', {
+        compact ? null : React.createElement('select', {
           className: 'tf-select',
           value: runId || '',
           onChange: function (e) { setRunId(e.target.value || null); }
         },
           React.createElement('option', { value: '' }, '最新运行'),
           (s.runs || []).slice(0, 40).map(function (x) {
-            return React.createElement('option', { key: x.id, value: x.id }, (x.workflowId || '?') + ' · #' + String(x.id).slice(-6) + ' · ' + (runInfo(x.status).label));
+            var ncount = x && x.nodeStates && typeof x.nodeStates === 'object' ? Object.keys(x.nodeStates).length : 0;
+            return React.createElement('option', { key: x.id, value: x.id }, wfName(x.workflowId) + ' · ' + ncount + ' 节点 · ' + runInfo(x.status).label + ' · ' + runStamp(x.startedAt) + ' · #' + String(x.id).slice(-6));
           })
         ),
         React.createElement('button', { className: 'tf-btn', onClick: function () { tick(); if (selectedRef.current) loadDetail(selectedRef.current); } }, '刷新')
@@ -714,7 +742,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('svg', {
       width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
       stroke: c, strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
-      'aria-hidden': 'true', focusable: 'false'
+      className: props.className, 'aria-hidden': 'true', focusable: 'false'
     },
       React.createElement('title', null, '多 Agent 团队进度'),
       React.createElement('circle', { cx: 12, cy: 5.5, r: 2.6 }),
@@ -724,6 +752,30 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       React.createElement('path', { d: 'M13.4 7.9 17.6 15.2' }),
       React.createElement('path', { d: 'M7.6 17.5h8.8' })
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // P9: 右侧栏停靠面板（真正的 sidebar）。
+  //
+  // 之前只做了 sidebar.panellist 图标 + main 中央面板，所以它其实是一个"整页"，
+  // 会顶掉会话，而不是贴着会话的侧边栏。右侧栏是 shell 自己的 pane 系统：
+  //   ui-sidebar-right 用 ctx.reflect.provide("sidebarRightTabs", registry) 暴露
+  //   类型注册表；SidebarRightTabRegistry.register({id, kind, priority?, title, guide?})
+  //   注册一个 tab 类型，body 按 kind 在 force 的类型的 id 上派发到
+  //   sidebar.right.pane.tab(keyed)，chip 标题派发到 sidebar.right.pane.tab.title。
+  //   用户入口是 guide 列表：GuideBody 的 onPick 直接
+  //   tab.actions.openTab(entry.kind, { replaceTab: true })，所以**不需要**地址或
+  //   pattern —— guide 条目本身就是"点一下就打开"的入口。
+  // 因此这里额外注册一个真正停靠的右侧面板，与整页视图并存、互不影响。
+  // ---------------------------------------------------------------------------
+  var PANE_ID = '@local/team-flowise';
+  var PANE_KIND = 'team-progress';
+
+  function TeamPane() { return React.createElement(TeamProgressPage, { compact: true }); }
+  function TeamTabTitle() {
+    return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+      React.createElement(TeamIcon, { size: 14, active: false }),
+      '多 Agent 进度');
   }
 
   function apply(ctx) {
@@ -746,6 +798,33 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       var un = slots.register({ name: 'main', key: 'team-progress' }, TeamProgressPage);
       return function () { un(); };
     });
+    // 右侧栏的停靠面板。sidebarRightTabs 可能不存在（该包未启用），所以是可选
+    // 服务：读不到就只少了这一个面板，其余功能照常。
+    var tabs = ctx.get('sidebarRightTabs');
+    if (tabs !== undefined && typeof tabs.register === 'function') {
+      ctx.effect(function () {
+        var off = tabs.register({
+          id: PANE_ID,
+          kind: PANE_KIND,
+          title: function () { return '多 Agent 进度'; },
+          guide: [{
+            order: 30,
+            title: function () { return '多 Agent 团队进度'; },
+            description: function () { return 'Planner / Coder / Reviewer / Validator 的交互时序、思考过程与产出摘要'; },
+            icon: TeamIcon
+          }]
+        });
+        return function () { off(); };
+      });
+      slots.inject('sidebar.right.pane.tab', function () {
+        var un = slots.register({ name: 'sidebar.right.pane.tab', key: PANE_ID }, TeamPane);
+        return function () { un(); };
+      });
+      slots.inject('sidebar.right.pane.tab.title', function () {
+        var un = slots.register({ name: 'sidebar.right.pane.tab.title', key: PANE_ID }, TeamTabTitle);
+        return function () { un(); };
+      });
+    }
     // settings.section 的看板保持原样：它是一个独立页面，与进度页互不影响。
     slots.inject('settings.section', function () {
       var un = slots.register({ name: 'settings.section', id: 'team', order: 500, label: '多 Agent 团队' }, Board);
