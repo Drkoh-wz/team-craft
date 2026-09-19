@@ -333,6 +333,61 @@ export function apply(ctx) {
   const listRuns = async () => withTable('team_runs', 'runs', (t) => [...t.entries()].map(([, v]) => v));
   const getRun = async (id) => withTable('team_runs', 'runs', (t) => t.get(id) || null);
 
+  // ---- progress data plane (read-only) ----
+  // The board needs one self-contained payload: which nodes exist, who owns each
+  // one, and where each one stands. Node ids come from the WORKFLOW DEFINITION,
+  // not from `run.nodeStates`, so a node that has not started yet still appears
+  // (as `pending`) instead of silently vanishing from the picture.
+  const latestRun = async () => {
+    let best = null;
+    for (const r of await listRuns()) {
+      if (!r || typeof r.id !== 'string') continue;
+      if (best === null) { best = r; continue; }
+      const a = typeof r.startedAt === 'number' ? r.startedAt : 0;
+      const b = typeof best.startedAt === 'number' ? best.startedAt : 0;
+      if (a > b) best = r;
+    }
+    return best;
+  };
+  const progressSummary = async (runId) => {
+    const run = runId ? await getRun(runId) : await latestRun();
+    if (!run) return { ok: true, run: null, nodes: [], totals: { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 } };
+    const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
+    const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
+    const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
+    // A deleted/renamed workflow must not blank the board: fall back to whatever
+    // the run itself recorded.
+    const ids = defs ? Object.keys(defs) : Object.keys(states);
+    const at = now();
+    let completed = 0; let failed = 0; let working = 0; let pending = 0;
+    const nodes = ids.map((nid) => {
+      const def = (defs && defs[nid]) || {};
+      const st = states[nid] && typeof states[nid] === 'object' ? states[nid] : {};
+      const status = typeof st.status === 'string' ? st.status : 'pending';
+      if (status === 'completed') completed += 1;
+      else if (status === 'failed') failed += 1;
+      else if (status === 'working') working += 1;
+      else pending += 1;
+      const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
+      const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
+      // Live elapsed for a node still in flight; null until it has started.
+      const elapsedMs = startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt);
+      const agent = st.assignee !== undefined ? st.assignee : (def.agent !== undefined ? def.agent : null);
+      return clean({ id: nid, agent, status, startedAt, endedAt, elapsedMs, output: st.output === undefined ? null : st.output, error: st.error });
+    });
+    const total = nodes.length;
+    // `clean` drops undefined, so normalise every envelope field to null: a run
+    // that is still in flight must still expose `endedAt` as a key, otherwise a
+    // client reading `run.endedAt` on a fixed shape breaks.
+    const num = (v) => (typeof v === 'number' ? v : null);
+    return clean({
+      ok: true,
+      run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, status: run.status === undefined ? null : run.status, startedAt: num(run.startedAt), endedAt: num(run.endedAt) },
+      nodes,
+      totals: { total, completed, failed, working, pending, percent: total === 0 ? 0 : Math.round((completed / total) * 100) },
+    });
+  };
+
   // ---- task ledger ----
   const agentsSvc = ctx.get('agents');
   const spill = ctx.get('spillStore');
@@ -436,7 +491,14 @@ export function apply(ctx) {
           // What tool policy the worker actually started under; recorded on the
           // node so a silently-unfiltered worker is visible instead of inferred.
           let toolNote = '';
+          // This node's own lifetime. `startedAt` is captured ONCE, here, and then
+          // re-sent with every later write for this node: setRunState merges
+          // `nodeStates` one level deep (`{...cur.nodeStates, ...patch.nodeStates}`),
+          // so a second write for the same id REPLACES the whole entry -- a
+          // completed/failed patch that omitted startedAt would erase it.
+          const nodeStartedAt = now();
           try {
+            await setRunState({ nodeStates: { [nid]: { status: 'working', assignee: node.agent, startedAt: nodeStartedAt } } });
             const task = await createTask({ workflowId, nodeId: nid, assignee: node.agent, reviewer: node.reviewer, requirement: (node.taskTemplate && node.taskTemplate.requirement) || node.id, acceptanceCriteria: (node.taskTemplate && node.taskTemplate.acceptanceCriteria) || '' });
             taskId = task.id;
             await submitTask(task.id); await startTask(task.id);
@@ -459,13 +521,13 @@ export function apply(ctx) {
             }
             await completeTask(taskId, output, null);
             outputs[nid] = output; completed[nid] = true; succeeded[nid] = true;
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, output: String(output).slice(0, 200), tools: toolNote } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), tools: toolNote } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', error: String(e), tools: toolNote } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), tools: toolNote } } });
           }
         }));
       }
@@ -582,6 +644,10 @@ export function apply(ctx) {
     route('exact', '/api/team-flowise/workflows', wrap(async () => ({ ok: true, workflows: await listWorkflows() })));
     route('exact', '/api/team-flowise/tasks', wrap(async () => ({ ok: true, tasks: await listTasks() })));
     route('exact', '/api/team-flowise/runs', wrap(async () => ({ ok: true, runs: await listRuns() })));
+    // Read-only progress summary of the latest run (or ?runId=<id>), aligned to
+    // the workflow definition. GET + no body => directly consumable by
+    // Invoke-RestMethod and by the client board's poll loop.
+    route('exact', '/api/team-flowise/progress', wrap(async (req) => progressSummary(query(req.url, 'runId'))));
     route('exact', '/api/team-flowise/run', wrap(async (req) => {
       const id = query(req.url, 'id');
       if (!id) return { ok: false, error: 'missing id' };
