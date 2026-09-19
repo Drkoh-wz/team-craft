@@ -283,8 +283,10 @@ if (bundle) {
     },
   }
   const NODES = [
-    { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000, title: 'P7 计划', summary: '计划已写入 P7-PLAN.md', brief: '制定实施计划', dependsOn: [], reviewer: null, output: 'PLAN-SLICE' },
-    { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000, title: 'P7-A 修复标签回退缺陷', summary: '唯一改动 client/index.js', brief: '修复标签回退缺陷', dependsOn: ['plan'], reviewer: 'Reviewer', output: 'CODE-SLICE' },
+    { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000, title: 'P7 计划', summary: '计划已写入 P7-PLAN.md', brief: '制定实施计划', dependsOn: [], reviewer: 'Reviewer', output: 'PLAN-SLICE' },
+    // P10: a reviewed node. `review` here is the LIGHT projection /progress serves
+    // (verdict/counts/rounds/reviewerName), which is what the diagram labels with.
+    { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000, title: 'P7-A 修复标签回退缺陷', summary: '唯一改动 client/index.js', brief: '修复标签回退缺陷', dependsOn: ['plan'], reviewer: 'Reviewer', review: { verdict: 'pass', blocking: 0, advisory: 1, unresolved: false, rounds: 2, reviewerName: 'Reviewer', elapsedMs: 30000, summary: 'REVIEW-LIGHT-SUMMARY 通过' }, output: 'CODE-SLICE' },
     { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000, title: 'P7-B1 进度数据面', summary: null, brief: '建造侧边栏进度页', dependsOn: ['fix-tabs'], reviewer: null, output: null },
     { id: 'verify', order: 3, agent: 'Validator', agentName: 'Validator', status: 'failed', startedAt: NOW - 40000, endedAt: NOW - 20000, elapsedMs: 20000, title: 'P7 独立验收', summary: '失败：VERIFY-FAILURE-TEXT', brief: '独立验收', dependsOn: ['panel'], reviewer: null, output: null },
     // A node with no agent is legal. It is the case where the server roll-up and
@@ -306,12 +308,22 @@ if (bundle) {
   const DETAIL = [
     { id: 'plan', order: 0, agent: 'Planner', agentName: 'Planner', status: 'completed', startedAt: NOW - 900000, endedAt: NOW - 300000, elapsedMs: 600000,
       title: 'P7 计划', summary: '计划已写入 P7-PLAN.md',
-      requirement: 'REQ-PLAN 制定计划', acceptanceCriteria: 'AC-PLAN', reviewer: null, dependsOn: [],
+      requirement: 'REQ-PLAN 制定计划', acceptanceCriteria: 'AC-PLAN', reviewer: 'Reviewer', review: null, dependsOn: [],
       output: 'PLAN-FULL-REPORT-BODY', outputLen: 2000, outputTruncated: false, reasoning: 'PLAN-REASONING-TRACE', reasoningLen: 20,
       tools: 'visible=41 filter={...}', error: null, taskId: 'vqmv3f31', taskStatus: 'completed', iteration: 0, history: [] },
+    // P10 (B1): the OWNER entry carries the full review, because NodeCard is
+    // rendered from this entry -- that is the whole point of the host-side fix.
     { id: 'fix-tabs', order: 1, agent: 'Coder', agentName: 'Coder', status: 'completed', startedAt: NOW - 300000, endedAt: NOW - 120000, elapsedMs: 180000,
       title: 'P7-A 修复标签回退缺陷', summary: '唯一改动 client/index.js',
       requirement: 'REQ-FIXTABS 修复标签', acceptanceCriteria: 'AC-FIXTABS', reviewer: 'Reviewer', dependsOn: ['plan'],
+      review: { reviewer: 'Reviewer', reviewerName: 'Reviewer', verdict: 'pass', score: 88, summary: 'REVIEW-SUMMARY-通过',
+        findings: [
+          { severity: 'advisory', downgraded: true, downgradeReason: 'R3：标为 blocking 但 evidence 去空白后只有 2 字符（< 8），证据不足，降级为 advisory', dimension: '优化空间', criterion: 'FINDING-DOWNGRADED-ADVISORY', evidence: 'EV', impact: null, suggestion: 'SUG-ADVISORY' },
+        ],
+        resolved: [{ finding: 'ROUND1-BLOCKING-ITEM', resolved: true, evidence: 'RESOLVED-EVIDENCE-TEXT' }],
+        uncertainties: ['UNCERTAIN-ONE'], blockingCount: 0, advisoryCount: 1, unresolved: false, unresolvedReason: null, rounds: 2,
+        startedAt: NOW - 40000, endedAt: NOW - 10000, elapsedMs: 30000, reasoning: 'REVIEWER-REASONING-TRACE', reasoningLen: 24,
+        notes: ['R3：证据不足，降级为 advisory'], error: null, parseError: null, toolNote: 'visible=41' },
       output: 'CODE-FULL-REPORT-BODY', outputLen: 90000, outputTruncated: true, reasoning: 'CODE-REASONING-TRACE', reasoningLen: 21,
       tools: 'visible=41 filter={...}', error: null, taskId: 'ate14pml', taskStatus: 'completed', iteration: 0 },
     { id: 'panel', order: 2, agent: 'Coder', agentName: 'Coder', status: 'working', startedAt: NOW - 60000, endedAt: null, elapsedMs: 60000,
@@ -414,6 +426,10 @@ if (bundle) {
     check('diagram distinguishes a failed node from a delivered one',
       text.indexOf('«failed»') !== -1 && text.indexOf('«result»') !== -1)
     check('diagram carries the node briefs', text.indexOf('修复标签回退缺陷') !== -1)
+    // The light projection drives the diagram label. (The round count is appended
+    // only for a `rework` verdict: a pass that took 2 rounds reads as a pass.)
+    check('the diagram labels a reviewed node with its verdict (light projection)',
+      text.indexOf('评审 通过') !== -1)
 
     // The default selection is the role that is actually working.
     check('defaults to the role currently working (Coder)', roleCalls.indexOf('Coder') !== -1, JSON.stringify(roleCalls))
@@ -423,7 +439,20 @@ if (bundle) {
     check('role detail shows the acceptance criteria', text.indexOf('AC-FIXTABS') !== -1)
     check('role detail shows the tool policy note', text.indexOf('visible=41') !== -1)
     check('role detail is honest when a node produced no reasoning block', text.indexOf('本次未产生可记录的推理块') !== -1)
-    check('role detail marks a recorded-only reviewer as such', text.indexOf('评审(仅记录)') !== -1)
+    // P10 (B1, host+client halves). The node card is rendered from /role's OWNER
+    // entry, so the review must be reachable there; and a node that DID have a
+    // review must never be labelled "review is only recorded", which is the exact
+    // contradiction the P10-D review caught on screen.
+    check('role detail renders the review verdict on the node card (owner entry carries it)',
+      text.indexOf('审核') !== -1 && text.indexOf('通过') !== -1, '')
+    check('node card shows the advisory finding and that it was mechanically downgraded',
+      text.indexOf('FINDING-DOWNGRADED-ADVISORY') !== -1 && text.indexOf('已降级为建议') !== -1)
+    check('node card shows the reviewer\'s own reasoning trace', text.indexOf('REVIEWER-REASONING-TRACE') !== -1)
+    check('node card shows the response to the previous round\'s blocking item',
+      text.indexOf('已解决：') !== -1 && text.indexOf('ROUND1-BLOCKING-ITEM') !== -1)
+    check('node card shows the reviewer\'s uncertainties', text.indexOf('UNCERTAIN-ONE') !== -1)
+    check('a node that WAS reviewed is never labelled as review-not-executed',
+      text.indexOf('尚无评审记录') === -1 && text.indexOf('评审(仅记录)') === -1)
     check('role detail discloses a truncated report instead of passing it off as whole',
       text.indexOf('超出上限，已截断') !== -1)
 
@@ -441,6 +470,15 @@ if (bundle) {
       check('clicking the Planner chip swaps the detail to Planner content',
         t2.indexOf('PLAN-FULL-REPORT-BODY') !== -1 && t2.indexOf('CODE-FULL-REPORT-BODY') === -1)
       check('Planner detail shows its own reasoning trace', t2.indexOf('PLAN-REASONING-TRACE') !== -1)
+      // The three-branch fallback: Planner's node declares a reviewer but has no
+      // review RECORD (the pre-P10 / not-yet-reviewed case). The card must say
+      // exactly that, and must not resurrect the old "评审(仅记录)" wording, which
+      // asserts something about the plugin's capabilities rather than about this
+      // node's data.
+      check('a node with a declared reviewer but no record says so honestly',
+        t2.indexOf('尚无评审记录') !== -1 && t2.indexOf('评审(仅记录)') === -1)
+      check('the Planner node has no review block (no record => nothing to render)',
+        t2.indexOf('FINDING-DOWNGRADED-ADVISORY') === -1)
     } catch (e) {
       check('clicking the Planner chip swaps the detail to Planner content', false, String(e && e.message ? e.message : e))
     }
@@ -480,7 +518,14 @@ if (prog.status === 401 || prog.status === 404) {
   check('/progress returns ok:true', p.ok === true)
   check('/progress has run / nodes / totals', 'run' in p && Array.isArray(p.nodes) && p.totals !== undefined)
   const to = p.totals || {}
-  const sum = (to.completed || 0) + (to.failed || 0) + (to.working || 0) + (to.pending || 0)
+  // P10 added two totals buckets (`reviewing` = a node whose artifact is being
+  // judged, `rework` = a node sent back for another attempt). A node in either
+  // state is deliberately NOT counted as `pending` any more, so the conservation
+  // check has to enumerate all six buckets or it would report a bogus failure on
+  // any run that has a node under review. For a pre-P10 payload both new keys
+  // are absent, and `|| 0` keeps the sum -- and therefore this assertion --
+  // numerically identical to what it was before.
+  const sum = (to.completed || 0) + (to.failed || 0) + (to.working || 0) + (to.reviewing || 0) + (to.rework || 0) + (to.pending || 0)
   check('totals add up to total', to.total === sum, 'total=' + to.total + ' sum=' + sum)
   check('totals.total equals nodes.length', to.total === (p.nodes || []).length)
   const expectPct = to.total ? Math.round((to.completed || 0) / to.total * 100) : 0

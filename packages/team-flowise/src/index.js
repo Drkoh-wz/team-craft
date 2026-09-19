@@ -59,6 +59,16 @@ const workflowSchema = z.object({
   name: z.string().optional(),
   description: z.string().optional(),
   nodes: z.record(workflowNodeSchema).default({}),
+  // P10: workflow-level review settings. OPTIONAL end to end, and every field
+  // inside is optional too -- adding a required key here would make every
+  // already-stored workflow record fail validation the moment a domain opens.
+  // `maxRework` is additionally clamped to REVIEW_LIMITS.maxReworkPerNode at
+  // use time, so this field can only ever TIGHTEN the bound, never raise it.
+  review: z.object({
+    reviewer: z.string().optional(),
+    maxRework: z.number().int().min(0).max(2).optional(),
+    enabled: z.boolean().optional(),
+  }).optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -157,6 +167,350 @@ const WORKER_DENY_TOOLS = [
   'team_create_agent', 'team_create_task', 'team_create_workflow',
   'team_delegate_agent', 'team_list_agents', 'team_run_workflow', 'team_task_status',
 ];
+
+// ---- P10 review engine: hard limits (pure data, no ctx, unit-testable) ----
+// The ONE placeholder literal for a node nobody owns. /progress's role roll-up and
+// /role must agree on it: a role with two names is a role whose detail is
+// unreachable, because the UI's chip comes from the roll-up while the lookup comes
+// from /role. (The client is a separate bundle and cannot import this, so
+// validation/p8-acceptance.mjs asserts the two agree at runtime.)
+const UNASSIGNED_ROLE = '(未指派)';
+// Every one of these is a MECHANICAL bound on how long an added review step can
+// stretch a run. `maxReworkPerRun` is the master gate: even if every node in a
+// workflow asks for a rework, the whole run may not re-dispatch a worker more
+// than 3 extra times, so the total work is bounded by construction rather than
+// by trusting the reviewer's judgement.
+export const REVIEW_LIMITS = {
+  timeoutMs: 600000,
+  maxFindings: 20,
+  maxReworkPerNode: 2,
+  maxReworkPerRun: 3,
+  artifactMax: 20000,
+};
+
+// The five dimensions every review must answer. Fixed on purpose: a free-form
+// dimension list makes reviewers invent axes ("code smell", "naming") and turn
+// advisory taste into blocking findings.
+const REVIEW_DIMENSIONS = [
+  ['需求符合性', '产物是否覆盖了任务要求与验收标准的每一条？有没有漏项、或有自行改需求？'],
+  ['正确性', '事实、代码、路径、命令、接口签名是否准确？有没有错误断言或与既有事实矛盾之处？'],
+  ['完整性', '交付物是否自洽可执行（能跑、能验收）？边界情况与失败路径是否交代？'],
+  ['风险', '有没有会导致失败、数据丢失、安全或不可逆后果的隐含假设与缺口？'],
+  ['优化空间', '是否有更简单、更省时、更易维护的做法？不得为风格而提。'],
+];
+
+// The judgement discipline is written into the prompt VERBATIM in intent: the
+// whole point of P10 is that a reviewer cannot block on taste, and cannot block
+// without a citation, no matter how the model feels about the deliverable.
+const REVIEW_DISCIPLINE = [
+  '判定纪律（必须严格遵守）：',
+  '1. blocking 只有在以下三种情况才允许：明确违反某条验收标准；存在会让交付物失败或错误的具体缺陷；存在数据丢失/安全/不可逆风险。',
+  '2. 每条 blocking 必须给出 criterion（违反了哪条验收标准，或写“缺陷”“风险”）、evidence（交付物原文引用，或可复现命令与输出）、impact（不修会怎样）。证据不足的一律不得标为 blocking。',
+  '3. 风格、命名、可读性、补充测试、更优方案一律 advisory，永不阻塞。',
+  '4. 没有 blocking 条目时 verdict 必须为 "pass"，即使存在 advisory；禁止为了显得尽责而制造 blocking；不要评审与本任务无关的既有代码。',
+  '5. 无法判断的写进 uncertainties，不得当作 blocking。',
+  '6. round >= 2（返工复审）时：只允许核对上一轮列出的阻塞项是否解决，禁止提出新的 blocking，新发现一律 advisory；每条上一轮的阻塞项都要出现在 resolved 数组里并给出 resolved 与 evidence。',
+];
+
+const REVIEW_JSON_CONTRACT = '{"verdict":"pass"|"rework","score":0-100,"summary":"一句话结论","findings":[{"severity":"blocking"|"advisory","dimension":"需求符合性"|"正确性"|"完整性"|"风险"|"优化空间","criterion":"...","evidence":"...","impact":"...","suggestion":"..."}],"resolved":[{"finding":"...","resolved":true,"evidence":"..."}],"uncertainties":["..."]}';
+
+// A reviewer may only cite an artifact slice of this size; the truncation is
+// STATED in the prompt rather than silently applied, so a reviewer never marks
+// a node blocking over content it was not shown.
+export function buildReviewPrompt(spec) {
+  const s = spec || {};
+  const round = typeof s.round === 'number' && s.round > 0 ? s.round : 1;
+  const lines = [];
+  lines.push('你是本工作流的独立评审者。你的职责是复核下面这个已交付节点的产物，并给出可机械执行的结构化结论。');
+  lines.push('这是第 ' + round + ' 轮评审（round=' + round + '）。' + (round >= 2 ? '这是返工之后的复审：你只能核对上一轮列出的阻塞项是否已解决，禁止提出新的 blocking。' : '这是首轮评审。'));
+  lines.push('');
+  lines.push('## 被审节点');
+  lines.push('- 节点标题：' + (s.title === undefined || s.title === null || s.title === '' ? '（未命名）' : String(s.title)));
+  lines.push('- 节点 id：' + (s.nodeId === undefined || s.nodeId === null ? '' : String(s.nodeId)));
+  lines.push('- 承担角色：' + (s.agentName === undefined || s.agentName === null ? '（未指派）' : String(s.agentName)));
+  lines.push('');
+  lines.push('## 任务要求');
+  lines.push(s.requirement === undefined || s.requirement === null || s.requirement === '' ? '（未提供）' : String(s.requirement));
+  lines.push('');
+  lines.push('## 验收标准');
+  lines.push(s.acceptanceCriteria === undefined || s.acceptanceCriteria === null || s.acceptanceCriteria === '' ? '（未提供）' : String(s.acceptanceCriteria));
+  lines.push('');
+  if (Array.isArray(s.knownBlocking) && s.knownBlocking.length) {
+    lines.push('## 上一轮列出的阻塞项（本轮必须逐条在 resolved 里回应）');
+    for (let i = 0; i < s.knownBlocking.length; i++) lines.push('- ' + String(s.knownBlocking[i]));
+    lines.push('');
+  }
+  lines.push('## 交付物全文');
+  if (s.artifactTruncated === true) lines.push('（注意：交付物超出 ' + REVIEW_LIMITS.artifactMax + ' 字符已截断，仅评审前 ' + REVIEW_LIMITS.artifactMax + ' 字符；未展示的部分不得作为 blocking 依据。）');
+  lines.push(s.artifact === undefined || s.artifact === null || s.artifact === '' ? '（交付物为空）' : String(s.artifact));
+  lines.push('');
+  lines.push('## 五个固定评审维度（findings[].dimension 只能取这五个之一）');
+  for (const d of REVIEW_DIMENSIONS) lines.push('- ' + d[0] + '：' + d[1]);
+  lines.push('');
+  for (const d of REVIEW_DISCIPLINE) lines.push(d);
+  lines.push('');
+  lines.push('## 输出契约');
+  lines.push('只输出这一个 JSON 对象（可以放在 ```json 代码块里），不要输出任何其它内容、解释或前后缀：');
+  lines.push(REVIEW_JSON_CONTRACT);
+  lines.push('字段含义：verdict 为 "pass" 表示通过（没有 blocking 时必须为 "pass"），"rework" 表示必须返工（必须至少有一条合格 blocking）；score 为 0-100 的整数；findings 为全部发现（含 advisory）；resolved 为对上一轮阻塞项的逐条回应；uncertainties 为你无法判断的点。');
+  return lines.join('\n');
+}
+
+// The rework prompt carries the blocking findings VERBATIM. A re-dispatch is a
+// second full worker call, so its input has to be exactly "these defects, fix
+// them" -- no new scope, no refactor, or the rework costs more than the node.
+export function buildReworkPrompt(spec) {
+  const s = spec || {};
+  const round = typeof s.round === 'number' && s.round > 0 ? s.round : 1;
+  const items = Array.isArray(s.blocking) ? s.blocking : [];
+  const lines = [];
+  lines.push('你是 ' + (s.who === undefined || s.who === null || s.who === '' ? '本节点' : String(s.who)) + '，这是对你上一次交付物的第 ' + round + ' 轮返工要求。评审者判定必须返工，下面列出全部阻塞项，请逐条修复。');
+  lines.push('');
+  lines.push('## 原任务要求');
+  lines.push(s.requirement === undefined || s.requirement === null || s.requirement === '' ? '（未提供）' : String(s.requirement));
+  lines.push('');
+  lines.push('## 验收标准');
+  lines.push(s.acceptanceCriteria === undefined || s.acceptanceCriteria === null || s.acceptanceCriteria === '' ? '（未提供）' : String(s.acceptanceCriteria));
+  lines.push('');
+  lines.push('## 必须逐条修复的阻塞项（共 ' + items.length + ' 条，原文照录）');
+  if (items.length === 0) lines.push('（无）');
+  for (let i = 0; i < items.length; i++) {
+    const f = items[i] || {};
+    lines.push('### 阻塞项 ' + (i + 1));
+    lines.push('- criterion（违反了哪条验收标准）：' + (f.criterion === undefined || f.criterion === null ? '' : String(f.criterion)));
+    lines.push('- evidence（证据）：' + (f.evidence === undefined || f.evidence === null ? '' : String(f.evidence)));
+    lines.push('- impact（不修会怎样）：' + (f.impact === undefined || f.impact === null ? '' : String(f.impact)));
+    lines.push('- suggestion（建议）：' + (f.suggestion === undefined || f.suggestion === null ? '' : String(f.suggestion)));
+  }
+  lines.push('');
+  lines.push('## 返工要求');
+  lines.push('1. 逐条修复上面每一个阻塞项，并在回复中逐条说明你改了什么（对应哪条阻塞项、改了哪里、怎么验证）。');
+  lines.push('2. 不得扩大改动范围：只修上面列出的阻塞项，不得做与本任务无关的重构、改名、清理或新增功能。');
+  lines.push('3. 不要重新设计已经满足要求的部分；除非阻塞项本身要求，否则保持原有结构与结论不变。');
+  lines.push('4. 交付物仍须满足上面的任务要求与验收标准。');
+  return lines.join('\n');
+}
+
+// Text -> verdict object. Two extraction strategies, both bounded:
+//   1. the LAST ```json fenced block (a reviewer that narrates before its JSON
+//      would otherwise be parsed against a stale earlier object),
+//   2. otherwise a brace-matching scan that is string/escape aware, so a JSON
+//      excerpt INSIDE the artifact (or a quoted "}") cannot truncate the parse.
+// Never throws: a reviewer that produced garbage must not fail the node, so the
+// failure is reported as data (`parsed: null` + a reason) not as an exception.
+export function parseReviewVerdict(text) {
+  const raw = typeof text === 'string' ? text : (text === undefined || text === null ? '' : String(text));
+  const out = { raw, parsed: null, parseError: null };
+  if (typeof text !== 'string' || text.trim() === '') {
+    out.parseError = '评审者输出为空或不是字符串';
+    return out;
+  }
+  const adopt = (candidate, source) => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    out.parsed = candidate;
+    out.parseError = null;
+    out.source = source;
+    return true;
+  };
+  // 1) the LAST ```json ... ``` fence.
+  const fences = [];
+  const fenceRe = /```json([\s\S]*?)```/gi;
+  let m;
+  while ((m = fenceRe.exec(raw)) !== null) fences.push(m[1]);
+  if (fences.length === 0) {
+    const anyFence = /```([\s\S]*?)```/g;
+    while ((m = anyFence.exec(raw)) !== null) fences.push(m[1]);
+  }
+  if (fences.length > 0) {
+    const lastFence = fences[fences.length - 1];
+    try { if (adopt(JSON.parse(lastFence.trim()), 'fence')) return out; }
+    catch (e) { out.parseError = '```json 围栏内不是合法 JSON：' + String(e && e.message ? e.message : e); }
+    // The fence may itself contain the object with the braces; fall through to
+    // the brace scan on that fence's text before giving up.
+    const inner = lastBraceObject(lastFence);
+    if (inner !== null) {
+      try { if (adopt(JSON.parse(inner), 'fence-scan')) return out; }
+      catch (e) { out.parseError = '```json 围栏内括号配对结果不是合法 JSON：' + String(e && e.message ? e.message : e); }
+    }
+    // The fence parsed but its top level was not an object (an array or a scalar):
+    // JSON.parse succeeded, so no catch above ran, and without this the caller got
+    // parsed:null with parseError:null -- i.e. the reviewer's failure had no
+    // recorded reason at all.
+    if (out.parseError === null) {
+      out.parseError = '```json 围栏内容不是对象（围栏顶层是数组或标量），无法作为评审结论';
+    }
+    return out;
+  }
+  // 2) brace matching: last complete top-level {...}, string- and escape-aware.
+  const scanned = lastBraceObject(raw);
+  if (scanned === null) {
+    out.parseError = '未找到 ```json 围栏，也未找到成对的 {...} 对象';
+    return out;
+  }
+  try { if (adopt(JSON.parse(scanned), 'scan')) return out; }
+  catch (e) { out.parseError = '括号配对取出的对象不是合法 JSON：' + String(e && e.message ? e.message : e); }
+  return out;
+}
+
+// The last balanced top-level {...} in `s`, or null. Braces inside JSON strings
+// are skipped, and a backslash escapes the next character, so `{"a":"}"}` and
+// `{"a":"\\"}"}` both scan correctly. Nested objects are handled by depth, and
+// the LAST top-level object wins (reviewers that echo an example first).
+function lastBraceObject(s) {
+  const text = typeof s === 'string' ? s : '';
+  const spans = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{') { if (depth === 0) start = i; depth += 1; continue; }
+    if (ch === '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start !== -1) { spans.push(text.slice(start, i + 1)); start = -1; }
+      }
+      continue;
+    }
+  }
+  return spans.length ? spans[spans.length - 1] : null;
+}
+
+// Canonical form of a criterion used ONLY for matching "same blocking item as
+// last round": trim, drop ALL whitespace, lowercase, drop common CN/EN
+// punctuation. Implemented by hand (no deps) and deliberately aggressive --
+// a reviewer that re-words punctuation must not thereby create a "new" blocker.
+function canonCriterion(v) {
+  if (v === undefined || v === null) return '';
+  return String(v)
+    .trim()
+    .replace(/\s+/g, '')
+    .toLowerCase()
+    .replace(/[，。、；：！？“”‘’（）《》【】·…—～,.;:!?"'()<>[\]{}\-_/\\|`~@#$%^&*+=]/g, '');
+}
+
+// The mechanical fallback layer. Every rule below is a pure function of the
+// raw payload, so the same reviewer output always normalises to the same
+// verdict -- no "judgement calls" anywhere. Each intervention appends one
+// Chinese note naming the rule that fired, so a surprising result is auditable.
+export function normalizeReview(raw, opts) {
+  const o = opts || {};
+  const round = typeof o.round === 'number' && o.round > 0 ? Math.floor(o.round) : 1;
+  const knownBlocking = Array.isArray(o.knownBlocking) ? o.knownBlocking : [];
+  const known = [];
+  for (const k of knownBlocking) { const c = canonCriterion(k); if (c !== '') known.push(c); }
+  const notes = [];
+  const result = {
+    verdict: 'error', score: null, summary: '', findings: [], resolved: [], uncertainties: [],
+    blockingCount: 0, advisoryCount: 0, notes, parseError: o.parseError === undefined ? null : o.parseError,
+  };
+  // R1 -- a missing/broken payload is the REVIEWER's problem, never the node's:
+  // it must never block, so it settles as 'error' with zero findings.
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) {
+    notes.push('R1：评审者未返回可解析的对象（parseError=' + String(result.parseError) + '），按不阻塞处理，verdict=error');
+    result.summary = '评审未生效：评审者未返回可解析的结论，本节点未经实质评审。';
+    return result;
+  }
+  const rawFindings = Array.isArray(raw.findings) ? raw.findings : [];
+  const findings = [];
+  for (let i = 0; i < rawFindings.length; i++) {
+    const f = rawFindings[i];
+    const src = (f !== null && typeof f === 'object' && !Array.isArray(f)) ? f : {};
+    const criterion = src.criterion === undefined || src.criterion === null ? '' : String(src.criterion);
+    const evidence = src.evidence === undefined || src.evidence === null ? '' : String(src.evidence);
+    const impact = src.impact === undefined || src.impact === null ? '' : String(src.impact);
+    const suggestion = src.suggestion === undefined || src.suggestion === null ? '' : String(src.suggestion);
+    const rawSeverity = src.severity;
+    let severity;
+    let downgraded = false;
+    let downgradeReason = null;
+    // R2 -- anything that is not literally a known severity is advisory. The
+    // invariant is one-way: a non-blocking input can NEVER be upgraded, so a
+    // reviewer using a wrong enum name costs at most a note, never a rework.
+    if (rawSeverity === 'blocking') severity = 'blocking';
+    else {
+      severity = 'advisory';
+      if (rawSeverity !== 'advisory') {
+        downgraded = true;
+        downgradeReason = 'R2：severity 不是 "blocking" 也不是 "advisory"（实际为 ' + JSON.stringify(rawSeverity === undefined ? null : rawSeverity) + '），按 advisory 处理，非法严重度不得阻塞';
+      }
+    }
+    // R3 -- a blocking item must be doubly verifiable (which clause + where).
+    // Emotion without a citation cannot structurally trigger a rework.
+    if (severity === 'blocking') {
+      if (criterion.trim() === '') {
+        severity = 'advisory'; downgraded = true;
+        downgradeReason = 'R3：标为 blocking 但 criterion 为空白，缺少"违反了哪条"的依据，降级为 advisory';
+      } else if (evidence.trim().length < 8) {
+        severity = 'advisory'; downgraded = true;
+        downgradeReason = 'R3：标为 blocking 但 evidence 去空白后只有 ' + evidence.trim().length + ' 字符（< 8），证据不足，降级为 advisory';
+      }
+    }
+    // R4 -- in a rework re-review (round >= 2) only the PREVIOUS round's
+    // blocking items may block. Otherwise every round can invent one more
+    // blocker and the task never converges ("永远差一条").
+    if (severity === 'blocking' && round >= 2) {
+      const c = canonCriterion(criterion);
+      if (c === '' || known.indexOf(c) === -1) {
+        severity = 'advisory'; downgraded = true;
+        downgradeReason = 'R4：复审不得新增阻塞项（防止无限拉长任务）：该 criterion 不在上一轮阻塞项集合内，降级为 advisory';
+      }
+    }
+    const dimension = typeof src.dimension === 'string' && src.dimension.trim() !== '' ? src.dimension : null;
+    findings.push({
+      severity, downgraded, downgradeReason,
+      dimension,
+      criterion: criterion.trim() === '' ? null : criterion,
+      evidence: evidence.trim() === '' ? null : evidence,
+      impact: impact.trim() === '' ? null : impact,
+      suggestion: suggestion.trim() === '' ? null : suggestion,
+    });
+  }
+  // R5 -- bound the payload: a reviewer that emits 200 findings must not turn
+  // /progress into a heavy response.
+  let kept = findings;
+  if (findings.length > REVIEW_LIMITS.maxFindings) {
+    kept = findings.slice(0, REVIEW_LIMITS.maxFindings);
+    notes.push('R5：findings 共 ' + findings.length + ' 条，超过上限 ' + REVIEW_LIMITS.maxFindings + ' 条，已截断为前 ' + REVIEW_LIMITS.maxFindings + ' 条');
+  }
+  for (const f of kept) if (f.downgraded && f.downgradeReason) notes.push(f.downgradeReason);
+  result.findings = kept;
+  result.blockingCount = kept.filter((f) => f.severity === 'blocking').length;
+  result.advisoryCount = kept.filter((f) => f.severity !== 'blocking').length;
+  const rawScore = typeof raw.score === 'number' && isFinite(raw.score) ? Math.round(raw.score) : null;
+  result.score = rawScore === null ? null : Math.max(0, Math.min(100, rawScore));
+  const rawSummary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
+  const wantsRework = raw.verdict === 'rework';
+  // R6 -- "rework" with nothing blocking is self-contradictory; without this the
+  // verdict string alone could stretch a task with no stated reason.
+  let verdict = wantsRework ? 'rework' : 'pass';
+  if (verdict === 'rework' && result.blockingCount === 0) {
+    verdict = 'pass';
+    notes.push('R6：结论自相矛盾：rework 但无阻塞项，按不阻塞处理，verdict 改为 pass');
+  }
+  result.verdict = verdict;
+  result.summary = rawSummary !== '' ? rawSummary : (verdict === 'pass' ? '评审通过（评审者未提供摘要）' : '评审要求返工（评审者未提供摘要）');
+  const rawResolved = Array.isArray(raw.resolved) ? raw.resolved : [];
+  result.resolved = rawResolved.map((r) => {
+    const src = (r !== null && typeof r === 'object' && !Array.isArray(r)) ? r : {};
+    return {
+      finding: src.finding === undefined || src.finding === null ? (src.criterion === undefined || src.criterion === null ? null : String(src.criterion)) : String(src.finding),
+      resolved: src.resolved === true,
+      evidence: src.evidence === undefined || src.evidence === null ? null : String(src.evidence),
+    };
+  });
+  const rawUnc = Array.isArray(raw.uncertainties) ? raw.uncertainties : [];
+  result.uncertainties = rawUnc.map((u) => (typeof u === 'string' ? u : (u === null || u === undefined ? '' : String(u)))).filter((u) => u !== '');
+  return result;
+}
 
 // A child that never settles must not pin the run forever. This is a backstop,
 // not the anti-hang mechanism: the dispatch guard below already refuses the
@@ -337,7 +691,13 @@ export function apply(ctx) {
   const listAgents = async () => withTable('team_agent_defs', 'defs', (t) => [...t.entries()].map(([, v]) => v));
   const deleteAgent = async (id) => withTable('team_agent_defs', 'defs', (t) => t.delete(id));
   const upsertWorkflow = async (wf) => {
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, updatedAt: now() }));
+    // The workflow-level review defaults (default reviewer + rework cap) are part
+    // of the schema, so they MUST survive the write path. Building the record
+    // field-by-field silently dropped them, which made every workflow-level
+    // `review` setting unreachable through the real API and through the
+    // team_create_workflow tool: a workflow could declare "the Reviewer reviews
+    // every node" and nothing would ever be reviewed.
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, review: wf && wf.review, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
@@ -392,9 +752,64 @@ export function apply(ctx) {
   };
   const ownerOf = (st, def) => (st.assignee !== undefined ? st.assignee : (def.agent !== undefined ? def.agent : null));
 
+  // ---- P10 review read model ----
+  // The full `review` object on a node state carries the reviewer's complete
+  // findings, which is far too heavy for a 3-second poll. /progress gets this
+  // light projection instead; the full record is served by /role on demand.
+  const lightReview = (rv) => {
+    if (rv === null || rv === undefined || typeof rv !== 'object') return null;
+    return {
+      verdict: rv.verdict === undefined ? null : rv.verdict,
+      blocking: typeof rv.blockingCount === 'number' ? rv.blockingCount : 0,
+      advisory: typeof rv.advisoryCount === 'number' ? rv.advisoryCount : 0,
+      unresolved: rv.unresolved === true,
+      rounds: typeof rv.rounds === 'number' ? rv.rounds : 0,
+      reviewerName: rv.reviewerName === undefined ? null : rv.reviewerName,
+      elapsedMs: typeof rv.elapsedMs === 'number' ? rv.elapsedMs : null,
+      summary: rv.summary === undefined ? null : rv.summary,
+    };
+  };
+  // Node status -> the six totals buckets. `reviewing` and `rework` MUST be
+  // explicit branches: the old `else pending += 1` swallowed every unknown
+  // status, which would report a node that is being reviewed as "waiting"
+  // (i.e. "not started yet") -- a directionally wrong statement, not a rounding
+  // error. `percent` is deliberately NOT derived from these; it stays
+  // completed/total so its meaning is unchanged.
+  const bucketOf = (status) => {
+    if (status === 'completed') return 'completed';
+    if (status === 'failed') return 'failed';
+    if (status === 'working') return 'working';
+    if (status === 'reviewing') return 'reviewing';
+    if (status === 'rework') return 'rework';
+    return 'pending';
+  };
+  // A reviewer's track record across the run, keyed by the SAME normalised role
+  // name the role roll-up uses, so the UI can cross-reference the two.
+  const reviewerRollup = (nodes) => {
+    const list = [];
+    for (const n of nodes) {
+      const rv = n.review && typeof n.review === 'object' ? n.review : null;
+      const name = (rv && rv.reviewerName) || n.reviewer;
+      if (name === undefined || name === null || name === '') continue;
+      let r = list.find((x) => x.name === name);
+      if (!r) { r = { name, reviewed: 0, pass: 0, rework: 0, error: 0, blocking: 0, advisory: 0, unresolved: 0, elapsedMs: 0 }; list.push(r); }
+      if (rv !== null) {
+        r.reviewed += 1;
+        if (rv.verdict === 'pass') r.pass += 1;
+        else if (rv.verdict === 'rework') r.rework += 1;
+        else r.error += 1;
+        r.blocking += typeof rv.blocking === 'number' ? rv.blocking : 0;
+        r.advisory += typeof rv.advisory === 'number' ? rv.advisory : 0;
+        if (rv.unresolved === true) r.unresolved += 1;
+        if (typeof rv.elapsedMs === 'number') r.elapsedMs += rv.elapsedMs;
+      }
+    }
+    return list;
+  };
+
   const progressSummary = async (runId) => {
     const run = runId ? await getRun(runId) : await latestRun();
-    if (!run) return { ok: true, run: null, nodes: [], roles: [], totals: { total: 0, completed: 0, failed: 0, working: 0, pending: 0, percent: 0 } };
+    if (!run) return { ok: true, run: null, nodes: [], roles: [], reviewers: [], totals: { total: 0, completed: 0, failed: 0, working: 0, reviewing: 0, rework: 0, unresolved: 0, pending: 0, percent: 0 } };
     const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
     const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
     const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
@@ -403,15 +818,22 @@ export function apply(ctx) {
     const ids = defs ? Object.keys(defs) : Object.keys(states);
     const nameOf = await roleNamer();
     const at = now();
-    let completed = 0; let failed = 0; let working = 0; let pending = 0;
+    let completed = 0; let failed = 0; let working = 0; let pending = 0; let reviewing = 0; let rework = 0; let unresolved = 0;
     const nodes = ids.map((nid, order) => {
       const def = (defs && defs[nid]) || {};
       const st = states[nid] && typeof states[nid] === 'object' ? states[nid] : {};
       const status = typeof st.status === 'string' ? st.status : 'pending';
-      if (status === 'completed') completed += 1;
-      else if (status === 'failed') failed += 1;
-      else if (status === 'working') working += 1;
+      const bucket = bucketOf(status);
+      if (bucket === 'completed') completed += 1;
+      else if (bucket === 'failed') failed += 1;
+      else if (bucket === 'working') working += 1;
+      else if (bucket === 'reviewing') reviewing += 1;
+      else if (bucket === 'rework') rework += 1;
       else pending += 1;
+      // Old run records have no `review` key at all: the light projection is
+      // null then, and every consumer must treat null as "no review happened".
+      const lr = lightReview(st.review);
+      if (lr !== null && lr.unresolved) unresolved += 1;
       const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
       const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
       // Live elapsed for a node still in flight; null until it has started.
@@ -423,6 +845,8 @@ export function apply(ctx) {
         // Enough of the DAG to draw the interaction diagram, and a short brief
         // for its edge labels -- the full text is fetched by /role on demand.
         reviewer: def.reviewer === undefined ? null : def.reviewer,
+        // Light review projection (null when this node was never reviewed).
+        review: lr,
         dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
         brief: brief(def.taskTemplate && def.taskTemplate.requirement, 110),
         title: nodeTitle(def, def.taskTemplate && def.taskTemplate.requirement) || null,
@@ -431,19 +855,28 @@ export function apply(ctx) {
     });
     const total = nodes.length;
     // Per-role roll-up, so the page can show a team summary without re-deriving
-    // it and without a second request.
+    // it and without a second request. The role NAME SET is unchanged: it is
+    // exactly the node owners, never the reviewers (the client asserts equality
+    // between the two, and the sequence diagram's swimlane count depends on it).
     const roles = [];
     for (const n of nodes) {
-      const key = n.agentName === undefined || n.agentName === null ? '(未指派)' : n.agentName;
+      const key = n.agentName === undefined || n.agentName === null ? UNASSIGNED_ROLE : n.agentName;
       let r = roles.find((x) => x.name === key);
-      if (!r) { r = { name: key, total: 0, completed: 0, failed: 0, working: 0, pending: 0, elapsedMs: 0 }; roles.push(r); }
+      if (!r) { r = { name: key, total: 0, completed: 0, failed: 0, working: 0, reviewing: 0, rework: 0, pending: 0, elapsedMs: 0 }; roles.push(r); }
       r.total += 1;
-      if (n.status === 'completed') r.completed += 1;
-      else if (n.status === 'failed') r.failed += 1;
-      else if (n.status === 'working') r.working += 1;
+      const bucket = bucketOf(n.status);
+      if (bucket === 'completed') r.completed += 1;
+      else if (bucket === 'failed') r.failed += 1;
+      else if (bucket === 'working') r.working += 1;
+      else if (bucket === 'reviewing') r.reviewing += 1;
+      else if (bucket === 'rework') r.rework += 1;
       else r.pending += 1;
       if (typeof n.elapsedMs === 'number') r.elapsedMs += n.elapsedMs;
     }
+    // Reviewers are a SEPARATE roll-up (supervision), never merged into `roles`:
+    // a reviewer owns no node, so `roles`' total/completed would be meaningless
+    // for it. Names use the same roleNamer() so both arrays are comparable.
+    const reviewers = reviewerRollup(nodes);
     // `clean` drops undefined, so normalise every envelope field to null: a run
     // that is still in flight must still expose `endedAt` as a key, otherwise a
     // client reading `run.endedAt` on a fixed shape breaks.
@@ -453,16 +886,49 @@ export function apply(ctx) {
       run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, workflowName: (wf && wf.name) || null, status: run.status === undefined ? null : run.status, startedAt: num(run.startedAt), endedAt: num(run.endedAt) },
       nodes,
       roles,
-      totals: { total, completed, failed, working, pending, percent: total === 0 ? 0 : Math.round((completed / total) * 100) },
+      reviewers,
+      totals: { total, completed, failed, working, reviewing, rework, unresolved, pending, percent: total === 0 ? 0 : Math.round((completed / total) * 100) },
     });
   };
 
   // Full detail for ONE role in one run. Deliberately split from `/progress`:
   // the page polls the light summary every few seconds, while a role's complete
   // report (thousands of characters) is fetched only when it is actually opened.
+  // One fixed projection of a node's review record, shared by the supervisor view
+  // (`reviews`) and the owner view (`nodes[].review`) on purpose. The node card is
+  // rendered from /role's OWNER entry, so a projection that only ever appeared in
+  // the supervisor list left the verdict unreachable exactly where the UI promises
+  // to show it -- and the card then contradicted the supervisor view on the same
+  // screen. Every key is defaulted rather than omitted so the client can read the
+  // shape without existence checks, and an old record (no review at all) is
+  // represented by `null` at the call site instead of an all-null object.
+  const reviewView = (rv, fb) => clean({
+    reviewer: rv && rv.reviewer !== undefined ? rv.reviewer : fb.reviewer,
+    reviewerName: rv && rv.reviewerName !== undefined ? rv.reviewerName : null,
+    verdict: rv && rv.verdict !== undefined ? rv.verdict : null,
+    score: rv && rv.score !== undefined ? rv.score : null,
+    summary: rv && rv.summary !== undefined ? rv.summary : null,
+    findings: rv && Array.isArray(rv.findings) ? rv.findings : [],
+    resolved: rv && Array.isArray(rv.resolved) ? rv.resolved : [],
+    uncertainties: rv && Array.isArray(rv.uncertainties) ? rv.uncertainties : [],
+    blockingCount: rv && typeof rv.blockingCount === 'number' ? rv.blockingCount : 0,
+    advisoryCount: rv && typeof rv.advisoryCount === 'number' ? rv.advisoryCount : 0,
+    unresolved: rv ? rv.unresolved === true : false,
+    unresolvedReason: rv && rv.unresolvedReason !== undefined ? rv.unresolvedReason : null,
+    rounds: rv && typeof rv.rounds === 'number' ? rv.rounds : 0,
+    startedAt: rv && typeof rv.startedAt === 'number' ? rv.startedAt : fb.startedAt,
+    endedAt: rv && typeof rv.endedAt === 'number' ? rv.endedAt : fb.endedAt,
+    elapsedMs: rv && typeof rv.elapsedMs === 'number' ? rv.elapsedMs : fb.elapsedMs,
+    reasoning: rv && typeof rv.reasoning === 'string' && rv.reasoning !== '' ? rv.reasoning : null,
+    reasoningLen: rv && typeof rv.reasoningLen === 'number' ? rv.reasoningLen : null,
+    notes: rv && Array.isArray(rv.notes) ? rv.notes : [],
+    error: rv && rv.error !== undefined ? rv.error : null,
+    parseError: rv && rv.parseError !== undefined ? rv.parseError : null,
+    toolNote: rv && rv.toolNote !== undefined ? rv.toolNote : null,
+  });
   const roleDetail = async (runId, role) => {
     const run = runId ? await getRun(runId) : await latestRun();
-    if (!run) return { ok: true, run: null, role: role || null, nodes: [] };
+    if (!run) return { ok: true, run: null, role: role || null, nodes: [], reviews: [] };
     const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
     const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
     const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
@@ -471,14 +937,30 @@ export function apply(ctx) {
     const tasks = await listTasks();
     const at = now();
     const out = [];
+    const reviews = [];
     let budget = NODE_OUTPUT_MAX_TOTAL;
     for (let order = 0; order < ids.length; order++) {
       const nid = ids[order];
       const def = (defs && defs[nid]) || {};
       const st = states[nid] && typeof states[nid] === 'object' ? states[nid] : {};
       const agent = ownerOf(st, def);
-      const agentName = nameOf(agent);
-      if (role && agentName !== role) continue;
+      // The client builds its role chips from /progress's roll-up, which presents a
+      // node with no owner as '(未指派)'. Matching the RAW null here meant /role
+      // could not be queried for that chip at all: it existed, and clicking it
+      // reported "this role has no nodes in this run". Both read paths must use the
+      // one placeholder literal. (Same defect family as the role-literal mismatch
+      // fixed in P8 -- one role must never have two names.)
+      const rawName = nameOf(agent);
+      const agentName = rawName === null || rawName === undefined ? UNASSIGNED_ROLE : rawName;
+      const isOwner = !role || agentName === role;
+      // `review` is a free-form object on the node state; project EVERY key onto
+      // one fixed shape with null defaults so the client can read it without
+      // existence checks, and so an old record (no review at all) looks the same
+      // as a node that was never reviewed.
+      const rv = st.review !== null && typeof st.review === 'object' ? st.review : null;
+      const reviewerName = rv && rv.reviewerName !== undefined && rv.reviewerName !== null ? rv.reviewerName : null;
+      const isReviewer = role && reviewerName === role;
+      if (!isOwner && !isReviewer) continue;
       // Tasks carry (workflowId, nodeId) but NO run id, and every run creates a
       // FRESH task per node -- so "the newest task for this node" can belong to a
       // different run of the same workflow, which would present another run's
@@ -492,23 +974,49 @@ export function apply(ctx) {
         owned.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         task = owned.filter((t) => typeof t.createdAt === 'number' && t.createdAt >= run.startedAt && (typeof run.endedAt !== 'number' || t.createdAt <= run.endedAt))[0] || null;
       }
+      const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
+      const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
+      const elapsedMs = startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt);
+      const status = typeof st.status === 'string' ? st.status : 'pending';
+      const title = nodeTitle(def, (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement)) || null;
+      const summary = st.summary === undefined ? null : st.summary;
+      // A node can legitimately appear in BOTH lists: once as the node its owner
+      // is responsible for, once as a node its reviewer supervised. Reviewer
+      // entries must never leak into `nodes` -- the client asserts that /role's
+      // `nodes` contain only the queried agent's own nodes.
+      if (isReviewer) {
+        reviews.push(clean({
+          kind: 'review',
+          id: nid, order,
+          nodeTitle: title,
+          reviewedAgentName: agentName,
+          reviewedStatus: status,
+          reviewedSummary: summary,
+          taskId: task ? task.id : (st.taskId === undefined ? null : st.taskId),
+          ...reviewView(rv, { reviewer: def.reviewer === undefined ? null : def.reviewer, startedAt, endedAt, elapsedMs }),
+        }));
+      }
+      if (!isOwner) continue;
       // The ledger keeps the worker's COMPLETE report; the run record keeps a
       // 200-char slice of it, so prefer the ledger and fall back to the slice.
       const full = task && typeof task.output === 'string' ? task.output : (typeof st.output === 'string' ? st.output : '');
       const take = Math.max(0, Math.min(NODE_OUTPUT_MAX, budget));
       budget -= Math.min(full.length, take);
-      const startedAt = typeof st.startedAt === 'number' ? st.startedAt : null;
-      const endedAt = typeof st.endedAt === 'number' ? st.endedAt : null;
       out.push(clean({
         id: nid, order, agent, agentName,
-        status: typeof st.status === 'string' ? st.status : 'pending',
-        startedAt, endedAt,
-        elapsedMs: startedAt === null ? null : (endedAt === null ? at - startedAt : endedAt - startedAt),
-        title: nodeTitle(def, (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement)) || null,
-        summary: st.summary === undefined ? null : st.summary,
+        status,
+        startedAt, endedAt, elapsedMs,
+        title,
+        summary,
         requirement: (def.taskTemplate && def.taskTemplate.requirement) || (task && task.requirement) || null,
         acceptanceCriteria: (def.taskTemplate && def.taskTemplate.acceptanceCriteria) || (task && task.acceptanceCriteria) || null,
         reviewer: def.reviewer === undefined ? null : def.reviewer,
+        // The owner entry must carry the review too: NodeCard is rendered from
+        // THIS entry, so without it the verdict was unreachable on the node card
+        // while /progress and the supervisor view both already had it. `null`
+        // (not an all-null object) is the "never reviewed" case, so the client
+        // can tell "no record" from "a record with no verdict".
+        review: rv === null ? null : reviewView(rv, { reviewer: def.reviewer === undefined ? null : def.reviewer, startedAt, endedAt, elapsedMs }),
         dependsOn: Array.isArray(def.dependsOn) ? def.dependsOn.slice() : [],
         output: full === '' ? null : full.slice(0, take),
         outputLen: full.length,
@@ -527,6 +1035,7 @@ export function apply(ctx) {
       run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, workflowName: (wf && wf.name) || null, status: run.status === undefined ? null : run.status, startedAt: typeof run.startedAt === 'number' ? run.startedAt : null, endedAt: typeof run.endedAt === 'number' ? run.endedAt : null },
       role: role || null,
       nodes: out,
+      reviews,
     });
   };
 
@@ -615,10 +1124,101 @@ export function apply(ctx) {
       const completed = {};
       const succeeded = {};
       const outputs = {};
+      // P10 review ledgers, in `runWorkflow` scope so ONE run shares them.
+      // `reworkByNode` / `runRework` are the anti-stretch budget: they bound how
+      // many extra worker dispatches a whole run can produce, regardless of what
+      // any reviewer decides. Both are only ever touched in the same synchronous
+      // block as their check (see the rework decision below) -- an `await`
+      // between checking and incrementing would let a concurrent wave overspend.
+      const reviews = {};
+      const reworkByNode = {};
+      let runRework = 0;
       const subagents = ctx.get('subagents');
       const parent = resolveParentAgent(ctx);
       const agentDefs = await listAgents();
+      // Reviewer and title names must use the SAME canonical role name the board
+      // already groups by (`roleNamer`), otherwise one reviewer shows up twice.
+      const nameOf = await roleNamer();
+      const titleOf = (node) => nodeTitle(node, node && node.taskTemplate && node.taskTemplate.requirement) || node.id;
       const setRunState = async (patch) => withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, ...patch, nodeStates: { ...(cur.nodeStates || {}), ...(patch.nodeStates || {}) } })));
+      // ---- P10 review phase helpers ----
+      // The reviewer actually in effect: the node's own first, then the
+      // workflow-level one. Empty/blank strings count as "not configured", so a
+      // workflow that never declared a reviewer dispatches exactly the calls it
+      // did before P10 -- no extra state write, no extra child, no extra field.
+      const reviewerRefFor = (node) => {
+        const own = node && typeof node.reviewer === 'string' ? node.reviewer.trim() : '';
+        if (own !== '') return own;
+        const rv = wf.review && typeof wf.review === 'object' ? wf.review : null;
+        if (rv === null) return '';
+        // `review.enabled === false` switches the WORKFLOW-LEVEL default off. A
+        // node that names its own reviewer still wins (checked above), because the
+        // more specific declaration is the one the author wrote for that step.
+        if (rv.enabled === false) return '';
+        return typeof rv.reviewer === 'string' ? rv.reviewer.trim() : '';
+      };
+      // One review of one artifact. Never throws and never blocks: a reviewer
+      // that dies, times out, stops early, or returns unparseable text yields
+      // verdict 'error' and the node still completes.
+      const runReview = async (nid, node, output, rnd, knownBlocking, task) => {
+        const ref = reviewerRefFor(node);
+        if (ref === '') return null;
+        const named = nameOf(ref) || ref;
+        const def = agentDefs.find((d) => d.id === ref || d.name === ref) || null;
+        const startedAt = now();
+        let text = ''; let reasoning = ''; let toolNote = ''; let error = null;
+        const artifact = String(output === undefined || output === null ? '' : output);
+        const truncated = artifact.length > REVIEW_LIMITS.artifactMax;
+        const prompt = buildReviewPrompt({
+          round: rnd, nodeId: nid, title: titleOf(node),
+          agentName: nameOf(node && node.agent) || (node && node.agent) || null,
+          requirement: task.requirement, acceptanceCriteria: task.acceptanceCriteria,
+          artifact: truncated ? artifact.slice(0, REVIEW_LIMITS.artifactMax) : artifact,
+          artifactTruncated: truncated, knownBlocking,
+        });
+        if (subagents) {
+          const ctl = new AbortController();
+          try {
+            // The REVIEWER derives its own model/persona from its own definition.
+            // The reviewed node's deny-list or persona must never be applied to
+            // it: those describe the worker being judged, not the judge.
+            const started = await startWorker(subagents, { label: nid + ':review', prompt: [{ type: 'text', text: prompt }], parent, signal: ctl.signal }, spawnSpecFor(def, parent), parentToolNote(parent));
+            toolNote = started.note;
+            const result = await withTimeout(started.run.result, REVIEW_LIMITS.timeoutMs, 'review of node ' + nid);
+            const blocks = result.output || [];
+            text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+            // The reviewer's thinking is part of the audit trail, same as a
+            // worker's: collect reasoning blocks as well as text.
+            reasoning = blocks.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
+            if (result.stopReason !== 'completed') error = 'reviewer ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '');
+          } catch (e) {
+            ctl.abort();
+            error = String(e && e.message ? e.message : e);
+          }
+        } else {
+          error = 'subagents service unavailable';
+        }
+        const parsed = error === null ? parseReviewVerdict(text) : { raw: text, parsed: null, parseError: error };
+        const norm = normalizeReview(parsed.parsed, { round: rnd, knownBlocking, parseError: parsed.parseError });
+        const endedAt = now();
+        const st = {
+          reviewer: ref, reviewerName: named,
+          verdict: error === null ? norm.verdict : 'error',
+          score: norm.score, summary: norm.summary,
+          blockingCount: norm.blockingCount, advisoryCount: norm.advisoryCount,
+          findings: norm.findings, resolved: norm.resolved, uncertainties: norm.uncertainties,
+          rounds: rnd, unresolved: false, unresolvedReason: null, notes: norm.notes,
+          startedAt, endedAt, elapsedMs: endedAt - startedAt,
+          // Bounded exactly like a worker's reasoning trace, with its true
+          // length kept alongside so a capped trace is never read as a short one.
+          reasoning: typeof reasoning === 'string' && reasoning !== '' ? reasoning.slice(0, REASONING_MAX) : null,
+          reasoningLen: typeof reasoning === 'string' && reasoning !== '' ? reasoning.length : null,
+          error, parseError: norm.parseError, toolNote: toolNote === '' ? null : toolNote,
+        };
+        // `st` is the whole node-level review record; the caller keeps it for
+        // every subsequent state write for this node.
+        return { st };
+      };
       for (let round = 0; round < 1000; round++) {
         const ready = nodeIds.filter((nid) => {
           if (completed[nid]) return false;
@@ -643,9 +1243,41 @@ export function apply(ctx) {
           // so a second write for the same id REPLACES the whole entry -- a
           // completed/failed patch that omitted startedAt would erase it.
           const nodeStartedAt = now();
+          // The review record produced by this node, if it was reviewed at all.
+          // Held here so EVERY later write for this node can carry it: a
+          // reviewing/rework/completed patch that omitted `review` would erase
+          // the verdict the moment the next state write landed.
+          let reviewState = null;
+          // Tools the WORKER could not use. Collected only to describe the
+          // WORKER in a rework prompt; it is never applied to the reviewer.
+          let deny = [];
+          // Effective rework cap for this node, clamped to the plugin hard limit
+          // so neither the node nor the workflow can raise it. Defaults to the
+          // plugin bound when the declaration is absent or nonsensical.
+          const effMaxRework = () => {
+            const candidates = [];
+            if (node.maxRework !== undefined && node.maxRework !== null) candidates.push(node.maxRework);
+            if (wf.review && typeof wf.review === 'object' && wf.review.maxRework !== undefined && wf.review.maxRework !== null) candidates.push(wf.review.maxRework);
+            let n = REVIEW_LIMITS.maxReworkPerNode;
+            for (const c of candidates) if (typeof c === 'number' && isFinite(c)) n = Math.min(n, Math.max(0, Math.floor(c)));
+            return n;
+          };
+          // A node's terminal status is only known when the node finishes, so the
+          // intermediate writes (reviewing / rework / working) deliberately leave
+          // `endedAt` null and `summary` null rather than freezing a value that
+          // the completion write would then contradict.
+          const persistReview = async (next, errText) => {
+            await setRunState({ nodeStates: { [nid]: {
+              status: next, assignee: node.agent, startedAt: nodeStartedAt,
+              endedAt: null, summary: null, tools: toolNote,
+              taskId: taskId || null, error: errText,
+              ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}),
+              ...(reviewState ? { review: reviewState } : {}),
+            } } });
+          };
           try {
             await setRunState({ nodeStates: { [nid]: { status: 'working', assignee: node.agent, startedAt: nodeStartedAt } } });
-            const task = await createTask({ workflowId, nodeId: nid, assignee: node.agent, reviewer: node.reviewer, requirement: (node.taskTemplate && node.taskTemplate.requirement) || node.id, acceptanceCriteria: (node.taskTemplate && node.taskTemplate.acceptanceCriteria) || '' });
+            const task = await createTask({ workflowId, nodeId: nid, assignee: node.agent, reviewer: reviewerRefFor(node), requirement: (node.taskTemplate && node.taskTemplate.requirement) || node.id, acceptanceCriteria: (node.taskTemplate && node.taskTemplate.acceptanceCriteria) || '' });
             taskId = task.id;
             await submitTask(task.id); await startTask(task.id);
             let output = 'no delegate';
@@ -656,6 +1288,7 @@ export function apply(ctx) {
               nodeCtl.signal.throwIfAborted();
               const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, spawnSpecFor(def, parent), parentToolNote(parent));
               toolNote = started.note;
+              deny = (((def && def.tools) || {}).deny || []).slice();
               const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'workflow node ' + nid);
               const blocks = result.output || [];
               output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -669,15 +1302,86 @@ export function apply(ctx) {
                 throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + (output ? ' | partial: ' + output.slice(0, 200) : ''));
               }
             }
+            // ==== P10 review phase (inserted between the dispatch above and the
+            // `completeTask` below). The REVIEWER itself can never fail the node:
+            // runReview contains every reviewer-side failure (spawn error,
+            // timeout, early stop, unparseable text) and turns it into
+            // verdict 'error', so a broken judge is not a broken deliverable.
+            // This phase does live inside the node's single try/catch, which is
+            // deliberate: a REWORK worker that fails to run is treated exactly
+            // like an initial worker that fails to run -- the node has no
+            // acceptable artifact either way, so it is reported `failed` rather
+            // than quietly passing on the artifact the reviewer just rejected.
+            let rnd = 1;
+            let knownBlocking = [];
+            let worst = null;
+            for (;;) {
+              const rv = await runReview(nid, node, output, rnd, knownBlocking, task);
+              if (rv === null) break; // no reviewer in effect: behave exactly as before P10
+              reviewState = rv.st;
+              reviews[nid] = lightReview(reviewState);
+              // Publish "being reviewed" with the verdict already attached, then
+              // immediately overwrite with the outcome: a poll landing during the
+              // review sees `reviewing`, and one landing after it sees the verdict
+              // ON the node -- never a gap where the verdict is lost.
+              await persistReview('reviewing', null);
+              if (reviewState.verdict !== 'rework') { await persistReview('completed', null); break; }
+              worst = reviewState;
+              const cap = effMaxRework();
+              const nodeUsed = typeof reworkByNode[nid] === 'number' ? reworkByNode[nid] : 0;
+              // Budget check + consume in ONE synchronous block: no `await`
+              // between reading runRework and incrementing it, so two nodes in the
+              // same wave cannot both pass the gate and overspend the run budget.
+              if (nodeUsed >= cap || runRework >= REVIEW_LIMITS.maxReworkPerRun) {
+                const which = nodeUsed >= cap
+                  ? '单节点返工上限（maxReworkPerNode=' + cap + ' 轮，已用 ' + nodeUsed + ' 轮）'
+                  : '整次运行返工总上限（maxReworkPerRun=' + REVIEW_LIMITS.maxReworkPerRun + ' 轮，已用 ' + runRework + ' 轮）';
+                reviewState.unresolved = true;
+                reviewState.unresolvedReason = '已达' + which + '，不再返工；该节点的阻塞项未解决，需人工介入。';
+                reviews[nid] = lightReview(reviewState);
+                await persistReview('completed', null);
+                break;
+              }
+              reworkByNode[nid] = nodeUsed + 1;
+              runRework += 1;
+              await persistReview('rework', null);
+              // The rework reuses the ledger's EXISTING state machine
+              // (completed -> reworked -> working) and the SAME task id: one node
+              // is one task for its whole life, never a fresh task per attempt.
+              await reworkTask(taskId, reviewState.summary + ' | ' + reviewState.findings.filter((f) => f.severity === 'blocking').map((f) => f.criterion).join(' ; '));
+              await resumeTask(taskId);
+              await persistReview('working', null);
+              rnd += 1;
+              nodeCtl.signal.throwIfAborted();
+              const reworkPrompt = buildReworkPrompt({
+                who: (agentDefs.find((d) => d.id === node.agent || d.name === node.agent) || {}).name || node.agent || 'team',
+                requirement: task.requirement, acceptanceCriteria: task.acceptanceCriteria,
+                blocking: reviewState.findings.filter((f) => f.severity === 'blocking'),
+                round: rnd - 1,
+              }) + (deny.length ? '\n\n注意：以下工具对本次派发不可用，不要尝试调用它们：' + deny.join(', ') : '');
+              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, spawnSpecFor(agentDefs.find((d) => d.id === node.agent || d.name === node.agent), parent), parentToolNote(parent));
+              toolNote = restarted.note;
+              const again = await withTimeout(restarted.run.result, NODE_TIMEOUT_MS, 'workflow node ' + nid + ' rework ' + rnd);
+              const blocks2 = again.output || [];
+              output = blocks2.filter((b) => b.type === 'text').map((b) => b.text).join('');
+              reasoning = blocks2.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
+              if (again.stopReason !== 'completed') throw new Error('worker(rework) ' + again.stopReason + (again.diagnostic ? ': ' + again.diagnostic : '') + (output ? ' | partial: ' + output.slice(0, 200) : ''));
+              // A re-review may only re-check the PREVIOUS round's blocking items;
+              // normalizeReview's R4 enforces that mechanically.
+              knownBlocking = worst.findings.filter((f) => f.severity === 'blocking').map((f) => f.criterion).filter((c) => typeof c === 'string' && c !== '');
+            }
             await completeTask(taskId, output, null);
             outputs[nid] = output; completed[nid] = true; succeeded[nid] = true;
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
+            // The single completion write. With no reviewer in effect it carries
+            // exactly the keys it always did (`reviewState` stays null, so the
+            // spread contributes nothing) -- unchanged field set, unchanged shape.
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}) } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}) } } });
           }
         }));
       }
@@ -685,7 +1389,10 @@ export function apply(ctx) {
       const allOk = nodeIds.every((nid) => succeeded[nid] === true);
       const status = allOk ? 'completed' : (allDone ? 'failed' : 'interrupted');
       const summary = allOk ? 'workflow completed' : (allDone ? 'workflow finished with failed nodes' : 'workflow interrupted');
-      await withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, status, endedAt: now(), result: { outputs, summary } })));
+      // `reviews` is the per-node LIGHT projection (same shape /progress serves),
+      // so a finished run carries its review outcome without re-reading
+      // nodeStates. An unreviewed run yields `{}`, i.e. no behaviour change.
+      await withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, status, endedAt: now(), result: { outputs, summary, reviews } })));
       return { id: runRec.id, status };
     } finally { liveRuns.delete(runRec.id); }
   };
