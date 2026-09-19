@@ -23,6 +23,11 @@ let failures = 0
 const pending = []
 // Phase 1 replaces globalThis.fetch; phase 2 must talk to the real host.
 const realFetch = globalThis.fetch
+// Every interval the stubbed bundle creates must be cleared before exit: this
+// stub never calls an effect's cleanup itself, and on Windows a process.exit()
+// while libuv async handles are still closing trips an assertion in async.c.
+const allDisposers = []
+const collect = (list) => { for (const d of list) allDisposers.push(d) }
 
 function check(label, ok, detail) {
   checks += 1
@@ -153,7 +158,7 @@ if (bundle) {
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
   }
   const treeOf = (component) => react.mount(react.createElement(component))
-  const settle = () => { react.settle(); react.flushEffects() }
+  const settle = () => { react.settle(); collect(react.flushEffects()) }
   const activeTab = (node) => {
     const hit = findNode(node, (n) => n.type === 'button' && n.props && n.props.className === 'tf-tab active')
     return hit === undefined ? null : (typeof hit.props.children === 'string' ? hit.props.children : '?')
@@ -253,7 +258,6 @@ if (bundle) {
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
   }
 
-  const disposers = []
   // This stub's useEffect re-queues EVERY effect on every render (it tests
   // `cell.value === undefined`, which never becomes false) — real React re-runs
   // an effect only when its deps change. The page's selection effect clears the
@@ -261,7 +265,7 @@ if (bundle) {
   // what makes the fetched detail observable.
   const pump = async () => {
     for (let i = 0; i < 3; i++) {
-      for (const d of react.flushEffects()) disposers.push(d)
+      collect(react.flushEffects())
       await sleep(25)
       react.settle()
     }
@@ -337,7 +341,7 @@ if (bundle) {
     check('page shows the aggregate the sidebar summary needs', flatten(page).indexOf('50%') !== -1)
   }
 
-  for (const d of disposers) if (typeof d.dispose === 'function') { try { d.dispose() } catch { /* ignore */ } }
+  for (const d of allDisposers) if (d && typeof d.dispose === 'function') { try { d.dispose() } catch { /* ignore */ } }
   globalThis.fetch = realFetch
 }
 
@@ -434,6 +438,7 @@ if (process.argv.includes('--smoke')) {
   if (runId) {
     let sawWorking = false
     const deadline = Date.now() + 12 * 60 * 1000
+    const smokeStart = Date.now()
     for (;;) {
       const r = await get('/api/team-flowise/run?id=' + encodeURIComponent(runId))
       const run = r.json && r.json.run
@@ -444,7 +449,9 @@ if (process.argv.includes('--smoke')) {
         break
       }
       if (Date.now() > deadline) { console.log('       smoke deadline hit'); break }
-      await sleep(5000)
+      // A trivial node can settle in well under a second, so sample fast while the
+      // run is young: the `working` state is real, but a 5s poll steps right over it.
+      await sleep(Date.now() - smokeStart < 30000 ? 200 : 5000)
     }
     check('a node was observed in the live working state', sawWorking)
     const r2 = await get('/api/team-flowise/run?id=' + encodeURIComponent(runId))
