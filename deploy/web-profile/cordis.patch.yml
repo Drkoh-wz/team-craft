@@ -1,0 +1,16 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+
+# Flowise-like multi-agent team orchestration plugin (host bundle).
+# A patch overlay can only override existing rows by id; to ADD a brand-new
+# row it must use `- insert:` with a nested row list. This adds flowise-team
+# as a new host-composition row. The package (@local/team-flowise) is a file:
+# dependency of this profile; its storage domains auto-route to the already
+# composed `json` backend.
+# NOTE: flowise-team is ENABLED for runtime verification of the P1-P3 host
+# bundle (team_* tools + teamOrchestrator service + 4 storage domains).
+- insert:
+    - id: flowise-team
+      name: '@local/team-flowise'
+      disabled: false

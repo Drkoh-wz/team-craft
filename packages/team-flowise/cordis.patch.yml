@@ -1,0 +1,21 @@
+# Flowise-like multi-agent team plugin bundle patch layer.
+# Applied after the base/web-app bundles, before the profile's own cordis.patch.yml.
+
+# The team plugin is HOST-plane: it publishes a service (teamOrchestrator),
+# registers into the host tools registry, and owns durable storage domains.
+# It must sit as a host composition row, NOT behind a preset isolate realm
+# (its service is consumed beyond one session).
+#
+# Storage routing: @deepseek-ai/dsh-storage-domain is ALREADY composed by the
+# web-app bundle with `backend: json` (root dshHomePath('storages')). Our team
+# domains (team_agent_defs / team_ledger / team_workflows / team_runs) therefore
+# auto-route to the file backend — no duplicate storage-domain row is added here
+# (a second one would collide with the already-mounted service).
+#
+# The `flowise-team` row itself is added in the PROFILE's cordis.patch.yml via
+# `- insert:` (a bundle patch layer cannot add a brand-new row; it can only
+# override existing rows by id). Do NOT add it here.
+
+# This bundle patch must be a top-level YAML array. It contributes no rows
+# (the plugin row lives in the profile's cordis.patch.yml), so it is empty.
+[]

@@ -1,0 +1,31 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+allowBuilds:
+  node-pty: true
+  cloudflared: true
+  cpu-features: true
+  ssh2: true
+minimumReleaseAgeExclude:
+  - '@linxin666/dsh-client-ui-community-plugins@0.3.12'
+  - '@linxin666/dsh-client-ui-git-graph@0.3.12'
+  - '@linxin666/dsh-client-ui-market@0.3.12'
+  - '@linxin666/dsh-client-ui-plugin-manager@0.3.12'
+  - '@linxin666/dsh-client-ui-skill-explorer@0.3.12'
+  - '@linxin666/dsh-client-ui-skin-center@0.3.12'
+  - '@linxin666/dsh-client-ui-task-board@0.3.12'
+  - '@linxin666/dsh-client-ui-web-ui-settings@0.3.12'
+  - '@linxin666/dsh-desktop-launcher@0.3.12'
+  - '@linxin666/dsh-doctor@0.3.12'
+  - '@linxin666/dsh-i18n@0.3.12'
+  - '@linxin666/dsh-liangshen@0.3.12'
+  - '@linxin666/dsh-perf@0.3.12'
+  - '@linxin666/dsh-pet@0.3.12'
+  - '@linxin666/dsh-remote-web-ui@0.3.12'
+  - '@linxin666/dsh-session-archive@0.3.12'
+  - '@linxin666/dsh-ssh@0.3.12'
+  - '@linxin666/dsh-tool-describe-image@0.3.12'
+  - '@linxin666/dsh-usage@0.3.12'
+  - '@linxin666/dsh-web-all@0.3.12'
