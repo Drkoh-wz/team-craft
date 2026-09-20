@@ -682,6 +682,145 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   var POLL_MS = 3000;         // /progress 轻量轮询：只有状态与计时
   var ROLE_POLL_MS = 5000;    // 角色详情仅在仍有节点在跑时跟着刷新
   var ORCH = '编排器';
+  // P12: 侧栏页脚常驻芯片的轮询间隔。硬约束是"不得比进度页更密"，所以这里与
+  // 进度页同拍（3 秒），不是更密。
+  var FOOTER_POLL_MS = 3000;
+
+  // ---------------------------------------------------------------------------
+  // P12：会话归属 —— "这条运行是不是本会话发起的？"
+  //
+  // 缺陷：进度页以前问的是 /progress（不带任何参数），拿到的永远是**全进程最新**
+  // 的一次运行。别的会话让 AI 调团队干活时，本会话的侧栏要么看到别人的运行，要么
+  // 什么都没跑过而只看到空态。
+  //
+  // 当前会话 id 的取法（三跳，全部经过实际核对，不是猜的）：
+  //   1) 会话作用域槽位（sidebar.right.pane.tab / .title）的 props 直接带
+  //      `sessionId: SessionId`                       —— slots 目录 standardProps 原文
+  //   2) 根作用域槽位（main / settings.section / sidebar.footer.action）的 props 带
+  //      标准座位 `useSessions`：ui-session 用
+  //        ctx.slots.provideRoot({ hooks: { sessions: ctx.sessions.list, ... } })
+  //      （dsh-client-ui-session/lib/client.js:321-324）发布，渲染层把 hook 名按
+  //      standardHookPropName('sessions') = 'useSessions' 注入进每个根作用域条目
+  //      （dsh-client-ui-renderer/lib/client.js:538-556）
+  //   3) 兜底：apply() 里 ctx.get('sessions') 捕获的客户端 sessions 服务，按快照现读
+  //      contract/sessions.d.ts:19-21  interface ISessions { readonly list: ObservableSnapshot<SessionListState> }
+  //      sessions/service.d.ts:61-69  interface SessionListState { ids; byId; current: SessionId | undefined; ... }
+  //
+  // 三跳都拿不到 => "未知会话"：/progress **不带** session 参数（与改动前逐字一致），
+  // 界面如实写"全部运行"。绝不把别人的运行当成自己的。
+  // ---------------------------------------------------------------------------
+  var SESSIONS_SVC = null;    // apply() 捕获；服务缺席时保持 null（不是错误）
+  var OPEN_PROGRESS = null;   // apply() 组装的"打开进度面"降级链；缺席时什么都不做
+
+  /** `useSessions` 的选择器：只读当前会话 id（SessionListState.current）。 */
+  function sessionCurrentOf(state) {
+    return state && typeof state.current === 'string' && state.current !== '' ? state.current : null;
+  }
+
+  /** 会话 id 的短形式，只用于界面标注，不参与任何判定。 */
+  function shortSid(id) { return typeof id === 'string' && id !== '' ? '#' + id.slice(-6) : ''; }
+
+  /**
+   * 当前会话 id，每次调用都从 sessions 服务的快照里现取（所以轮询里重新取值就能
+   * 跟随现场切换会话）。服务缺失 / 形状不符 / 取值抛错一律返回 null —— 调用方据此
+   * 退回"全部运行"。
+   * @returns 会话 id，或 null。
+   */
+  function currentSessionIdFromService() {
+    try {
+      var svc = SESSIONS_SVC;
+      if (svc === null || svc === undefined) return null;
+      var list = svc.list;
+      if (list === null || list === undefined || typeof list.getSnapshot !== 'function') return null;
+      return sessionCurrentOf(list.getSnapshot());
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 组件侧的标准会话座位：先看会话作用域直接给的 `sessionId`，再看根作用域标准
+   * 钩子 `useSessions`。两者都缺席就返回 null（由服务兜底路径补上）。
+   * 钩子只在 props 里真有它时才调用，而同一个组件实例的 props 不会中途改变这一点，
+   * 因此钩子顺序是稳定的。
+   * @returns 会话 id，或 null。
+   */
+  function useStandardSessionId(props) {
+    var direct = props ? props.sessionId : undefined;
+    if (typeof direct === 'string' && direct !== '') return direct;
+    if (props && typeof props.useSessions === 'function') {
+      try { return props.useSessions(sessionCurrentOf) || null; } catch (e) { return null; }
+    }
+    return null;
+  }
+
+  /**
+   * 把 /progress 的答案读成"这是谁的运行"。纯函数：只吃入参，不读 ctx、不写状态。
+   *
+   * @param asked - 本次请求带上的会话 id；null = 没有会话（改动前的全局最新语义）。
+   * @param data - /progress 的响应体（可能为 null / 残缺）。
+   * @param runs - /runs 的列表（未按会话过滤；用来判断"别的会话有没有在跑"）。
+   * @returns { kind, run, others, legacy, otherExists }：
+   *   kind 'none'   什么都没有运行；
+   *   kind 'mine'   返回的运行就是本会话的（run.sessionId 逐字等于 asked）；
+   *   kind 'other'  返回的运行是**别的会话**的（宿主在 run.sessionId 里回显归属）；
+   *   kind 'legacy' 记录早于归属改动（没有 sessionId），无法判定 —— 不猜；
+   *   kind 'all'    本次就是按"全部运行"问的（或拿不到会话）。
+   *   others       别的会话发起的运行条数（判定状态 b 用，不靠时间戳猜）。
+   *   otherExists  "本会话没有、但进程里有别人的运行"确有证据。
+   */
+  function classifyProgress(asked, data, runs) {
+    var run = data && typeof data.run === 'object' && data.run !== null ? data.run : null;
+    var list = Array.isArray(runs) ? runs : [];
+    var others = 0;
+    var legacy = 0;
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      if (!r || typeof r.id !== 'string') continue;
+      var owner = typeof r.sessionId === 'string' && r.sessionId !== '' ? r.sessionId : null;
+      if (owner === null) legacy += 1;
+      else if (asked !== null && owner !== asked) others += 1;
+    }
+    var kind = 'none';
+    if (run !== null) {
+      var runOwner = typeof run.sessionId === 'string' && run.sessionId !== '' ? run.sessionId : null;
+      if (asked === null) kind = 'all';
+      else if (runOwner === null) kind = 'legacy';
+      else kind = runOwner === asked ? 'mine' : 'other';
+    }
+    // 宿主半的 scope 信封（P12 新增的"凭什么选了这条"）是最直接的证据，两种写法都要认：
+    //   * 旧/兜底写法：runCountInScope === 0 且 fallback === 'latest-global'
+    //     —— 宿主在说"你自己的会话一条都没有，我退回全局了"；
+    //   * P12 新宿主：{mode:'session', runCountInScope:0, fallback:null, hasAnyGlobal:true}
+    //     —— fallback 为 null（按会话查就没有 fallback 可言），但仍明确说了"别处有运行"。
+    // 只认前者的后果：当 /runs 也拿不到数据时，面板会把"本会话还没有运行"退化成全局空态。
+    var scope = data && typeof data.scope === 'object' && data.scope !== null ? data.scope : null;
+    var hostSaysForeign = scope !== null && (
+      (scope.runCountInScope === 0 && scope.fallback === 'latest-global') ||
+      (scope.runCountInScope === 0 && scope.hasAnyGlobal === true)
+    );
+    return {
+      kind: kind,
+      run: run,
+      others: others,
+      legacy: legacy,
+      otherExists: others > 0 || hostSaysForeign || kind === 'other'
+    };
+  }
+
+  /**
+   * 请求失败时印在界面上的说法。401 在这个部署里**不是**"没登录"，而是网关把
+   * 未注册的 /api 路径伪装成的样子 —— 必须写清楚，否则会被读成"没有运行"。
+   */
+  function progressErrorText(msg) {
+    var m = msg === undefined || msg === null ? '' : String(msg);
+    if (m === '401') return '401：这个部署的网关会把**未注册**的 /api 路径伪装成 401 —— 宿主半可能没加载，或 dsh 还没重启。';
+    if (m === '404') return '404：宿主没有注册这条路由。';
+    if (m === '500') return '500：宿主在处理这次请求时抛了异常（看宿主日志）。';
+    if (/^[0-9]{3}$/.test(m)) return m + '：宿主拒绝了这次请求。';
+    if (m === '') return '未知错误（响应里没有可读的错误信息）。';
+    return m;
+  }
 
   // The element is <style>; its TEXT must therefore be bare CSS. These strings
   // used to carry their own leading <style> and trailing </style>, so the parser
@@ -1321,6 +1460,23 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var st = React.useState({ data: null, error: null, role: null, detail: null, detailError: null, runs: [], wfs: [] });
     var s = st[0]; var set = st[1];
     var rs = React.useState(null); var runId = rs[0]; var setRunId = rs[1];
+    // P12: 这一屏显示哪一批运行。'session' = 带上 ?session=<id> 按会话查（本轮的
+    // 修复），'all' = 改动前的"全进程最新"。默认 'session'；拿不到会话 id 时它**自己**
+    // 退化成 'all'（界面如实写"全部运行"），开关只是让人主动去看全局。
+    var ms = React.useState('session'); var mode = ms[0]; var setMode = ms[1];
+    var ps = React.useState(null); var polledSid = ps[0]; var setPolledSid = ps[1];
+
+    // 会话 id：props 的标准座位优先，服务快照兜底。两者都拿不到就是 null（未知会话）。
+    var hookedSid = useStandardSessionId(props);
+    var sessionId = hookedSid || polledSid || null;
+    // 生效的会话：'all' 模式或未知会话都是 null => 请求里**不带** session 参数。
+    var activeSid = mode === 'all' ? null : sessionId;
+    // 轮询回调闭包里的 "最新值"：轮询不能把渲染期的旧值当成新值（看板标签回退那次的教训）。
+    var hookedRef = React.useRef(null); hookedRef.current = hookedSid;
+    var polledRef = React.useRef(null); polledRef.current = polledSid;
+
+    // /progress 的答案按"我们问的是哪个会话"来读（纯函数，见文件上方 classifyProgress）。
+    var cls = classifyProgress(activeSid, s.data, s.runs);
 
     // 只做函数式更新：把渲染期快照合并回去，长生命周期的轮询回调就会用旧值
     // 覆盖新值（看板标签回退那次事故的根因）。
@@ -1329,20 +1485,29 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     }, []);
 
     var tick = React.useCallback(function () {
-      var q = runId ? ('?runId=' + encodeURIComponent(runId)) : '';
+      // 每次轮询都重新读一次会话 id：现场切换会话后本页跟着走（标准座位那一路会自己
+      // 触发重渲染，服务那一路靠这里同步）。
+      var live = currentSessionIdFromService();
+      if (polledRef.current !== live) { polledRef.current = live; setPolledSid(live); }
+      var sid = mode === 'all' ? null : (hookedRef.current || live);
+      // 显式选中的 runId 仍然只发 runId：显式选择优先，且不传新参数时行为与改动前一致。
+      var q = runId
+        ? ('?runId=' + encodeURIComponent(runId))
+        : (sid ? ('?session=' + encodeURIComponent(sid)) : '');
       return get('/progress' + q).then(function (d) {
         patch({ data: d, error: null });
       }).catch(function (e) {
         var msg = e && e.message ? e.message : String(e);
         patch(function (prev) { return { data: prev.data, error: msg }; });
       });
-    }, [runId, patch]);
+    }, [runId, mode, patch]);
 
+    var scopeKey = mode + '|' + (sessionId === null ? '' : sessionId);
     React.useEffect(function () {
       tick();
       var id = setInterval(tick, POLL_MS);
       return function () { clearInterval(id); };
-    }, [tick]);
+    }, [tick, scopeKey]);
 
     // 运行列表与工作流名只取一次：运行记录里只存 workflowId，而选择器要显示
     // 人能读的工作流名字，所以两张表都要。
@@ -1376,15 +1541,28 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var selectedRef = React.useRef(null);
     selectedRef.current = selected;
 
+    // P12: 角色详情必须跟着**屏幕上那条运行**取，否则会出现"上面写着别的会话的运行、
+    // 下面详情却是全进程最新"的自相矛盾。显式选择的 runId 优先（与 /progress 同序）；
+    // 没有显式选择时，本会话的运行按 session 取（宿主用同一套归属规则解析它），
+    // 别人的运行按它自己的 runId 取 —— 问自己的会话却渲染别人的节点才是真正的错。
+    // 拿不到会话、也拿不到运行时是空串 => 与改动前的查询串逐字一致。
+    var detailScope = runId
+      ? ('&runId=' + encodeURIComponent(runId))
+      : (cls.run === null
+        ? ''
+        : (cls.kind === 'mine' && activeSid
+          ? ('&session=' + encodeURIComponent(activeSid))
+          : ('&runId=' + encodeURIComponent(cls.run.id))));
+
     var loadDetail = React.useCallback(function (roleName) {
       if (!roleName) { patch({ detail: null }); return Promise.resolve(); }
-      var q = '?agent=' + encodeURIComponent(roleName) + (runId ? '&runId=' + encodeURIComponent(runId) : '');
+      var q = '?agent=' + encodeURIComponent(roleName) + detailScope;
       return get('/role' + q).then(function (d) {
         patch({ detail: d, detailError: null });
       }).catch(function (e) {
         patch({ detailError: e && e.message ? e.message : String(e) });
       });
-    }, [runId, patch]);
+    }, [detailScope, patch]);
 
     React.useEffect(function () {
       if (!selected) { patch({ detail: null }); return; }
@@ -1406,12 +1584,51 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var isFailed = (run !== null && run.status === 'failed') || (totals.failed || 0) > 0;
     var barColor = run === null ? IDLE_COLOR : (isFailed ? FAILED_COLOR : (run.status === 'running' ? RUNNING_COLOR : runInfo(run.status).color));
 
+    // ---------------------------------------------------------------------
+    // P12 状态机（三种状态必须各自可辨，且都写在界面上）：
+    //   (a) 本会话有运行      -> cls.kind 'mine'，正常进度（文案与改动前一致）
+    //   (b) 本会话没有、全局有 -> cls.kind 'none' + cls.otherExists，或 'other'/'legacy'
+    //                            -> 显式写出"本会话暂无运行" + "看全部运行"开关
+    //   (c) 完全没有运行      -> 现有空态
+    // 另外：拿不到会话 id 时**如实**标注当前是"全部运行"，不假装是本会话的。
+    // ---------------------------------------------------------------------
+    var scopeLabel = mode === 'all'
+      ? ('全部运行' + (sessionId === null ? '（拿不到当前会话）' : '（本会话是 ' + shortSid(sessionId) + '，已主动切到全部）'))
+      : (sessionId === null ? '全部运行（拿不到当前会话）' : ('本会话 ' + shortSid(sessionId)));
+    var scopeBadge = React.createElement('span', {
+      className: 'tf-pg-sub',
+      style: { border: '1px solid var(--dsw-alias-border,#e5e7eb)', borderRadius: 999, padding: '1px 8px', whiteSpace: 'nowrap' }
+    }, scopeLabel);
+
+    var note = null;
+    if (!s.error && mode === 'session' && cls.kind === 'other') {
+      note = '本会话暂无运行 —— 下面这条运行是**其他会话**发起的（' + shortSid(cls.run.sessionId) + '），它不是本会话的进度。要看全部就点"看全部运行"。';
+    } else if (!s.error && mode === 'session' && cls.kind === 'legacy') {
+      note = '本会话暂无运行 —— 下面这条运行记录早于会话归属改动（记录里没有 sessionId），无法判定它由哪个会话发起，所以不把它算作本会话的。';
+    } else if (!s.error && mode === 'session' && cls.kind === 'none' && cls.otherExists) {
+      note = '本会话暂无运行：本会话一次都没跑过团队，进程里另有 ' + (cls.others > 0 ? cls.others + ' 条别的会话的运行' : '别的会话的运行') + '。点"看全部运行"能看它们。';
+    } else if (!s.error && mode === 'all' && cls.kind === 'all') {
+      note = '当前是"全部运行"：这是全进程最新的一次运行，它可能属于别的会话。';
+    } else if (!s.error && mode === 'session' && cls.kind === 'none' && !cls.otherExists) {
+      note = null;
+    }
+    var noteBlock = note === null ? null : React.createElement('div', {
+      style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #f5a623', background: '#fffbeb', color: '#92400e', fontSize: 12, lineHeight: 1.5 }
+    }, note);
+
     var header = React.createElement('div', { className: 'tf-pg-head' },
       React.createElement(compact ? 'h3' : 'h2', { className: 'tf-pg-title' }, compact ? '多 Agent 进度' : '多 Agent 团队进度'),
+      scopeBadge,
       run === null ? React.createElement('span', { className: 'tf-pg-sub' }, '暂无运行') : React.createElement('span', { className: 'tf-badge2', style: { background: runInfo(run.status).color } }, runInfo(run.status).label),
       // 领先显示「哪个工作流 · 几个节点 · 何时开始」，短 id 只作为次级信息。
       run === null ? null : React.createElement('span', { className: 'tf-pg-sub' }, (run.workflowName || wfName(run.workflowId)) + ' · ' + (totals.total || 0) + ' 个节点 · ' + runStamp(run.startedAt) + ' · #' + String(run.id).slice(-6)),
       React.createElement('div', { className: 'tf-pg-toolbar' },
+        // P12: "本会话 / 全部运行"的显式开关。本会话没有运行时它是唯一的入口，
+        // 所以不藏在折叠里；切换时清掉显式选中的 runId（否则会继续显示那条运行）。
+        React.createElement('button', {
+          className: 'tf-btn',
+          onClick: function () { setRunId(null); setMode(mode === 'all' ? 'session' : 'all'); }
+        }, mode === 'all' ? '只看本会话' : '看全部运行'),
         compact ? null : React.createElement('select', {
           className: 'tf-select',
           value: runId || '',
@@ -1427,9 +1644,27 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       )
     );
 
+    // P12: 请求失败必须看得见。**绝不**在失败时渲染"暂无运行"（那是把一次失败说成
+    // "没有活干"，401 在这个部署里尤其容易被这么误读）。
+    var errorBlock = s.error === null || s.error === undefined ? null : React.createElement('div', {
+      style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #ef4444', background: '#fef2f2', color: '#b91c1c', fontSize: 12, lineHeight: 1.5 }
+    },
+      '进度获取失败：' + progressErrorText(s.error),
+      React.createElement('div', { style: { marginTop: 4, color: '#7f1d1d' } }, '接口 GET ' + API + '/progress' + (activeSid ? ('?session=' + activeSid) : '') + ' —— 这不是"没有运行"，是这次请求失败了。')
+    );
+
     var content;
     if (run === null) {
-      content = React.createElement('div', { className: 'tf-empty' }, s.error ? ('进度获取失败: ' + s.error) : '暂无运行。启动一个工作流后，这里会显示每个角色的交互时序与产出。');
+      // 失败时不渲染空态（上面已经有明确的错误块）；成功且真的没有运行才是空态。
+      // P12: 状态 (b)（本会话没有、别的会话有）**不能**复用"暂无运行"那句全局空态
+      // —— 那会把"我这次没跑"说成"什么都没有"，正是本轮要修的误读。
+      var sessionScopedEmpty = mode === 'session' && sessionId !== null && cls.otherExists;
+      content = s.error
+        ? null
+        : React.createElement('div', { className: 'tf-empty' },
+          sessionScopedEmpty
+            ? '本会话还没有运行。这个面板按会话过滤，要看别的会话/历史运行，点上面的"看全部运行"。'
+            : '暂无运行。启动一个工作流后，这里会显示每个角色的交互时序与产出。');
     } else {
       content = React.createElement('div', null,
         React.createElement('div', { className: 'tf-pg-sec', key: 'sum' },
@@ -1509,7 +1744,8 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('div', { className: 'tf-pg' },
       React.createElement('style', null, PAGE_STYLE),
       header,
-      s.error && run !== null ? React.createElement('div', { className: 'tf-kv', style: { color: '#ef4444', marginTop: 6 } }, '进度获取失败: ' + s.error) : null,
+      errorBlock,
+      noteBlock,
       content,
       reviewsBlock
     );
@@ -1552,16 +1788,194 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   var PANE_ID = '@local/team-flowise';
   var PANE_KIND = 'team-progress';
 
-  function TeamPane() { return React.createElement(TeamProgressPage, { compact: true }); }
+  // P12: sidebar.right.pane.tab 是**会话作用域**槽位，它的 props 里带着
+  // `sessionId` 与标准座位 `useSessions`（slots 目录 standardProps 原文）。P9 的实现
+  // 把 props 整个丢掉了，于是贴着会话的这个面板反而看不到自己在哪个会话。转发它。
+  function TeamPane(props) {
+    return React.createElement(TeamProgressPage, {
+      compact: true,
+      sessionId: props ? props.sessionId : undefined,
+      useSessions: props ? props.useSessions : undefined
+    });
+  }
   function TeamTabTitle() {
     return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
       React.createElement(TeamIcon, { size: 14, active: false }),
       '多 Agent 进度');
   }
 
+  // ---------------------------------------------------------------------------
+  // P12: 常驻可见的状态入口 —— `sidebar.footer.action`。
+  //
+  // 槽位契约（ui-sidebar 声明，已逐字核对：
+  //   dsh-client-ui-sidebar/lib/types/client/contract/slots.d.ts:65-73、:120-124、
+  //   dsh-cordis-client-runner 生成的 slots 目录条目）：
+  //     kind: 'list' · scope: 'root' · replaceRisk: 'none'
+  //     register options: id（必填）/ order（可选）/ label（可选，列表元数据）
+  //     ownerProps: { wide: boolean }  —— 侧栏宽形态 / 56px 窄轨
+  //     standardProps 含 useSessions（所以这里也能自己读到当前会话）
+  //   渲染点：ui-sidebar 的 foot 区 `renderSlot("sidebar.footer.action", { wide })`
+  //   （dsh-client-ui-sidebar/lib/client.js:292-301）。它是常驻的、不占中央面板、
+  //   不遮挡任何东西 —— shell.overlay 那种浮层正是 P9 删掉的形态，这里不回退过去。
+  //
+  // 数据源是 `GET /runs`：只有运行记录同时带着 status 与 sessionId，"有没有活干"
+  // 和"是谁的活"都只能从它读出来，不猜时间戳。轮询 FOOTER_POLL_MS（3 秒，与进度页
+  // 同拍，不比进度页更密）。任何失败都只变成红点 + 一句"获取失败"，绝不抛。
+  // ---------------------------------------------------------------------------
+  /** 一个运行列表里指定状态的条数（缺字段不算数）。 */
+  function countRunStatus(list, status) {
+    var n = 0;
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i].status === status) n += 1;
+    return n;
+  }
+
+  function TeamFooterAction(props) {
+    // wide 缺省按宽形态渲染：ownerProps 里一定有它，但不许依赖它（页面在别的注册面
+    // 渲染时可能没有这个字段）。
+    var wide = !(props && props.wide === false);
+    var st = React.useState({ runs: null, error: null });
+    var s = st[0]; var set = st[1];
+    var hookedSid = useStandardSessionId(props);
+    var hookedRef = React.useRef(null); hookedRef.current = hookedSid;
+    var ps = React.useState(null); var polledSid = ps[0]; var setPolledSid = ps[1];
+    var polledRef = React.useRef(null); polledRef.current = polledSid;
+
+    var tick = React.useCallback(function () {
+      var live = currentSessionIdFromService();
+      if (polledRef.current !== live) { polledRef.current = live; setPolledSid(live); }
+      return get('/runs').then(function (d) {
+        set(function () { return { runs: d && Array.isArray(d.runs) ? d.runs : [], error: null }; });
+      }).catch(function (e) {
+        var msg = e && e.message ? e.message : String(e);
+        set(function () { return { runs: null, error: msg }; });
+      });
+    }, []);
+
+    React.useEffect(function () {
+      tick();
+      var id = setInterval(tick, FOOTER_POLL_MS);
+      return function () { clearInterval(id); };
+    }, [tick]);
+
+    var sid = hookedSid || polledSid || null;
+    var all = Array.isArray(s.runs) ? s.runs : [];
+    // 有会话就只统计**本会话**的运行（"我的团队有没有在干活"），没有会话才统计全部。
+    // "别的会话在跑"和"归属未知"各自单独成态，绝不混进自己的计数里：P12 之前的记录
+    // 没有 sessionId，那既不是"我的"也不是"别人的"，按未知诚实标出来。
+    var mine = [];
+    var foreign = [];
+    var unknown = [];
+    for (var i = 0; i < all.length; i++) {
+      var r = all[i];
+      if (!r) continue;
+      var owner = typeof r.sessionId === 'string' && r.sessionId !== '' ? r.sessionId : null;
+      if (owner === null) {
+        // 没有会话可判定归属时，它落在"全部运行"这个口径里；有会话时单列。
+        if (sid === null) mine.push(r); else unknown.push(r);
+      } else if (sid === null || owner === sid) mine.push(r);
+      else foreign.push(r);
+    }
+    var mineRunning = countRunStatus(mine, 'running');
+    var mineDone = countRunStatus(mine, 'completed');
+    var foreignRunning = countRunStatus(foreign, 'running');
+    var unknownRunning = countRunStatus(unknown, 'running');
+    var unknownDone = countRunStatus(unknown, 'completed');
+
+    var dot = IDLE_COLOR;
+    var text;
+    if (s.error !== null && s.error !== undefined) {
+      dot = FAILED_COLOR;
+      text = '团队：获取失败';
+    } else if (all.length === 0) {
+      text = '团队：空闲';
+    } else if (mineRunning > 0) {
+      dot = RUNNING_COLOR;
+      text = '团队：' + mineRunning + ' 运行中' + (mineDone > 0 ? ' · ' + mineDone + ' 已完成' : '');
+    } else if (foreignRunning > 0) {
+      dot = '#f5a623';
+      text = '团队：其他会话 ' + foreignRunning + ' 运行中';
+    } else if (unknownRunning > 0) {
+      dot = '#f5a623';
+      text = '团队：' + unknownRunning + ' 运行中（归属未知）';
+    } else if (mineDone > 0) {
+      dot = DONE_COLOR;
+      text = '团队：' + mineDone + ' 已完成';
+    } else if (unknownDone > 0) {
+      dot = DONE_COLOR;
+      text = '团队：' + unknownDone + ' 已完成（归属未知）';
+    } else if (unknown.length > 0) {
+      text = '团队：' + unknown.length + ' 条运行（归属未知）';
+    } else {
+      text = '团队：空闲';
+    }
+    var scopeText = s.error !== null && s.error !== undefined
+      ? progressErrorText(s.error)
+      : (sid === null ? '全部运行（拿不到当前会话）' : '本会话 ' + shortSid(sid))
+        + ' · 运行中 ' + mineRunning + ' · 已完成 ' + mineDone
+        + (foreignRunning > 0 ? ' · 其他会话运行中 ' + foreignRunning : '')
+        + (unknown.length > 0 ? ' · 归属未知 ' + unknown.length : '');
+
+    return React.createElement('button', {
+      type: 'button',
+      className: 'tf-foot-chip',
+      title: scopeText + ' —— 点击打开进度面板',
+      'aria-label': '多 Agent 团队进度：' + text,
+      // 降级链在 apply() 里组装；服务全缺时 openProgressSurface() 什么都不做，不抛。
+      onClick: function () { openProgressSurface(); },
+      style: {
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        height: 32, padding: wide ? '0 9px' : '0', width: wide ? 'auto' : 32,
+        border: '1px solid var(--dsw-alias-border,#e5e7eb)', borderRadius: 8,
+        background: 'var(--dsw-alias-surface,#fff)', color: 'var(--dsw-alias-text-muted,#6b7280)',
+        fontFamily: 'inherit', fontSize: 12, lineHeight: 1, cursor: 'pointer', whiteSpace: 'nowrap'
+      }
+    },
+      React.createElement('span', { className: 'tf-dot', style: { background: dot } }),
+      wide ? React.createElement('span', null, text) : null
+    );
+  }
+
+  /**
+   * 点开进度面。降级链每一步都 try/catch：两个服务的方法在**目标非法时按契约抛错**
+   * （ISidebarRight.openTab:"A kind nothing registered throws."；
+   *  ILayout.selectPanel:"@throws if the selected main key is not registered"），
+   * 所以 try/catch 是必需的，不是洁癖。
+   *   1) ctx.sidebarRight.openTab(PANE_KIND) —— 贴着会话的右栏停靠面板（首选形态）
+   *   2) ctx.layout.selectPanel('team-progress') —— 中央面板（会顶掉会话，次选）
+   *   3) 什么都不做 —— 服务缺席时芯片仍然是一个诚实的状态读数，绝不因此崩掉
+   * @returns 实际执行的那一步（'sidebarRight.openTab' / 'layout.selectPanel' / 'none'）。
+   */
+  function openProgressSurface() {
+    var chain = OPEN_PROGRESS;
+    if (typeof chain !== 'function') return 'none';
+    try { return chain(); } catch (e) { return 'none'; }
+  }
+
   function apply(ctx) {
     var slots = ctx.get('slots');
     if (slots === undefined) return;
+    // P12: 每次 apply 都从零开始捕获，不继承上一次的引用（同一个 face 被两个 ctx 驱动
+    // 时——验收脚本就是这么干的——不能读到别人的服务）。
+    SESSIONS_SVC = null;
+    OPEN_PROGRESS = null;
+    // 三个服务都可能缺席（ctx.get 在没有 provide 时返回 undefined，且**不需要** inject
+    // 声明：cordis reflect.get 的语义就是"不要求 inject"）。exports.inject 保持
+    // ['slots','locale'] 不变 —— 把 'sessions' 加进 inject 会让服务缺失时整个客户端
+    // 插件不挂载，那是比少一个面板严重得多的失败。
+    try { SESSIONS_SVC = ctx.get('sessions') || null; } catch (e) { SESSIONS_SVC = null; }
+    var srService = null;
+    try { srService = ctx.get('sidebarRight') || null; } catch (e) { srService = null; }
+    var layoutService = null;
+    try { layoutService = ctx.get('layout') || null; } catch (e) { layoutService = null; }
+    OPEN_PROGRESS = function () {
+      if (srService !== null && typeof srService.openTab === 'function') {
+        try { srService.openTab(PANE_KIND); return 'sidebarRight.openTab'; } catch (e) { /* 落到中央面板 */ }
+      }
+      if (layoutService !== null && typeof layoutService.selectPanel === 'function') {
+        try { layoutService.selectPanel('team-progress'); return 'layout.selectPanel'; } catch (e) { /* 落到"什么都不做" */ }
+      }
+      return 'none';
+    };
     // 同一个 id 注册两处，正是 shell 自己的机制（已在已安装的 bundle 里逐行核对）：
     //   ui-sidebar 对每个 panellist 条目渲染
     //     renderSlot("sidebar.panellist", { size, active }, { only: id })
@@ -1609,6 +2023,15 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     // settings.section 的看板保持原样：它是一个独立页面，与进度页互不影响。
     slots.inject('settings.section', function () {
       var un = slots.register({ name: 'settings.section', id: 'team', order: 500, label: '多 Agent 团队' }, Board);
+      return function () { un(); };
+    });
+    // P12: 第 5 个注册面 —— 侧栏页脚的状态入口（常驻可见，见 TeamFooterAction 的注释）。
+    // id 用带命名空间的值，避免和 panellist 的 'team-progress'（语义不同：那是中央面板
+    // 的条目）混淆；order 900 让它排在 Settings 附近但不抢位。
+    // `inject` 是槽位生命周期的正确机制：槽位此刻已声明就立刻回调，否则等声明提交后再
+    // 回调；侧栏 shell 缺席时这里安静地什么都不发生，也不会抛。
+    slots.inject('sidebar.footer.action', function () {
+      var un = slots.register({ name: 'sidebar.footer.action', id: 'team-flowise-progress', order: 900, label: '多 Agent 团队进度' }, TeamFooterAction);
       return function () { un(); };
     });
   }

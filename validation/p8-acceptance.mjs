@@ -105,6 +105,23 @@ function captureSlots(face, withTabs) {
   return { regs, injected, tabTypes, error }
 }
 
+// The surfaces this plugin contributes, as NAMES (not as a count). P12 added a
+// sixth one (`sidebar.footer.action`); a total-count assertion would only say
+// "the number changed", so the set is asserted instead: every expected surface
+// must be present exactly once, and nothing unexpected may appear.
+const EXPECTED_SURFACES = ['sidebar.panellist', 'main', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title', 'settings.section', 'sidebar.footer.action']
+const WITHOUT_TABS_SURFACES = ['sidebar.panellist', 'main', 'settings.section', 'sidebar.footer.action']
+/** How many times each slot NAME was registered. */
+function surfaceCounts(applied) {
+  const counts = {}
+  for (const r of applied.regs) counts[r.options.name] = (counts[r.options.name] || 0) + 1
+  return counts
+}
+/** A compact `name{opt=val,...}` signature, for the log line and for pinning ids. */
+function surfaceSignature(r) {
+  return r.options.name + '{' + Object.keys(r.options).filter((k) => k !== 'name').map((k) => k + '=' + String(r.options[k])).join(',') + '}'
+}
+
 // ===========================================================================
 console.log('\n=== PHASE 1: client bundle (provable without a restart) ===')
 
@@ -128,7 +145,7 @@ if (bundle) {
   const board = byName('settings.section')[0]
 
   console.log('       injections: ' + JSON.stringify(applied.injected))
-  console.log('       registrations: ' + JSON.stringify(applied.regs.map((r) => r.options.name + '{' + Object.keys(r.options).filter((k) => k !== 'name').map((k) => k + '=' + String(r.options[k])).join(',') + '}')))
+  console.log('       registrations: ' + JSON.stringify(applied.regs.map(surfaceSignature)))
 
   check('registers exactly one sidebar.panellist entry', byName('sidebar.panellist').length === 1)
   check('sidebar entry uses our own fresh id', !!panel && panel.options.id === 'team-progress', panel ? String(panel.options.id) : 'none')
@@ -138,8 +155,20 @@ if (bundle) {
   check('no shell.overlay registration remains (that was the covering overlay)',
     byName('shell.overlay').length === 0, JSON.stringify(byName('shell.overlay').map((r) => r.options.id)))
   check('kanban page still registered (settings.section/team)', !!board && board.options.id === 'team', board ? String(board.options.id) : 'none')
-  check('five slot entries are contributed (panellist, main, pane body, pane title, kanban)',
-    applied.regs.length === 5, 'n=' + applied.regs.length)
+  check('every contributed slot surface is present exactly once, and no unexpected surface appeared '
+    + '(P12 added sidebar.footer.action, so this asserts the SET of names instead of a total count)',
+    (() => {
+      const counts = surfaceCounts(applied)
+      if (!EXPECTED_SURFACES.every((n) => counts[n] === 1)) return false
+      return Object.keys(counts).every((n) => EXPECTED_SURFACES.indexOf(n) !== -1)
+    })(),
+    'surfaces=' + JSON.stringify(surfaceCounts(applied)))
+  check('the P12 footer entry keeps its own namespaced id/order/label (it is a NEW surface, not a renamed one)',
+    (() => {
+      const f = byName('sidebar.footer.action')[0]
+      return !!f && f.options.id === 'team-flowise-progress' && f.options.order === 900 && typeof f.options.label === 'string' && f.options.label.length > 0
+    })(),
+    JSON.stringify(byName('sidebar.footer.action').map((r) => r.options)))
 
   // -------------------------------------------------------------------------
   // The docked right-sidebar pane (the actual "sidebar" surface).
@@ -181,9 +210,14 @@ if (bundle) {
   // If the right-sidebar package is absent the plugin must still work: the pane is
   // an optional capability, not a hard dependency.
   const withoutTabs = captureSlots(bundle.face, false)
-  check('without sidebarRightTabs the plugin still applies and keeps its other surfaces',
-    withoutTabs.error === undefined && withoutTabs.regs.length === 3 && withoutTabs.tabTypes.length === 0,
-    'error=' + String(withoutTabs.error) + ' regs=' + withoutTabs.regs.length)
+  check('without sidebarRightTabs the plugin still applies and keeps exactly the surfaces that do not depend on it '
+    + '(panellist, main, footer, kanban; P12 added the footer, so this asserts the SET of names)',
+    withoutTabs.error === undefined && (() => {
+      const counts = surfaceCounts(withoutTabs)
+      if (!WITHOUT_TABS_SURFACES.every((n) => counts[n] === 1)) return false
+      return Object.keys(counts).every((n) => WITHOUT_TABS_SURFACES.indexOf(n) !== -1)
+    })() && withoutTabs.tabTypes.length === 0,
+    'error=' + String(withoutTabs.error) + ' surfaces=' + JSON.stringify(surfaceCounts(withoutTabs)))
 
   // -------------------------------------------------------------------------
   // The sidebar icon: sidebar.panellist hands over ONLY { size, active }.

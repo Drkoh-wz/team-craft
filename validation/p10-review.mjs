@@ -427,13 +427,17 @@ function makeSubagentsStub(calls, plan) {
     calls,
     async start(_kind, spec) {
       const label = String((spec && spec.label) || '')
-      const isReview = /:review$/.test(label)
+      // The R8 repair call is labelled `<node>:review-repair`, so it must classify
+      // as a reviewer call too -- otherwise a repair attempt looks like a worker
+      // and a "how many reviewer calls happened" assertion silently undercounts.
+      const isReview = /:review(-repair)?$/.test(label)
       const prompt = spec && Array.isArray(spec.prompt) && spec.prompt[0] && typeof spec.prompt[0].text === 'string' ? spec.prompt[0].text : ''
       const roundMatch = /round=(\d+)/.exec(prompt)
       const call = {
         label, prompt,
-        nodeId: isReview ? label.slice(0, -':review'.length) : label,
+        nodeId: isReview ? label.replace(/:review(-repair)?$/, '') : label,
         role: isReview ? 'reviewer' : 'worker',
+        repair: /:review-repair$/.test(label),
         round: roundMatch ? Number(roundMatch[1]) : null,
         index: calls.length,
       }
@@ -1010,6 +1014,85 @@ try {
   check('C9.11 /role 回显被查询的角色名与本次 run',
     dReviewer.role === 'Reviewer' && (dReviewer.run || {}).id === CRUN, JSON.stringify({ role: dReviewer.role, run: dReviewer.run }))
 } catch (e) { blockFailure('C 组（读接口夹具）', e) }
+
+// ===========================================================================
+// G. The P12 fixes, each of which came from WATCHING the live P12 run:
+//    * R7 -- a re-review that reports a previous blocking item as still
+//      unresolved in fresh words was downgraded by R4 and then forced to `pass`
+//      by R6, so an acknowledged-but-unfixed blocker shipped as a pass.
+//    * R8 -- one review in six was lost entirely to malformed JSON.
+//    * the worker tool policy named read-only Inspect tools it did not need to
+//      forbid (the client-platform hang is refused at dispatch instead).
+// ===========================================================================
+console.log('\n[G] P12 修复：R7 遗留阻塞项 / R8 解析重试 / worker 工具策略')
+{
+  const prior = ['AC-1 未满足']
+  const g1 = mod.normalizeReview({ verdict: 'pass', findings: [blockingFinding('换个说法的同一个问题', BLOCK_EVID)], resolved: [{ finding: 'AC-1 未满足', resolved: false, evidence: '复查后仍然缺失' }] }, { round: 2, knownBlocking: prior })
+  check('G1.1 [R7] 复审把上一轮阻塞项标为未解决时，即使 verdict 写 pass 也必须按阻塞处理', g1.verdict === 'rework', String(g1.verdict))
+  check('G1.2 [R7] 遗留项被补成一条 carried 阻塞项（返工提示词因此有据可依，而不是空 findings）',
+    g1.findings.filter((f) => f.carried === true).length === 1 && g1.carriedCount === 1, JSON.stringify({ carried: g1.carriedCount }))
+  check('G1.3 [R7] 改写措辞的新条目仍被 R4 降级（不得因此重新开放无限返工）',
+    g1.findings.filter((f) => f.carried !== true)[0].severity === 'advisory',
+    JSON.stringify((g1.findings.filter((f) => f.carried !== true)[0] || {}).severity))
+  check('G1.4 [R7] 真解决了就放行：resolved:true 时不补遗留项、不强行返工',
+    (() => { const r = mod.normalizeReview({ verdict: 'rework', findings: [blockingFinding('全新问题', BLOCK_EVID)], resolved: [{ finding: 'AC-1 未满足', resolved: true }] }, { round: 2, knownBlocking: prior }); return r.carriedCount === 0 && r.verdict === 'pass' })())
+  check('G1.5 [R7] 首轮不适用（没有上一轮可比）',
+    (() => { const r = mod.normalizeReview({ verdict: 'pass', findings: [], resolved: [{ finding: 'AC-1 未满足', resolved: false }] }, { round: 1, knownBlocking: [] }); return r.carriedCount === 0 && r.verdict === 'pass' })())
+  check('G1.6 [R7] 不是上一轮阻塞项的条目被忽略（不得凭 resolved 数组凭空造阻塞项）',
+    (() => { const r = mod.normalizeReview({ verdict: 'pass', findings: [], resolved: [{ finding: '从没出现过的条目', resolved: false }] }, { round: 2, knownBlocking: prior }); return r.carriedCount === 0 && r.verdict === 'pass' })())
+  check('G1.7 [R7] R5 截断不得把 carried 阻塞项挤掉（它排在最终数组最前）',
+    (() => { const many = Array.from({ length: 30 }, (_, i) => blockingFinding('c' + i, BLOCK_EVID)); const r = mod.normalizeReview({ verdict: 'rework', findings: many, resolved: [{ finding: 'AC-1 未满足', resolved: false }] }, { round: 2, knownBlocking: prior }); return r.findings.length === mod.REVIEW_LIMITS.maxFindings && r.findings.filter((f) => f.carried === true).length === 1 })())
+
+  const rp = mod.buildReviewRepairPrompt({ reason: 'Expected comma at position 1305', knownBlocking: prior })
+  check('G2.1 [R8] 修复提示词带上原始解析失败原因', rp.indexOf('Expected comma at position 1305') !== -1)
+  check('G2.2 [R8] 点名最常见的失败原因：字符串里未转义的双引号', rp.indexOf('未转义的双引号') !== -1)
+  check('G2.3 [R8] 复审场景下重申上一轮阻塞项与"不得新增阻塞项"',
+    rp.indexOf('AC-1 未满足') !== -1 && rp.indexOf('不得提出新的 blocking') !== -1)
+  check('G2.4 [R8] 无上一轮时省略该条款，且仍是一段可用的提示词',
+    (() => { const q = mod.buildReviewRepairPrompt({}); return q.indexOf('返工后的复审') === -1 && q.length > 200 })())
+}
+
+console.log('\n[G3] R8 端到端：第一次返回坏 JSON，第二次返回合法结论')
+try {
+  const s = await scenario('repair-retry', { n1: node('n1', { reviewer: 'Reviewer' }) }, null,
+    (c) => {
+      if (c.role !== 'reviewer') return { text: 'WORKER-G3' }
+      if (c.repair === true) return { text: verdictJson({ verdict: 'pass', findings: [advisoryFinding()] }) }
+      // First attempt: an unescaped inner quote -- exactly the live P12 failure.
+      return { text: '```json\n{"verdict":"pass","score":80,"summary":"他说 "已验证" 了","findings":[],"resolved":[],"uncertainties":[]}\n```' }
+    })
+  const rv = (s.run.nodeStates.n1.review) || {}
+  check('G3.1 评审者答坏 JSON 时真的发起了第二次修复调用，且只有一次',
+    s.reviewers.length === 2 && s.reviewers.filter((c) => c.repair === true).length === 1,
+    'reviewer calls=' + String(s.reviewers.length) + ' labels=' + JSON.stringify(s.reviewers.map((c) => c.label)))
+  check('G3.2 修复调用被记录在 review.repair 上（不掩盖"这次结论是救回来的"）',
+    rv.repair !== null && rv.repair !== undefined && rv.repair.attempted === true && rv.repair.ok === true, JSON.stringify(rv.repair))
+  check('G3.3 救回来的结论被正常采用：verdict=pass、parseError 为空、节点 completed',
+    rv.verdict === 'pass' && (rv.parseError === null || rv.parseError === undefined) && s.run.nodeStates.n1.status === 'completed',
+    JSON.stringify({ verdict: rv.verdict, parseError: rv.parseError, status: s.run.nodeStates.n1.status }))
+  const bad = await scenario('repair-fail', { n1: node('n1', { reviewer: 'Reviewer' }) }, null,
+    (c) => (c.role === 'reviewer' ? { text: '完全不是 JSON' } : { text: 'WORKER-G3b' }))
+  const r2 = (bad.run.nodeStates.n1.review) || {}
+  check('G3.4 修复也失败时不阻塞：节点仍 completed、verdict=error、attempted 记录在案',
+    bad.run.nodeStates.n1.status === 'completed' && r2.verdict === 'error' && bad.reviewers.length === 2 &&
+    r2.repair !== null && r2.repair.attempted === true && r2.repair.ok === false,
+    JSON.stringify({ status: bad.run.nodeStates.n1.status, verdict: r2.verdict, repair: r2.repair }))
+} catch (e) { blockFailure('G3 场景（R8 解析重试）', e) }
+
+console.log('\n[G4] worker 工具策略：只读 Inspect 不再被列为禁项，变更型工具仍然在列')
+try {
+  const s = await scenario('worker-tools', { n1: node('n1') }, null, () => ({ text: 'W' }))
+  const note = String((s.run.nodeStates.n1.tools) || '')
+  const denyMatch = /"deny":\[(.*?)\]/.exec(note)
+  const denied = denyMatch === null ? [] : denyMatch[1].split(',').map((x) => x.replace(/"/g, '').trim())
+  check('G4.1 只读 Inspect 三件套不在 worker 的 deny 名单里（该策略本来也拦不住它们，见下）',
+    denied.indexOf('cordis_inspect_list') === -1 && denied.indexOf('cordis_inspect_query') === -1 && denied.indexOf('cordis_inspect_self') === -1,
+    JSON.stringify(denied.filter((n) => n.indexOf('cordis_inspect') === 0)))
+  check('G4.2 变更型与编排型工具仍在 deny 名单里（define/run/stop/undefine、human prompt、workflow/subagent、team_*）',
+    ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'ask_user_question', 'workflow', 'subagent', 'team_run_workflow'].every((n) => denied.indexOf(n) !== -1),
+    JSON.stringify(denied))
+  check('G4.3 deny 名单非空（"什么都没禁"必须是失败而不是静默通过）', denied.length >= 15, String(denied.length))
+} catch (e) { blockFailure('G4 场景（worker 工具策略）', e) }
 
 // ===========================================================================
 summary()

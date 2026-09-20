@@ -3,7 +3,7 @@
   "private": true,
   "dependencies": {
     "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "0.1.5-rc.1",
-    "@local/team-flowise": "link:D:/ai-workspace/dsh/packages/team-flowise",
+    "@local/team-flowise": "file:../../packages/team-flowise",
     "dshmarket": "^1.20.2"
   },
   "dsh": {

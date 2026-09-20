@@ -153,6 +153,20 @@ const runSchema = z.object({
   result: z.any().optional(),
   startedAt: z.number().int().nonnegative(),
   endedAt: z.number().int().nonnegative().optional(),
+  // P12 run ATTRIBUTION. Both keys are OPTIONAL with NO default, on purpose:
+  // every run record already on disk (`~/.dsh/storages/team_runs.json`) has
+  // neither key, and the file backend validates on open/put -- a required key
+  // would make the domain fail to open and take the whole plugin row down.
+  // A default would be worse than useless: it would rewrite the in-memory view
+  // of historical records into an attribution nobody ever declared.
+  // `sessionId` is the live session that STARTED the run (agent.session.id on
+  // the tool path, the request body on the HTTP path). It is absent -- never
+  // guessed -- when no session could be resolved, because "we do not know"
+  // and "session X" must stay distinguishable in the stored record.
+  sessionId: z.string().optional(),
+  // The working directory of that session. Advisory only: it is shown for
+  // diagnostics and weak grouping and NEVER takes part in attribution.
+  workspace: z.string().optional(),
 });
 
 // ---- typed domains (underscore names satisfy UNIT_NAME_RE) ----
@@ -198,20 +212,153 @@ const resolveParentAgent = (c) => {
 // Team workers are autonomous role agents. They must never inherit tools that
 // can block indefinitely -- a human prompt, or a browser page that may not be
 // connected -- nor the harness/orchestration tooling that only makes sense for
-// the top-level coding agent. Without this deny-list a worker can call e.g.
-// `cordis_inspect_query` with platform:'client', which by design waits for a
-// live page response and never returns; that hangs `run.result`, pins the node
-// task at `working`, and leaves the whole run `running` forever.
+// the top-level coding agent.
+//
+// `cordis_inspect_list/query/self` are deliberately NOT denied. They are
+// read-only, and a role that cannot inspect host services, events and tools
+// cannot gather the evidence its own report is supposed to cite -- a P12 worker
+// given an Inspect-based brief correctly answered "cannot verify" for every item
+// because this list denied them outright, while the runtime filter then dropped
+// the same names as UNKNOWN in the child's scope (so the deny achieved nothing
+// except blocking legitimate reads). The one genuinely dangerous call,
+// `cordis_inspect_query({platform:'client'})`, waits for a live browser page and
+// is refused at DISPATCH by workerToolGuard below -- which is where that policy
+// belongs, because it can inspect the arguments. Installing or removing dynamic
+// plugins stays denied: a worker must not mutate the harness it runs in.
 const WORKER_DENY_TOOLS = [
   'ask_user_question', 'exit_plan_mode',
-  'cordis_define', 'cordis_inspect_list', 'cordis_inspect_query', 'cordis_inspect_self',
-  'cordis_run', 'cordis_stop', 'cordis_undefine',
+  'cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine',
   'create_goal', 'update_goal', 'get_goal',
   'ralph', 'workflow', 'subagent', 'subagent_fork',
   'interrupt_agent', 'send_message', 'list_agents',
   'team_create_agent', 'team_create_task', 'team_create_workflow',
   'team_delegate_agent', 'team_list_agents', 'team_run_workflow', 'team_task_status',
 ];
+
+// ---- P12 run attribution (pure functions: no ctx, no IO) ----
+// A run record may carry `sessionId` (see runSchema). Read paths use these two
+// helpers to answer "which run is THIS viewer asking about", which is the fix
+// for the P12 defect: `latestRun()` picked the process-wide newest run, so an
+// unrelated session's progress page showed somebody else's run as its own.
+
+// Newest run by `startedAt`, ties broken by the LARGER id so the answer is
+// TOTAL and DETERMINISTIC -- "whichever the store happened to enumerate first"
+// is not a decision. A missing / non-numeric `startedAt` counts as 0 and a
+// record without a string `id` is not a run at all.
+const newestRunOf = (list) => {
+  let best = null;
+  for (const r of list) {
+    if (!r || typeof r.id !== 'string') continue;
+    if (best === null) { best = r; continue; }
+    const a = typeof r.startedAt === 'number' ? r.startedAt : 0;
+    const b = typeof best.startedAt === 'number' ? best.startedAt : 0;
+    if (a > b || (a === b && r.id > best.id)) best = r;
+  }
+  return best;
+};
+
+// Per-call scope evidence for the /progress envelope. Same selection rule as
+// selectRun, but it ALSO reports why the run was chosen and how many runs the
+// caller's own session has, so a client can tell "nothing of mine ran" from
+// "nothing ran at all" without inferring either from a timestamp.
+//  * `run`         the selected run IN SCOPE (null when this session has none);
+//                  equals selectRun(runs, sessionId) by construction.
+//  * `fallback`    what the selection actually used: 'latest-in-session',
+//                  'latest-global', or null when NOTHING was selected -- it never
+//                  claims a fallback that did not happen;
+//  * `hasAnyGlobal` whether any run exists at all, which is what separates
+//                  "this session is idle while others are busy" from "the store
+//                  is empty". Kept separate from `fallback` so each field means
+//                  exactly one thing.
+export const runScope = (runs, sessionId) => {
+  const list = Array.isArray(runs) ? runs.filter((r) => r && typeof r.id === 'string') : [];
+  const globalNewest = newestRunOf(list);
+  const sid = typeof sessionId === 'string' && sessionId !== '' ? sessionId : null;
+  if (sid === null) {
+    return { mode: 'global', sessionId: null, run: globalNewest, runCountInScope: list.length, fallback: globalNewest === null ? null : 'latest-global', hasAnyGlobal: globalNewest !== null };
+  }
+  const scoped = list.filter((r) => r.sessionId === sid);
+  if (scoped.length === 0) {
+    // Deliberately NOT the global newest: handing another session's run to this
+    // caller is the exact defect P12 exists to fix. The caller learns that others
+    // are running from `hasAnyGlobal`, i.e. as a LABELLED fact, not as its own run.
+    return { mode: 'session', sessionId: sid, run: null, runCountInScope: 0, fallback: null, hasAnyGlobal: globalNewest !== null };
+  }
+  return { mode: 'session', sessionId: sid, run: newestRunOf(scoped), runCountInScope: scoped.length, fallback: 'latest-in-session', hasAnyGlobal: globalNewest !== null };
+};
+
+/**
+ * Pick the run a viewer is asking about. PURE: never touches ctx, IO or its
+ * arguments. Exported so the attribution rule can be asserted without booting
+ * the host.
+ *
+ * @param {Array<object>|null|undefined} runs  every run record, unordered; legacy
+ *   records (written before this field existed) simply have no `sessionId`.
+ * @param {string|null|undefined} sessionId  the viewer's session, or nothing.
+ * @returns {object|null} the selected run record, or null when there is none.
+ *
+ * Rule, in this strict order (R0 normalises; records without a string `id` are
+ * not runs):
+ *   R2. `sessionId` is empty / undefined / '' -> the global newest, i.e. EXACTLY
+ *       the behaviour of the pre-P12 `latestRun()`. Legacy records stay
+ *       reachable here and only here.
+ *   R1. `sessionId` is a non-empty string -> the newest record whose OWN
+ *       `sessionId` equals it. A legacy record (no `sessionId` key) never
+ *       matches, because "we do not know who started it" is not a match.
+ *       If this session has NO run at all, the answer is `null` -- deliberately
+ *       NOT the global newest. Falling back here would recreate the exact defect
+ *       this function exists to fix (showing another session's run as yours);
+ *       a caller that WANTS the "somebody else is running" information must ask
+ *       `runScope()` for it and label it as such.
+ */
+export function selectRun(runs, sessionId) {
+  const list = Array.isArray(runs) ? runs : [];
+  const sid = typeof sessionId === 'string' && sessionId !== '' ? sessionId : null;
+  if (sid === null) return newestRunOf(list);
+  const scoped = list.filter((r) => r && typeof r.id === 'string' && r.sessionId === sid);
+  return scoped.length === 0 ? null : newestRunOf(scoped);
+}
+
+// The session that STARTED a run, taken from the live Agent driving it. The tool
+// path has one; an agentless HTTP route does not (see resolveParentAgent above),
+// which is why the HTTP route passes a session through the request body instead
+// of letting this guess. Never throws: attribution must not be able to break a
+// run, so every failure degrades to "no session" (absent keys, not empty ones).
+export const resolveRunOrigin = (c) => {
+  try {
+    if (c === undefined || c === null || typeof c.get !== 'function') return {};
+    const svc = c.get('agents');
+    if (svc === undefined || svc === null || typeof svc.currentInitiator !== 'function') return {};
+    const init = svc.currentInitiator();
+    if (init === undefined || init === null) return {};
+    const session = init.session;
+    if (session === undefined || session === null) return {};
+    const sid = typeof session.id === 'string' && session.id !== '' ? session.id : undefined;
+    const cwd = typeof session.cwd === 'string' && session.cwd !== '' ? session.cwd : undefined;
+    const out = {};
+    if (sid !== undefined) out.sessionId = sid;
+    if (cwd !== undefined) out.workspace = cwd;
+    return out;
+  } catch (e) { return {}; }
+};
+
+// One normaliser for the whole `opts.session` surface, so the HTTP body, the
+// HTTP query string and an in-process caller cannot drift into three dialects.
+// Accepts either the session id alone ('abc') or { sessionId, workspace }.
+// A missing / blank / unknown-shaped value is "no session": the recorded run then
+// carries NEITHER key, and `clean()` keeps the write byte-identical to pre-P12.
+export const readSessionOption = (session) => {
+  if (typeof session === 'string') return session === '' ? {} : { sessionId: session };
+  if (session !== null && typeof session === 'object' && !Array.isArray(session)) {
+    const sid = typeof session.sessionId === 'string' && session.sessionId !== '' ? session.sessionId : undefined;
+    const ws = typeof session.workspace === 'string' && session.workspace !== '' ? session.workspace : undefined;
+    const out = {};
+    if (sid !== undefined) out.sessionId = sid;
+    if (ws !== undefined) out.workspace = ws;
+    return out;
+  }
+  return {};
+};
 
 // ---- P11 role-level configuration: route layering, tool presets, persona ----
 // Everything in this section is a PURE function of its arguments (no ctx, no IO),
@@ -581,6 +728,30 @@ export function buildReworkPrompt(spec) {
   return lines.join('\n');
 }
 
+// Given the reason the FIRST verdict failed to parse, ask the reviewer once more
+// for a machine-readable answer. Real models write near-JSON -- the live P12 run
+// lost one review of six to an unescaped double quote inside a string value --
+// and discarding the review entirely throws away the judgement along with it.
+// Every rule below targets a specific failure mode of LLM-produced JSON.
+export function buildReviewRepairPrompt(spec) {
+  const s = spec || {};
+  const reason = s.reason === undefined || s.reason === null || String(s.reason) === '' ? '未知（原文不是合法 JSON）' : String(s.reason);
+  const lines = [];
+  lines.push('你上一次的评审结论无法被解析（原因：' + reason + '）。请重新给出同一份结论，并严格遵守下面的输出规则：');
+  lines.push('1. 只输出一个 JSON 对象，不要写任何解释、开场白、结束语或 Markdown 代码块标记。');
+  lines.push('2. 字符串值内部绝对不要出现未转义的双引号：需要引用原文时，请改用中文引号「」。这是上一次失败的最常见原因。');
+  lines.push('3. 每个字符串值必须写在同一行内，不要在其中换行；不要把换行写成真实换行，需要时写 \\n。');
+  lines.push('4. 字段保持不变：verdict（"pass" 或 "rework"）、score、summary、findings、resolved、uncertainties。');
+  lines.push('5. 判定纪律不变：没有 blocking 条目时 verdict 必须是 "pass"；每条 blocking 必须给出 criterion 与 evidence。');
+  if (Array.isArray(s.knownBlocking) && s.knownBlocking.length) {
+    lines.push('6. 这是返工后的复审：只能核对上一轮这些阻塞项是否解决，不得提出新的 blocking。上一轮的阻塞项：');
+    for (let i = 0; i < s.knownBlocking.length; i++) lines.push('   - ' + String(s.knownBlocking[i]));
+  }
+  lines.push('');
+  lines.push('结构示例（仅示意字段，不要照抄内容）：{"verdict":"pass","score":90,"summary":"一句话结论","findings":[],"resolved":[],"uncertainties":[]}');
+  return lines.join('\n');
+}
+
 // Text -> verdict object. Two extraction strategies, both bounded:
 //   1. the LAST ```json fenced block (a reviewer that narrates before its JSON
 //      would otherwise be parsed against a stale earlier object),
@@ -700,7 +871,7 @@ export function normalizeReview(raw, opts) {
   const notes = [];
   const result = {
     verdict: 'error', score: null, summary: '', findings: [], resolved: [], uncertainties: [],
-    blockingCount: 0, advisoryCount: 0, notes, parseError: o.parseError === undefined ? null : o.parseError,
+    blockingCount: 0, advisoryCount: 0, carriedCount: 0, notes, parseError: o.parseError === undefined ? null : o.parseError,
   };
   // R1 -- a missing/broken payload is the REVIEWER's problem, never the node's:
   // it must never block, so it settles as 'error' with zero findings.
@@ -764,15 +935,48 @@ export function normalizeReview(raw, opts) {
       suggestion: suggestion.trim() === '' ? null : suggestion,
     });
   }
+  // R7 -- a re-review that EXPLICITLY reports a previous blocking item as still
+  // unresolved must keep blocking, even when it restates the problem in fresh
+  // words. Live evidence (P12 run, node impl-client): round 2 answered
+  // `resolved: [..., resolved: false]` for the round-1 criterion while wording
+  // its finding differently, so R4 downgraded that finding and R6 then forced
+  // `pass` -- the node shipped an acknowledged-but-unfixed blocker as a pass.
+  // R4's purpose (no NEW blockers on a re-review) is untouched: this only
+  // reinstates criteria the reviewer itself listed as unresolved. The carried
+  // entries go to the FRONT so R5 truncation cannot drop them.
+  const rawResolvedList = Array.isArray(raw.resolved) ? raw.resolved : [];
+  const carried = [];
+  if (round >= 2 && known.length > 0) {
+    for (const r of rawResolvedList) {
+      const src = (r !== null && typeof r === 'object' && !Array.isArray(r)) ? r : {};
+      if (src.resolved === true) continue;
+      const label = src.finding !== undefined && src.finding !== null ? String(src.finding)
+        : (src.criterion !== undefined && src.criterion !== null ? String(src.criterion) : '');
+      const key = canonCriterion(label);
+      if (key === '' || known.indexOf(key) === -1) continue;
+      const ev = src.evidence === undefined || src.evidence === null ? '' : String(src.evidence).trim();
+      carried.push({
+        severity: 'blocking', downgraded: false, downgradeReason: null,
+        dimension: '复审', carried: true,
+        criterion: label,
+        evidence: ev === '' ? '评审者报告：上一轮阻塞项仍未解决（未附证据）' : ev,
+        impact: '上一轮判定必须返工的问题在本轮复审中仍未解决',
+        suggestion: null,
+      });
+    }
+    if (carried.length) notes.push('R7：评审者把上一轮 ' + carried.length + ' 条阻塞项标为仍未解决，按阻塞处理（复审不得靠改写措辞绕过已判定的阻塞项）');
+  }
+  const allFindings = carried.length ? carried.concat(findings) : findings;
   // R5 -- bound the payload: a reviewer that emits 200 findings must not turn
   // /progress into a heavy response.
-  let kept = findings;
-  if (findings.length > REVIEW_LIMITS.maxFindings) {
-    kept = findings.slice(0, REVIEW_LIMITS.maxFindings);
-    notes.push('R5：findings 共 ' + findings.length + ' 条，超过上限 ' + REVIEW_LIMITS.maxFindings + ' 条，已截断为前 ' + REVIEW_LIMITS.maxFindings + ' 条');
+  let kept = allFindings;
+  if (allFindings.length > REVIEW_LIMITS.maxFindings) {
+    kept = allFindings.slice(0, REVIEW_LIMITS.maxFindings);
+    notes.push('R5：findings 共 ' + allFindings.length + ' 条，超过上限 ' + REVIEW_LIMITS.maxFindings + ' 条，已截断为前 ' + REVIEW_LIMITS.maxFindings + ' 条');
   }
   for (const f of kept) if (f.downgraded && f.downgradeReason) notes.push(f.downgradeReason);
   result.findings = kept;
+  result.carriedCount = carried.length;
   result.blockingCount = kept.filter((f) => f.severity === 'blocking').length;
   result.advisoryCount = kept.filter((f) => f.severity !== 'blocking').length;
   const rawScore = typeof raw.score === 'number' && isFinite(raw.score) ? Math.round(raw.score) : null;
@@ -780,16 +984,17 @@ export function normalizeReview(raw, opts) {
   const rawSummary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
   const wantsRework = raw.verdict === 'rework';
   // R6 -- "rework" with nothing blocking is self-contradictory; without this the
-  // verdict string alone could stretch a task with no stated reason.
-  let verdict = wantsRework ? 'rework' : 'pass';
+  // verdict string alone could stretch a task with no stated reason. A carried
+  // (R7) entry is a blocking reason the reviewer itself stated, so an explicit
+  // "not resolved" forces rework even when the verdict string says otherwise.
+  let verdict = (wantsRework || carried.length > 0) ? 'rework' : 'pass';
   if (verdict === 'rework' && result.blockingCount === 0) {
     verdict = 'pass';
     notes.push('R6：结论自相矛盾：rework 但无阻塞项，按不阻塞处理，verdict 改为 pass');
   }
   result.verdict = verdict;
   result.summary = rawSummary !== '' ? rawSummary : (verdict === 'pass' ? '评审通过（评审者未提供摘要）' : '评审要求返工（评审者未提供摘要）');
-  const rawResolved = Array.isArray(raw.resolved) ? raw.resolved : [];
-  result.resolved = rawResolved.map((r) => {
+  result.resolved = rawResolvedList.map((r) => {
     const src = (r !== null && typeof r === 'object' && !Array.isArray(r)) ? r : {};
     return {
       finding: src.finding === undefined || src.finding === null ? (src.criterion === undefined || src.criterion === null ? null : String(src.criterion)) : String(src.finding),
@@ -1127,6 +1332,47 @@ export function apply(ctx) {
     console.warn('team-flowise: tools.guard() unavailable; workers are only bounded by the tool filter and the per-node timeout');
   }
 
+  // ---- P12 availability note in the host system prompt ----
+  // Without this, nothing tells the model that a multi-role team exists in this
+  // deployment, so `team_*` (and the skill that documents it) is discoverable
+  // only by reading the tool list. Five lines, no `{{...}}` placeholders (this
+  // service renders sections strictly and THROWS on an unknown variable).
+  //
+  // Deliberate properties, all of them load-bearing:
+  //  * `ctx.get('systemPrompt')` instead of adding it to this plugin's `inject`:
+  //    `inject` is an assembly precondition, so a deployment without the service
+  //    would take the whole plugin row down. This way a missing service is a
+  //    logged skip and the tools/HTTP bridge still mount.
+  //  * registered inside `ctx.effect`, so the section is removed on unmount
+  //    (systemPrompt.section() itself returns the Cordis effect disposer).
+  //  * section name is namespaced (`team-flowise:`) and unique: a duplicate name
+  //    in the same layer THROWS, which would break host composition.
+  //  * order 2050 places it inside the tool-description band (TOOL_* 1000..2900)
+  //    and after PLAN_POLICY/TEAM_POLICY (500/600), i.e. as capability
+  //    documentation rather than policy. It is a literal, not a new
+  //    SECTION_ORDERS entry (that table lives in dsh itself).
+  //  * NEVER `complete: true`: a complete section replaces every other section,
+  //    i.e. it would erase the rest of the prompt.
+  //  * the whole registration is guarded: a failure here must never fail the mount.
+  const SYSTEM_PROMPT_SECTION = 'team-flowise:availability';
+  const SYSTEM_PROMPT_TEXT = [
+    'Multi-agent team orchestration is available in this session.',
+    '- Reach for the team_* tools when the user asks for several roles/agents to collaborate, or for an independent review of a deliverable; before designing or changing a pipeline, load the team-flowise skill.',
+    '- Roles live in the team registry: team_list_agents lists them, team_create_agent creates one (passing an id MODIFIES that role).',
+    '- team_create_task only records a task in the ledger and never runs it. team_delegate_agent and team_run_workflow BLOCK until their subagents finish (minutes), so build the roles and the workflow first, then start it.',
+    '- Run progress is visible in the "多 Agent 团队进度" panel (sidebar icon / right pane) and at GET /api/team-flowise/progress; a run is attributed to the session that started it.',
+  ].join('\n');
+  try {
+    const systemPromptSvc = ctx.get('systemPrompt');
+    if (systemPromptSvc !== undefined && systemPromptSvc !== null && typeof systemPromptSvc.section === 'function') {
+      ctx.effect(() => systemPromptSvc.section({ name: SYSTEM_PROMPT_SECTION, order: 2050, text: SYSTEM_PROMPT_TEXT }));
+    } else {
+      console.warn('team-flowise: systemPrompt service unavailable; the team_* tools are not announced in the system prompt (they remain registered and callable)');
+    }
+  } catch (e) {
+    console.warn('team-flowise: could not announce the team tools in the system prompt: ' + String(e));
+  }
+
   const withTable = async (domainName, tableName, fn) => { const d = await domainReady[domainName]; if (!d) throw new Error('team-flowise: domain not ready ' + domainName); return fn(d.table(tableName)); };
   const clean = (v) => { if (Array.isArray(v)) return v.map(clean); if (v === null || typeof v !== 'object') return v; const r = {}; for (const k in v) { const x = clean(v[k]); if (x !== undefined) r[k] = x; } return r; };
 
@@ -1282,9 +1528,63 @@ export function apply(ctx) {
     return list;
   };
 
-  const progressSummary = async (runId) => {
-    const run = runId ? await getRun(runId) : await latestRun();
-    if (!run) return { ok: true, run: null, nodes: [], roles: [], reviewers: [], totals: { total: 0, completed: 0, failed: 0, working: 0, reviewing: 0, rework: 0, unresolved: 0, pending: 0, percent: 0 } };
+  // P12: the explicit-run lookup, fed by `selectRun` (pure, exported above) so the
+  // attribution rule has exactly ONE implementation. `sessionId` semantics:
+  // undefined/null/'' -> the pre-P12 global-newest behaviour; a real id -> THAT
+  // session's newest run, or null when that session has no run (deliberately not
+  // degraded into "some other session's run" -- see selectRun).
+  const runForSession = async (sessionId) => {
+    const runs = await listRuns();
+    try { return { run: selectRun(runs, sessionId), scope: runScope(runs, sessionId) }; }
+    catch (e) { console.warn('team-flowise: run attribution failed, falling back to the global newest: ' + String(e)); return { run: newestRunOf(Array.isArray(runs) ? runs : []), scope: null }; }
+  };
+  // Envelope projection for one run. Every key keeps its pre-P12 meaning; P12 adds
+  // `sessionId` (null when the record predates attribution) so a client can tell
+  // "this run is not mine" WITHOUT inferring it from a timestamp.
+  const runEnvelopeOf = (run) => ({
+    id: run.id,
+    workflowId: run.workflowId === undefined ? null : run.workflowId,
+    workflowName: null,
+    status: run.status === undefined ? null : run.status,
+    startedAt: typeof run.startedAt === 'number' ? run.startedAt : null,
+    endedAt: typeof run.endedAt === 'number' ? run.endedAt : null,
+    sessionId: typeof run.sessionId === 'string' && run.sessionId !== '' ? run.sessionId : null,
+  });
+
+  const progressSummary = async (runId, session, explicitRun) => {
+    // `runId` (the caller's EXPLICIT choice) always outranks attribution: asking
+    // for a specific run must never be filtered into a different one.
+    const picked = explicitRun !== undefined
+      ? { run: explicitRun, scope: null }
+      : (runId ? { run: await getRun(runId), scope: null } : await runForSession(session));
+    const run = picked.run;
+    // `scope` is the honest account of WHAT was selected and WHY. A session-scoped
+    // request whose own session has no run reports mode 'session' with
+    // runCountInScope: 0 and fallback null -- "nothing of mine ran" is therefore
+    // never presented as "this is my run", and `fallback` never claims a
+    // substitution that did not happen. `hasAnyGlobal` then says whether anything
+    // is running anywhere, so an idle session can still be told that others are
+    // busy. It is an ADDITIONAL top-level key: `run`, `nodes`, `roles`,
+    // `reviewers` and `totals` are untouched.
+    const scope = {
+      mode: picked.scope === null ? 'global' : picked.scope.mode,
+      sessionId: picked.scope === null ? null : picked.scope.sessionId,
+      runCountInScope: picked.scope === null ? 1 : picked.scope.runCountInScope,
+      fallback: picked.scope === null ? (run === null ? null : 'explicit-runId') : picked.scope.fallback,
+      // `false` for an explicit-runId request: that path never enumerates the
+      // store, so claiming anything about other runs would be a guess.
+      hasAnyGlobal: picked.scope === null ? false : picked.scope.hasAnyGlobal,
+    };
+    // Nothing to show. The shape is EXACTLY the pre-P12 empty response when no
+    // session was involved (identical key set, no `scope`), because a caller that
+    // passed nothing must not be able to tell P12 happened at all. When a session
+    // WAS given, `scope` is still attached: it is the honest answer to "why is
+    // there nothing" -- mode 'session' with runCountInScope 0 means this session
+    // has no run, which is a different fact from an empty store.
+    if (!run) {
+      const empty = { ok: true, run: null, nodes: [], roles: [], reviewers: [], totals: { total: 0, completed: 0, failed: 0, working: 0, reviewing: 0, rework: 0, unresolved: 0, pending: 0, percent: 0 } };
+      return session === undefined || session === null || session === '' ? empty : { ok: true, scope, run: null, nodes: [], roles: [], reviewers: [], totals: empty.totals };
+    }
     const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
     const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
     const defs = wf && wf.nodes && typeof wf.nodes === 'object' ? wf.nodes : null;
@@ -1365,10 +1665,12 @@ export function apply(ctx) {
     // `clean` drops undefined, so normalise every envelope field to null: a run
     // that is still in flight must still expose `endedAt` as a key, otherwise a
     // client reading `run.endedAt` on a fixed shape breaks.
-    const num = (v) => (typeof v === 'number' ? v : null);
+    const envelope = runEnvelopeOf(run);
+    envelope.workflowName = (wf && wf.name) || null;
     return clean({
       ok: true,
-      run: { id: run.id, workflowId: run.workflowId === undefined ? null : run.workflowId, workflowName: (wf && wf.name) || null, status: run.status === undefined ? null : run.status, startedAt: num(run.startedAt), endedAt: num(run.endedAt) },
+      scope,
+      run: envelope,
       nodes,
       roles,
       reviewers,
@@ -1411,8 +1713,11 @@ export function apply(ctx) {
     parseError: rv && rv.parseError !== undefined ? rv.parseError : null,
     toolNote: rv && rv.toolNote !== undefined ? rv.toolNote : null,
   });
-  const roleDetail = async (runId, role) => {
-    const run = runId ? await getRun(runId) : await latestRun();
+  const roleDetail = async (runId, role, session, explicitRun) => {
+    // Same run selection as /progress, in the same order: explicit run first, then
+    // the runId, then the (session-scoped) newest. Without a `session` argument
+    // this resolves exactly as it did before P12.
+    const run = explicitRun !== undefined ? explicitRun : (runId ? await getRun(runId) : (await runForSession(session)).run);
     if (!run) return { ok: true, run: null, role: role || null, nodes: [], reviews: [] };
     const wf = run.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(run.workflowId)) : null;
     const states = run.nodeStates && typeof run.nodeStates === 'object' ? run.nodeStates : {};
@@ -1608,13 +1913,27 @@ export function apply(ctx) {
   // for this round. It is the highest-priority route layer and the only layer an
   // HTTP caller / tool caller can set. Omitted (or unusable) -> the layers below
   // decide, exactly as they did before P11.
+  // `opts.session` is the P12 ATTRIBUTION input: the session that started this
+  // run. Precedence is (a) what the caller explicitly passed (the HTTP body /
+  // an in-process caller), else (b) the live Agent driving the call (the tool
+  // path). Nothing is ever guessed: when neither yields a session the record is
+  // written WITHOUT the attribution keys, i.e. byte-identical to pre-P12.
   const runWorkflow = async (workflowId, input, onCreated, opts) => {
     const runRoute = opts ? opts.route : undefined;
     const wf = await withTable('team_workflows', 'flows', (t) => t.get(workflowId));
     if (!wf) throw new Error('team-flowise: workflow not found ' + workflowId);
     const nodes = (wf.nodes || {});
     const nodeIds = Object.keys(nodes);
-    const runRec = runSchema.parse(clean({ id: makeId(), workflowId, status: 'running', nodeStates: {}, startedAt: now() }));
+    // Attribution is best-effort and CANNOT fail the run: resolveRunOrigin never
+    // throws, readSessionOption never throws, and a blank session simply drops out.
+    let origin = {};
+    try {
+      const explicit = readSessionOption(opts ? opts.session : undefined);
+      origin = explicit.sessionId !== undefined ? explicit : resolveRunOrigin(ctx);
+    } catch (e) { console.warn('team-flowise: could not resolve the run session: ' + String(e)); origin = {}; }
+    // `clean` drops the undefined keys, so an unattributed run is written with
+    // exactly the key set it had before P12.
+    const runRec = runSchema.parse(clean({ id: makeId(), workflowId, status: 'running', nodeStates: {}, startedAt: now(), sessionId: origin.sessionId, workspace: origin.workspace }));
     await withTable('team_runs', 'runs', (t) => t.put(runRec.id, runRec));
     // Publish the run id before any delegation happens, so an HTTP caller can
     // answer immediately and the board can follow the run by polling instead of
@@ -1683,6 +2002,12 @@ export function apply(ctx) {
         // (a reviewer's route is not part of the verdict about the artifact).
         let reviewRoute = null;
         let reviewPersona = null;
+        // Hoisted OUT of the try on purpose: the R8 repair retry below runs after
+        // the first attempt's try/catch, so it needs the reviewer's spec and
+        // timeout to still be reachable there. Declaring them inside the try made
+        // the retry die with "built is not defined" -- which the G3 test caught.
+        let reviewSpec = null;
+        let reviewTimeoutMs = REVIEW_LIMITS.timeoutMs;
         const artifact = String(output === undefined || output === null ? '' : output);
         const truncated = artifact.length > REVIEW_LIMITS.artifactMax;
         const prompt = buildReviewPrompt({
@@ -1701,7 +2026,8 @@ export function apply(ctx) {
             const reviewDef = def;
             const decision = await decideRoute(reviewDef, parent, { runRoute, node: null, workflow: wf, parentRoute });
             const built = spawnSpecFor(reviewDef, parent, { node: null, workflow: wf, decision });
-            const reviewTimeoutMs = timeoutFor(reviewDef, REVIEW_LIMITS.timeoutMs);
+            reviewSpec = built.spec;
+            reviewTimeoutMs = timeoutFor(reviewDef, REVIEW_LIMITS.timeoutMs);
             // Recorded BEFORE the dispatch, so a reviewer that never starts still
             // leaves evidence of which route was asked for (measured:false).
             reviewRoute = routeRecordOf(decision, null, reviewTimeoutMs);
@@ -1728,7 +2054,29 @@ export function apply(ctx) {
         } else {
           error = 'subagents service unavailable';
         }
-        const parsed = error === null ? parseReviewVerdict(text) : { raw: text, parsed: null, parseError: error };
+        let parsed = error === null ? parseReviewVerdict(text) : { raw: text, parsed: null, parseError: error };
+        // R8 -- ONE bounded repair attempt when the reviewer answered but wrote
+        // unparseable JSON. See buildReviewRepairPrompt. Bounded by construction
+        // (a single retry, its own abort controller, the same timeout) and it can
+        // never block a node: if the retry also fails, R1 still stands and the
+        // verdict stays 'error'.
+        let repair = null;
+        if (error === null && parsed.parsed === null && subagents && reviewSpec !== null) {
+          const reason = parsed.parseError;
+          try {
+            const rCtl = new AbortController();
+            const started2 = await startWorker(subagents, { label: nid + ':review-repair', prompt: [{ type: 'text', text: buildReviewRepairPrompt({ reason, knownBlocking }) }], parent, signal: rCtl.signal }, reviewSpec, parentToolNote(parent));
+            const res2 = await withTimeout(started2.run.result, reviewTimeoutMs, 'review repair of node ' + nid);
+            const t2 = (res2.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+            const p2 = res2.stopReason === 'completed'
+              ? parseReviewVerdict(t2)
+              : { parsed: null, parseError: 'reviewer ' + res2.stopReason + (res2.diagnostic ? ': ' + res2.diagnostic : '') };
+            repair = { attempted: true, ok: p2.parsed !== null, parseError: p2.parseError === undefined ? null : p2.parseError };
+            if (p2.parsed !== null) { parsed = p2; text = t2; }
+          } catch (e) {
+            repair = { attempted: true, ok: false, parseError: String(e && e.message ? e.message : e) };
+          }
+        }
         const norm = normalizeReview(parsed.parsed, { round: rnd, knownBlocking, parseError: parsed.parseError });
         const endedAt = now();
         const st = {
@@ -1744,6 +2092,10 @@ export function apply(ctx) {
           reasoning: typeof reasoning === 'string' && reasoning !== '' ? reasoning.slice(0, REASONING_MAX) : null,
           reasoningLen: typeof reasoning === 'string' && reasoning !== '' ? reasoning.length : null,
           error, parseError: norm.parseError, toolNote: toolNote === '' ? null : toolNote,
+          // R8: whether a second, repair-only reviewer call was made, and whether
+          // it recovered a parseable verdict. Recorded so a review that had to be
+          // rescued is visible rather than indistinguishable from a clean one.
+          repair: repair === null ? null : clean(repair),
         };
         // `st` is the whole node-level review record; the caller keeps it for
         // every subsequent state write for this node. `route`/`persona` describe
@@ -1990,18 +2342,25 @@ export function apply(ctx) {
   // ---- model tools via the real `tools` service (host-plane registry) ----
   const tools = ctx.get('tools');
   if (tools !== undefined) {
-    const mk = (t, parameters, props, render, execute) => tools.register(defineTool({ name: t, description: 'Multi-agent team orchestration.', parameters, output: { schema: { type: 'object', additionalProperties: false, properties: props }, render }, isConcurrencySafe: () => true, execute }));
+    // Every tool carries its own description. It is the ONLY thing the model sees
+    // about a tool before calling it (defineTool passes this string through
+    // verbatim), so an identical one-liner on all of them made the whole family
+    // unusable: the model could not tell `team_create_task` (which only records
+    // work) from `team_run_workflow` (which blocks for minutes). Each description
+    // therefore states what the tool does, when to reach for it, and its hard
+    // limits -- and each parameter carries its own `description`.
+    const mk = (t, description, parameters, props, render, execute) => tools.register(defineTool({ name: t, description, parameters, output: { schema: { type: 'object', additionalProperties: false, properties: props }, render }, isConcurrencySafe: () => true, execute }));
     const taskItem = { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, status: { type: 'string' }, iteration: { type: 'number' }, assignee: { type: 'string' } } };
-    disposers.push(mk('team_create_task', { requirement: { type: 'string', required: true }, acceptanceCriteria: { type: 'string', required: true }, assignee: { type: 'string', required: true }, reviewer: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'created task ' + v.id + ' [' + v.status + ']' }], async (args) => { const t = await createTask(args); return clean({ ok: true, id: t.id, status: t.status }); }));
-    disposers.push(mk('team_task_status', {}, { ok: { type: 'boolean', required: true }, taskCount: { type: 'number', required: true }, tasks: { type: 'array', required: true, items: taskItem } }, (_a, v) => [{ type: 'text', text: 'tasks=' + v.taskCount }], async () => { const tasks = await listTasks(); return clean({ ok: true, taskCount: tasks.length, tasks: tasks.map((t) => clean({ id: t.id, status: t.status, iteration: t.iteration, assignee: t.assignee })) }); }));
-    disposers.push(mk('team_run_workflow', { workflowId: { type: 'string', required: true }, input: { type: 'object', additionalProperties: false }, route: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' } } } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input, undefined, { route: args.route }); return clean({ ok: true, runId: r.id, status: r.status }); }));
-    disposers.push(mk('team_list_agents', {}, { ok: { type: 'boolean', required: true }, agents: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } } } }, (_a, v) => [{ type: 'text', text: 'agents=' + v.agents.length }], async () => { const a = await listAgents(); return clean({ ok: true, agents: a.map((x) => clean({ id: x.id, name: x.name, role: x.role })) }); }));
+    disposers.push(mk('team_create_task', 'Register ONE unit of team work in the durable task ledger. Use it to plan a batch of work before anything executes it, or to hand a task to a later team_delegate_agent call, or to record work for a human. It returns the new task id and status `queued`. LIMITATION: this tool ONLY registers the task - it DOES NOT execute it and it does not dispatch it to any role: no worker agent is spawned, no model call is made, and the task stays queued until something else moves it. Do not call it expecting output. For one blocking role call use team_delegate_agent; for a reviewed multi-role pipeline use team_create_workflow + team_run_workflow.', { requirement: { type: 'string', required: true, description: 'What must be produced, stated as an outcome: the concrete deliverable plus any constraint the worker must obey (files it may touch, format, language). Name the artifact, not the activity.' }, acceptanceCriteria: { type: 'string', required: true, description: 'Checkable conditions under which this task counts as done. Write them so a reviewer can mark each one pass or fail from the artifact alone (e.g. "the reply contains X and Y"). A violated criterion is treated as blocking.' }, assignee: { type: 'string', required: true, description: 'Role that owns the task, by role name or id as registered via team_create_agent (use team_list_agents for the exact names). An unknown name is accepted but records a task nobody owns.' }, reviewer: { type: 'string', description: 'Optional independent reviewer role name or id, recorded on the ledger entry as supervision intent. Omit it when no independent check is wanted.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'created task ' + v.id + ' [' + v.status + ']' }], async (args) => { const t = await createTask(args); return clean({ ok: true, id: t.id, status: t.status }); }));
+    disposers.push(mk('team_task_status', 'Read the task ledger: how many tasks exist and, for each, its id, status, iteration and assignee. Use it to check whether registered work has actually progressed, to find a task stuck at queued or working, or to fetch the ids you need for later calls. Read-only, takes no arguments, and it returns the WHOLE ledger shared by every session in this process - not only the work you registered - so filter by the ids or assignees you care about. It reports tasks only, never runs: for run-level progress use the progress panel or GET /api/team-flowise/progress. `iteration` counts rework rounds, so a task with iteration above 1 has been sent back at least once.', {}, { ok: { type: 'boolean', required: true }, taskCount: { type: 'number', required: true }, tasks: { type: 'array', required: true, items: taskItem } }, (_a, v) => [{ type: 'text', text: 'tasks=' + v.taskCount }], async () => { const tasks = await listTasks(); return clean({ ok: true, taskCount: tasks.length, tasks: tasks.map((t) => clean({ id: t.id, status: t.status, iteration: t.iteration, assignee: t.assignee })) }); }));
+    disposers.push(mk('team_run_workflow', 'Start a registered workflow and BLOCK until the entire run settles, then return its runId and final status. Use it after team_create_workflow when you want the full multi-role pipeline executed now - dependency waves, per-node workers, the review gate and bounded rework. IMPORTANT: it BLOCKS, and it may block for many minutes (each node has its own step timeout, default 30 minutes), so do not call it for a pipeline you are not ready to wait for and do not chain several of these in one call. The result is a summary only; per-node progress lives at GET /api/team-flowise/progress?runId=<id> and in the client progress panel. Run `input` seeds workflow variables and a run-level `route` outranks node, workflow and role routes. Build the roles and the workflow FIRST, then start it; for a single role step use team_delegate_agent instead.', { workflowId: { type: 'string', required: true, description: 'Id of the workflow to run, as returned by team_create_workflow. An unknown id fails the call immediately instead of producing a run that never publishes.' }, input: { type: 'object', additionalProperties: false, description: 'Free-form input for the run (a plain JSON object). Nodes read it as workflow variables; tasks that do not reference it are unaffected.' }, route: { type: 'object', additionalProperties: false, description: 'Run-level model route override. This is the highest-priority layer, so it beats node, workflow and role routes; provider and model must still be declared together or that half is ignored.', properties: { provider: { type: 'string', description: 'Provider id of the run-level route; ignored unless `model` is declared in the same call.' }, model: { type: 'string', description: 'Model id of the run-level route; ignored unless `provider` is declared in the same call.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list. An effort the model does not accept makes this whole layer unusable, so it degrades to the next layer.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for the run; must be a positive number and takes effect on its own.' } } } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input, undefined, { route: args.route }); return clean({ ok: true, runId: r.id, status: r.status }); }));
+    disposers.push(mk('team_list_agents', 'List the registered team role definitions with their ids, names and roles. Use it FIRST whenever you need an exact role name or id: team_delegate_agent, team_create_task and workflow node `agent` fields all resolve against this registry, and a name that does not exist silently produces an unowned task or a node that cannot be dispatched. Read-only and takes no arguments. It returns only id / name / role; for a role\'s model route, persona and tool preset read the role in the settings UI or GET /api/team-flowise/agents. An empty list means no role exists yet - create one with team_create_agent before delegating.', {}, { ok: { type: 'boolean', required: true }, agents: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } } } }, (_a, v) => [{ type: 'text', text: 'agents=' + v.agents.length }], async () => { const a = await listAgents(); return clean({ ok: true, agents: a.map((x) => clean({ id: x.id, name: x.name, role: x.role })) }); }));
     // P11: `id` (modify an existing role instead of always creating a new one),
     // the reasoning / token / timeout knobs, and the tool preset. The old
     // `provider || 'deepseek'` / `model || 'deepseek-chat'` fallbacks are GONE:
     // when only one half is given the other is NOT invented -- the pair rule
     // handles it (that half is ignored, with an explicit warning).
-    disposers.push(mk('team_create_agent', { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' }, systemPrompt: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' }, timeoutMs: { type: 'number' }, toolsPreset: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' }, timeoutMs: { type: 'number' }, toolsPreset: { type: 'string' }, warning: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'upserted agent ' + v.name + ' -> ' + v.id + (v.warning ? ' [' + v.warning + ']' : '') }], async (args) => {
+    disposers.push(mk('team_create_agent', 'Create or modify ONE team role definition: a durable agent definition holding persona, model route, tool preset and timeout. Use it BEFORE any delegation or workflow that names the role - team_delegate_agent, team_create_task and workflow nodes all resolve roles by name from this registry. Upsert semantics: pass the `id` of an existing role to MODIFY it (fields you omit keep their stored value, nothing is wiped); omit `id` to CREATE a new role. When both `provider` and `model` are wanted they must be declared TOGETHER - a lone half is ignored and reported in `warning` rather than inventing a default. This tool only writes the definition: it never dispatches anything.', { id: { type: 'string', description: 'Existing role id to modify, as listed by team_list_agents. Omit it to create a new role (an id is generated). When given, every field you do not pass keeps its current stored value.' }, name: { type: 'string', description: 'Human-readable role name; it is also the value that assignee / node agent / reviewer fields match against, so keep it resolvable. Defaults to `role` when omitted on create.' }, role: { type: 'string', description: 'Short description of what this role does - its job title in the team, e.g. "Implements the change". Distinct from systemPrompt.' }, systemPrompt: { type: 'string', description: 'Persona text merged INTO the worker prompt below the workflow and node layers. Keep it about behaviour and standards, not about one task. The runtime treats {{name}} as a strict template reference and would refuse to start the child on an unknown one, so every `{{` is neutralised to `{ {` before dispatch: your text is KEPT (never discarded), and the rewrite is reported in the node\'s persona.warning.' }, provider: { type: 'string', description: 'Provider route for this role. Must be declared together with `model`; a lone provider is ignored and reported in `warning`.' }, model: { type: 'string', description: 'Model id for this role, valid for the `provider` above. Must be declared together with `provider`; a lone model is ignored and reported in `warning`.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id taken from that model\'s own reasoning.efforts list (GET /api/team-flowise/models). An effort the model does not accept makes the whole route layer unusable, so it falls back to the parent route.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for this role; must be a positive integer. Independent of the provider/model pairing rule - it takes effect on its own.' }, timeoutMs: { type: 'number', description: 'Hard per-step timeout for this role\'s workers, in milliseconds. Values below 1 or non-finite count as "not declared" and are clamped into the allowed range. Bounds one delegated step, not a whole run.' }, toolsPreset: { type: 'string', description: 'Tool preset restricting what this role\'s workers may see or call: full, no-write, no-shell or read-only. A name this deployment does not know is recorded rather than silently accepted, so check the returned role if a restriction matters.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' }, timeoutMs: { type: 'number' }, toolsPreset: { type: 'string' }, warning: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'upserted agent ' + v.name + ' -> ' + v.id + (v.warning ? ' [' + v.warning + ']' : '') }], async (args) => {
       // An id that is already stored means MODIFY: fields the caller did not
       // mention keep their current value instead of being wiped (that is what
       // "modify this role" has to mean).
@@ -2033,8 +2392,8 @@ export function apply(ctx) {
       const am = a.model || {};
       return clean({ ok: true, id: a.id, name: a.name || a.role || a.id, provider: am.provider, model: am.model, reasoningEffort: am.reasoningEffort, maxTokens: am.maxTokens, timeoutMs: a.timeoutMs, toolsPreset: a.tools && a.tools.preset, warning: pairWarn.length ? pairWarn.join(' ') : undefined });
     }));
-    disposers.push(mk('team_create_workflow', { name: { type: 'string', required: true }, description: { type: 'string' }, nodes: { type: 'object', additionalProperties: true }, route: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: 'string' }, reasoningEffort: { type: 'string' }, maxTokens: { type: 'number' } } }, prompt: { type: 'string' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
-    disposers.push(mk('team_delegate_agent', { agent: { type: 'string', required: true }, task: { type: 'string', required: true }, acceptanceCriteria: { type: 'string' }, reviewer: { type: 'string' } }, { ok: { type: 'boolean', required: true }, taskId: { type: 'string', required: true }, status: { type: 'string', required: true }, output: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'delegated -> task ' + v.taskId + ' [' + v.status + ']' }], async (args) => {
+    disposers.push(mk('team_create_workflow', 'Create or modify a durable multi-role workflow: a name plus a node map that the scheduler turns into dependency waves. Use it to define a repeatable pipeline ONCE - the nodes, who owns each one, what each must produce and who reviews it - and then start it with team_run_workflow. `nodes` is an object keyed by node id; each node declares at least its owning role (`agent`) and its dependency list (`dependsOn`), and may declare title, reviewer, taskTemplate and promptAddon. Order comes from dependsOn, never from key order, and independent nodes run concurrently. A workflow-level `review` block supplies the default reviewer. LIMITATION: declaring a workflow does NOT run it.', { name: { type: 'string', required: true, description: 'Workflow display name, shown in the run selector. Keep it unique enough that a human can tell two runs apart.' }, description: { type: 'string', description: 'One-paragraph explanation of what the pipeline produces and why the nodes are ordered that way; written for a human reading the run list.' }, nodes: { type: 'object', additionalProperties: true, description: 'Node map keyed by node id. Each value declares the owning role (`agent`, by name or id), its `dependsOn` array of node ids, and optionally title, reviewer, taskTemplate:{requirement,acceptanceCriteria} and promptAddon. An empty or missing map declares a workflow with zero nodes, which can be started but will do nothing.' }, route: { type: 'object', additionalProperties: false, description: 'Workflow-level model route layer, shared by every step unless a node declares its own (node wins) or the run overrides it (run wins).', properties: { provider: { type: 'string', description: 'Provider id of the workflow-level route; must be declared together with `model` or that half is ignored.' }, model: { type: 'string', description: 'Model id of the workflow-level route; must be declared together with `provider` or that half is ignored.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list; an unsupported effort makes this whole layer unusable.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for every step of this workflow; must be a positive number.' } } }, prompt: { type: 'string', description: 'Workflow-level persona text, merged above the role\'s own systemPrompt and below a node\'s promptAddon. Use it for pipeline-wide standards. An empty string counts as not declared.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
+    disposers.push(mk('team_delegate_agent', 'Hand ONE task to ONE role and BLOCK until that worker agent finishes, then return its output. Use it for a single self-contained step whose result you want in this same turn: it creates a ledger task, moves it to working, spawns the worker through the subagent registry and completes the task. IMPORTANT: it BLOCKS, so the call returns only when the worker stops or its step timeout (default 30 minutes) fires - which means a long task holds this turn open, and do not chain several of these to build a pipeline by hand. A worker that fails is reported as the text `delegate failed: ...`. For anything multi-step or supervised prefer the workflow route: create the roles, then team_create_workflow, then team_run_workflow.', { agent: { type: 'string', required: true, description: 'Role to delegate to, by role name or id from team_list_agents. An unmatched name is used verbatim as the assignee: the work still runs, but no role configuration (model route, tool preset, persona, timeout) is applied.' }, task: { type: 'string', required: true, description: 'The complete task brief for the worker: what to produce, where, and under what constraints. The worker sees only this text plus the acceptance criteria, so it cannot infer context you do not state.' }, acceptanceCriteria: { type: 'string', description: 'Checkable conditions for this one delegation, appended to the worker prompt. Omit only when the task is trivially self-verifying.' }, reviewer: { type: 'string', description: 'Reviewer role recorded on the created ledger task. NOTE: this free-delegation path does not run a review pass - the value is recorded for the ledger and the UI only, and no reviewer agent is spawned.' } }, { ok: { type: 'boolean', required: true }, taskId: { type: 'string', required: true }, status: { type: 'string', required: true }, output: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'delegated -> task ' + v.taskId + ' [' + v.status + ']' }], async (args) => {
       const agentsList = await listAgents();
       const def = agentsList.find((a) => a.id === args.agent || a.name === args.agent);
       const assignee = (def && def.name) || args.agent;
@@ -2186,14 +2545,25 @@ export function apply(ctx) {
     route('exact', '/api/team-flowise/agents', wrap(async () => ({ ok: true, agents: await listAgents() })));
     route('exact', '/api/team-flowise/workflows', wrap(async () => ({ ok: true, workflows: await listWorkflows() })));
     route('exact', '/api/team-flowise/tasks', wrap(async () => ({ ok: true, tasks: await listTasks() })));
-    route('exact', '/api/team-flowise/runs', wrap(async () => ({ ok: true, runs: await listRuns() })));
+    // `?session=<id>` is OPTIONAL and defaults to "no session", which keeps this
+    // endpoint byte-identical to pre-P12. When a session IS given, the runs are
+    // narrowed with the same pure `selectRun` rule the /progress endpoint uses
+    // (a legacy record with no sessionId is attributed to nobody, so it drops out
+    // of a session-scoped view instead of being handed to the wrong session).
+    route('exact', '/api/team-flowise/runs', wrap(async (req) => {
+      const runs = await listRuns();
+      const session = readSessionOption(query(req.url, 'session')).sessionId;
+      return { ok: true, runs: session === undefined ? runs : runs.filter((r) => r && r.sessionId === session) };
+    }));
     // Read-only progress summary of the latest run (or ?runId=<id>), aligned to
     // the workflow definition. GET + no body => directly consumable by
     // Invoke-RestMethod and by the client board's poll loop.
-    route('exact', '/api/team-flowise/progress', wrap(async (req) => progressSummary(query(req.url, 'runId'))));
+    // P12: `?session=<id>` narrows "the latest run" to that session. `runId`
+    // stays explicit and therefore outranks it.
+    route('exact', '/api/team-flowise/progress', wrap(async (req) => progressSummary(query(req.url, 'runId'), readSessionOption(query(req.url, 'session')).sessionId)));
     // Heavy per-role detail (the complete worker report + reasoning trace),
     // fetched only when a role is opened rather than on every poll.
-    route('exact', '/api/team-flowise/role', wrap(async (req) => roleDetail(query(req.url, 'runId'), query(req.url, 'agent'))));
+    route('exact', '/api/team-flowise/role', wrap(async (req) => roleDetail(query(req.url, 'runId'), query(req.url, 'agent'), readSessionOption(query(req.url, 'session')).sessionId)));
     route('exact', '/api/team-flowise/run', wrap(async (req) => {
       const id = query(req.url, 'id');
       if (!id) return { ok: false, error: 'missing id' };
@@ -2243,7 +2613,10 @@ export function apply(ctx) {
       // Runs in the background: the scheduler owns the run record from here, so
       // the response reports the id and the board follows it through `/runs`.
       // `body.route` is the P11 run-level override (highest-priority layer).
-      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route }).catch(async (e) => {
+      // `body.session` (P12) is the session this run belongs to, as sent by the
+      // client. OPTIONAL and never guessed: an HTTP route has no live initiator,
+      // so without it the run is stored with no attribution at all.
+      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
         console.error('team-flowise: run failed', String(e));
         if (!rec) return;
         try {
