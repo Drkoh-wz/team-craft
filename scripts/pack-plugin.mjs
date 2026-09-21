@@ -490,13 +490,25 @@ function main(argv) {
 	// INSTALL.md is generated and packed as the entry point. It is added AFTER the
 	// required-file gate on purpose: that gate must judge the SOURCE tree, never a
 	// document the packer itself just wrote.
+	//
+	// Its mtime is the newest SOURCE mtime, never "now": a tar header carries an
+	// mtime, so stamping the generated file with the wall clock would make two
+	// builds of identical inputs differ byte for byte -- and then no one could tell
+	// a rebuilt archive from a changed one. SOURCE_DATE_EPOCH pins every entry, for
+	// a fully reproducible archive (same convention as pack-specialization.mjs).
 	const sourceBytes = entries.reduce((n, e) => n + e.data.length, 0);
+	const maxMtime = entries.reduce((n, e) => Math.max(n, e.mtimeSec), 0);
 	entries.push({
 		name: ENTRY_DOC,
 		data: buf(buildInstallMd({ version, entryCount: entries.length + 1, sourceBytes, gitDescribe: gitDescribe() })),
 		mode: 0o644,
-		mtimeSec: Math.floor(Date.now() / 1000),
+		mtimeSec: maxMtime,
 	});
+	const sourceEpoch = Number.parseInt(process.env.SOURCE_DATE_EPOCH || '', 10);
+	if (Number.isFinite(sourceEpoch) && sourceEpoch > 0) {
+		for (const e of entries) e.mtimeSec = sourceEpoch;
+		console.log(`SOURCE_DATE_EPOCH=${sourceEpoch} -> every entry's mtime is pinned`);
+	}
 	entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 	const tarBuf = buildTar(entries);
