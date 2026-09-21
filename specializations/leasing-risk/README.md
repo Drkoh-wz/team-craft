@@ -231,7 +231,8 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 
 这一节逐条写清本包**做不到**和**依赖别人**的地方。请按这里写的理解能力，不要按期望理解。
 
-1. **模型意图解析不到 → 继承会话模型。** `models.map.json` 的 `prefer` 在本机（P13 开发机）能解析到 `amd` / `hub16`；换一个部署可能**一个都解析不到**。届时安装器不写该角色的 `model` 字段，角色直接**继承发起这次运行的会话模型**，并如实告警。这是降级，不是失败；想让意图生效就往 `models.map.json` 里加你这个部署真实存在的 provider/model。
+1. **模型意图解析不到 → 继承会话模型。** `models.map.json` 的 `prefer` 在本机（P13 开发机）解析为 `deepseek-official/deepseek-flash`（日常角色）与 `deepseek-official/deepseek-v4-pro`（财务分析师、风控评审员、报告撰写、反馈优化）；换一个部署可能**一个都解析不到**。届时安装器不写该角色的 `model` 字段，角色直接**继承发起这次运行的会话模型**，并如实告警。这是降级，不是失败；想让意图生效就往 `models.map.json` 里加你这个部署真实存在的 provider/model。
+   （v2 备注：三个意图的首选原先指向 `amd`、`hub16`；实测 `amd` 极慢——一个节点跑了 1000 秒才以 `stopReason=error` 收场——因此改为首选 DeepSeek 官方，用户原本指定的模型保留为后续选择。想恢复按角色分模型，只要把 `prefer` 顺序调回去。）
 
 2. **`haltOnFailure` 需要新版 team-flowise。** 旧版本会把这个字段丢掉（写入时不报错、存不住），此时**只有产物级阻断**，没有引擎级停止：上游失败后下游仍可能被派发，靠下游自己读到空/阻断的上游产物才停下来。用第六节的方法探测。
 
@@ -241,7 +242,7 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 
 5. **本包不含 team-flowise 源码。** 归档里只有本包自身的文件；插件必须按第二节第 1 步单独安装。这样做的原因是避免把某个版本的插件源码随包分发造成**版本漂移**——插件与包各自升级、各自 `--check`。
 
-6. **`route.measured` 不声称可用。** 模型路由记录里的 `route.measured` 在真实子代理上从未被观测到为 `true`（自 P11 以来）；判断路由是否生效请看 `route.source`（`run` / `node` / `workflow` / `role` / `inherited`）与 `route.warning`。
+6. **`route.measured` 已观测到 `true`，但它仍是尽力而为，不要当保证。** P13 在**真实子代理**上第一次观测到 `route.measured === true`：一个失败节点的 `route.effective` 就等于该子代理自身 request header 里的 config（这正是它的定义）。但它是"读到了就记、读不到就记 `false`、绝不拿请求值冒充实测值"的语义；判断路由是否真的生效，仍应结合 `route.source`（`run` / `node` / `workflow` / `role` / `inherited`）与 `route.warning`。
 
 7. **节点的 `reviewer` 才有评审。** 只有节点级 `reviewer`（或工作流级 `review.reviewer` 默认值）会派发评审者；本工作流里 `feedback` 节点没有评审。`team_delegate_agent` 的 `reviewer` 只登记在台账上，不派发评审者。
 

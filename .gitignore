@@ -7,3 +7,9 @@ node_modules/
 *.tmp
 grepout.txt
 tool-test.txt
+
+# Built distribution archives (scripts/pack-specialization.mjs output). They are
+# generated from the committed sources, so tracking one would only create a
+# stale binary that no longer matches the tree -- which is exactly what a
+# leftover packages.zip did before P12.
+dist/

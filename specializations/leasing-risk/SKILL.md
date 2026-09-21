@@ -27,7 +27,7 @@ description: 融资租赁承租人还款风险评估专用团队（10 个角色 
 | 0 | `coord-open` | 调度协调员 | `00-plan.json` | — | 数据复核师 |
 | 1 | `intake` | 数据整理员 | `01-data.json` | `coord-open` | 数据复核师 |
 | 2 | `collect` | 网络资料收集员 | `02-web.json` | `coord-open` | 数据复核师 |
-| 3 | `finance` | 财务分析师 | `03-finance.json` | `intake` | 数据复核师 |
+| 3 | `finance` | 财务分析师 | `03-finance.json` | `intake`、`collect` | 数据复核师 |
 | 4 | `credit` | 信用与法律分析师 | `04-credit-legal.json` | `intake`、`collect` | 数据复核师 |
 | 5 | `asset` | 租赁物与中登网核查分析师 | `05-asset-registry.json` | `intake`、`collect` | 数据复核师 |
 | 6 | `verify` | 数据复核师 | `06-verify.json` | `finance`、`credit`、`asset`、`collect` | 风控评审员 |
@@ -228,5 +228,5 @@ hub16/gpt-6-astra         -> {"reasoning":{"efforts":[],"defaultEffort":null}}
 - 引擎级硬停需要支持 `haltOnFailure` 的 team-flowise；旧版本上只有产物级阻断。
 - `arbitrate` 判 `return_to_intake` **不会自动回环**（插件没有 loop 原语），只能由人据此发起新的一次运行。
 - 模型意图解析不到就继承会话模型，这是如实降级；目标部署上可能一个意图都解析不到。
-- 模型路由记录里的 `route.measured` 从未在真实子代理上被观测到为 `true`，本包不声称它可用。
+- `route.measured` **已被真实观测到为 `true`，但它仍是尽力而为，不要当保证**：P13 期间 run `9x2tro7rmubbgzqs` 的 `design-audit` 节点记录为 `measured: true`，其 `effective`（amd/DeepSeek-V4.1-Flash）与 `requested`（amd/DeepSeek-V4-Flash，一个不可解析的名字）不同，即 `effective` 取自子代理自身的 request header —— 这正是它的定义。读不到时记 `false`，绝不拿请求值冒充实测值；判断路由是否真的生效仍应结合 `route.source` 与 `route.warning`。
 - 本包**不含** team-flowise 源码（避免版本漂移）：需要先按 `README.md` 第二步把 team-flowise 装好。
