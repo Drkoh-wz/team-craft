@@ -694,9 +694,27 @@ if (prog.status === 401 || prog.status === 404) {
     // Title is derived from the workflow definition at read time, so it exists for
     // runs recorded long before this change -- unlike `summary`, which the run
     // engine only started writing now (asserted in the smoke phase instead).
+    //
+    // That read-time derivation has a second consequence: a run OUTLIVES its
+    // workflow. Deleting a workflow keeps its history, and /progress then reports
+    // `title: null` rather than inventing a name -- correct degradation, but it
+    // means titles are genuinely not resolvable for that run. Observed live:
+    // re-creating the deleted workflow makes the titles reappear, deleting it makes
+    // them null again. So this check must not accuse the plugin of losing titles
+    // when the only thing missing is the definition.
     const hasTitles = (p.nodes || []).some((n) => 'title' in n)
+    const runWfId = (p.run && p.run.workflowId) || null
+    let wfGone = false
+    if (hasTitles && runWfId !== null) {
+      const wfList = await get('/api/team-flowise/workflows')
+      const flows = Array.isArray(wfList.json) ? wfList.json : ((wfList.json || {}).workflows || [])
+      wfGone = flows.filter((x) => x.id === runWfId).length === 0
+    }
     if (!hasTitles) {
       deferred('node titles (readable step names)', 'the running host predates the naming change; restart required')
+    } else if (wfGone) {
+      deferred('node titles (readable step names)',
+        'the newest run belongs to workflow "' + runWfId + '", which is no longer registered; /progress degrades to id labels by design (re-register the workflow and the titles come back)')
     } else {
       const noTitle = (p.nodes || []).filter((n) => typeof n.title !== 'string' || n.title === '')
       check('every node carries a readable title, not just an id', noTitle.length === 0, JSON.stringify(noTitle.map((n) => n.id)))

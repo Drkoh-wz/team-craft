@@ -54,7 +54,19 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
 const SRC = join(REPO, 'packages', 'team-flowise', 'src', 'index.js')
 const CLIENT_SRC = join(REPO, 'packages', 'team-flowise', 'src', 'client', 'index.js')
-const OLD_REF = process.env.P15_OLD_REF && process.env.P15_OLD_REF.trim() !== '' ? process.env.P15_OLD_REF.trim() : 'HEAD^1'
+
+// "The code before the merge" is the FIRST PARENT OF THE NEWEST MERGE COMMIT, not
+// `HEAD^1`. HEAD moves the moment anyone commits on top of the merge, and a suite
+// that quietly starts comparing the merged build against itself would go green for
+// the wrong reason. (It did exactly that once, which is why this is computed.)
+const DEFAULT_OLD_REF = (() => {
+  try {
+    const mergeSha = execFileSync('git', ['log', '--merges', '-1', '--format=%H'], { cwd: REPO, encoding: 'utf8' }).trim()
+    if (mergeSha !== '') return mergeSha + '^1'
+  } catch { /* fall through to the naive default */ }
+  return 'HEAD^1'
+})()
+const OLD_REF = process.env.P15_OLD_REF && process.env.P15_OLD_REF.trim() !== '' ? process.env.P15_OLD_REF.trim() : DEFAULT_OLD_REF
 const CHILD = process.env.P15_CHILD === '1'
 
 let checks = 0
@@ -259,8 +271,8 @@ if (oldMod !== null && newMod !== null && haltedRuns.length >= 1) {
     check('B3.1 合并后的 schema 不比合并前更严：旧版接受的每一条，新版都接受',
       regressions.length === 0,
       'old accepted=' + oldOk + ' new accepted=' + newOk + ' regressions=' + regressions.slice(0, 3).join(','))
-    check('B3.2 而且新版严格更宽（唯一多出来的就是这条 halted 记录），所以放宽是有证据的',
-      newOk > oldOk, 'delta=' + (newOk - oldOk))
+    check('B3.2 而且新版严格更宽（多出来的都是 halted 记录），所以放宽是有证据的',
+      newOk > oldOk, 'delta=' + (newOk - oldOk) + ' halted in storage=' + haltedRuns.length)
 
     // B4: the direction that broke is documented where the next person will look.
     // The comment is wrapped across `//` lines, so flatten line comments first --

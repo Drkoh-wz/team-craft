@@ -231,6 +231,32 @@ const failedLabelsOf = (stdout) => {
  *  * 请求体超过 65536 字节直接 {ok:false,error:'bad body'}（宿主 readJsonBody 的上限）
  *  * 只监听 127.0.0.1（写接口要求 loopback）
  */
+/**
+ * 宿主 `workflowNodeSchema` 的字段顺序（packages/team-flowise/src/index.js:72-94）。
+ *
+ * 这个 stub 必须**像真宿主那样重新排列键**，否则它就比真宿主更"友好"，从而掩盖
+ * 真宿主上才会出现的问题。实测过一次：真宿主把存储的记录过一遍自己的 schema，
+ * 于是节点键序变成 id,title,agent,taskTemplate,dependsOn,...，而 workflow.json
+ * 里是 id,title,agent,dependsOn,...,taskTemplate。旧版 install.mjs 用
+ * `JSON.stringify(a) !== JSON.stringify(b)` 比较 nodes —— 那是**带键序**的比较，
+ * 于是安装完全正确时 `--check` 也永远报"nodes 与 workflow.json 不一致"。
+ * 本 stub 当时是原样回显，键序一致，所以 132 项全绿也照不出这个缺陷。
+ *
+ * zod 的默认行为还会**丢掉 schema 不认识的键**，所以这里也只保留这些键。
+ * 下面的 F0 组会拿真 schema 校验这份清单，防止它悄悄过期。
+ */
+const HOST_NODE_KEY_ORDER = ['id', 'title', 'agent', 'taskTemplate', 'dependsOn', 'reviewer', 'mode', 'gate', 'maxRework', 'route', 'promptAddon', 'timeoutMs'];
+
+/** 把一个节点对象改写成真宿主会返回的形状：键序按 schema，未知键丢弃。 */
+function hostShapeNode(n) {
+  if (n === null || typeof n !== 'object') return n;
+  const out = {};
+  for (const k of HOST_NODE_KEY_ORDER) {
+    if (Object.prototype.hasOwnProperty.call(n, k)) out[k] = n[k];
+  }
+  return out;
+}
+
 function makeStubEndpoint(opts) {
   const catalog = opts.catalog;
   const seed = opts.seed || {};
@@ -292,6 +318,11 @@ function makeStubEndpoint(opts) {
       state.writes += 1;
       const stored = { ...b, updatedAt: state.clock };
       if (dropHaltOnFailure) delete stored.haltOnFailure; // 旧版本：写入成功但字段没存住
+      // 真宿主会把 workflow 记录过一遍 workflowNodeSchema：键序按 schema，未知键丢弃。
+      // stub 必须照做，否则"比真宿主更友好"的 stub 会掩盖真宿主上才出现的问题。
+      if (stored.nodes !== null && typeof stored.nodes === 'object') {
+        stored.nodes = Object.fromEntries(Object.entries(stored.nodes).map(([nid, n]) => [nid, hostShapeNode(n)]));
+      }
       state.workflows.set(b.id, stored);
       return send(res, 200, { ok: true, workflow: state.workflows.get(b.id) });
     }
@@ -357,6 +388,30 @@ const realProfileBefore = {
 };
 const installSrcHashBefore = hashOfFile(REPO_INSTALL);
 const selftestHashBefore = hashOfFile(REPO_SELFTEST);
+
+// ===========================================================================
+console.log('\n--- GROUP F0: stub 与真宿主的一致性（键序 / 未知键） ---');
+// The stub is only as good as its fidelity. `hostShapeNode` claims to reproduce
+// what the real host returns for a stored workflow; if workflowNodeSchema gains
+// a field, this list must be updated or the stub starts lying again -- which is
+// exactly how the key-order bug survived 132 green checks.
+try {
+  const { pathToFileURL } = await import('node:url');
+  const pluginUrl = pathToFileURL(join(REPO, 'packages', 'team-flowise', 'src', 'index.js')).href;
+  const plugin = await import(pluginUrl + '?p13e-schema-shape');
+  const realOrder = Object.keys(plugin.workflowNodeSchema.shape);
+  check('F0.1 stub 的节点键序清单与真 workflowNodeSchema 逐项一致（清单过期 = stub 又开始骗人）',
+    realOrder.join(',') === HOST_NODE_KEY_ORDER.join(','),
+    realOrder.join(',') === HOST_NODE_KEY_ORDER.join(',') ? 'n=' + realOrder.length : 'real=' + realOrder.join(',') + ' stub=' + HOST_NODE_KEY_ORDER.join(','));
+  const shaped = hostShapeNode({ taskTemplate: { requirement: 'r' }, id: 'n1', bogus: 1, dependsOn: [], agent: 'a', promptAddon: 'p' });
+  check('F0.2 stub 真的重排了键序（否则本组是空转，键序缺陷仍会被掩盖）',
+    Object.keys(shaped).join(',') === 'id,agent,taskTemplate,dependsOn,promptAddon',
+    Object.keys(shaped).join(','));
+  check('F0.3 stub 丢弃 schema 不认识的键（真宿主 zod 的 strip 行为）',
+    !Object.prototype.hasOwnProperty.call(shaped, 'bogus'), Object.keys(shaped).join(','));
+} catch (e) {
+  check('F0.1 stub 的节点键序清单与真 workflowNodeSchema 逐项一致（清单过期 = stub 又开始骗人）', false, String(e && e.message ? e.message : e));
+}
 
 // ===========================================================================
 if (wants('A')) {

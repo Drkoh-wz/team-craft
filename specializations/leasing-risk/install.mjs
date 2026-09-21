@@ -496,6 +496,41 @@ function desiredWorkflowBody(ctx) {
 }
 
 // 「已存在」判定：只比较本安装器声明/管理的字段，不动目标上多出来的其它设置。
+/**
+ * Structural equality that ignores KEY ORDER.
+ *
+ * `JSON.stringify(a) === JSON.stringify(b)` is not an equality test for objects:
+ * it also compares the order the keys happen to sit in. The host parses a stored
+ * workflow through its own `workflowNodeSchema`, so the record it returns lists a
+ * node's keys in the schema's order (`id,title,agent,taskTemplate,dependsOn,
+ * reviewer,promptAddon`) while workflow.json lists them in the file's order
+ * (`id,title,agent,dependsOn,reviewer,promptAddon,taskTemplate`). Same data, same
+ * length -- and `JSON.stringify` calls it a difference, which made `--check`
+ * report a phantom workflow drift on every correctly installed deployment.
+ *
+ * Why the hermetic suite did not catch it: its stub endpoint echoes back exactly
+ * what it was handed, so it preserved key order and the serializations matched.
+ * The stub now re-emits nodes in the host's order on purpose.
+ */
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  const aArr = Array.isArray(a);
+  const bArr = Array.isArray(b);
+  if (aArr !== bArr) return false;
+  if (aArr) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) if (!deepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const ka = Object.keys(a).sort();
+  const kb = Object.keys(b).sort();
+  if (ka.length !== kb.length) return false;
+  for (let i = 0; i < ka.length; i += 1) if (ka[i] !== kb[i]) return false;
+  for (const k of ka) if (!deepEqual(a[k], b[k])) return false;
+  return true;
+}
+
 function agentMatches(existing, desired) {
   if (!existing) return false;
   if ((existing.name || '') !== (desired.name || '')) return false;
@@ -512,7 +547,7 @@ function agentMatches(existing, desired) {
 
 function workflowMatches(existing, desired) {
   if (!existing) return false;
-  if (JSON.stringify(existing.nodes) !== JSON.stringify(desired.nodes)) return false;
+  if (!deepEqual(existing.nodes, desired.nodes)) return false;
   if ((existing.name || '') !== (desired.name || '')) return false;
   if ((existing.description || '') !== (desired.description || '')) return false;
   if ((existing.prompt || '') !== (desired.prompt || '')) return false;
@@ -857,7 +892,7 @@ async function main() {
     } else {
       if (rec.haltOnFailure !== true) { const s = `工作流 ${ctx.workflowId} 的 haltOnFailure 不是 true（该版本不会硬停）`; emit(`  [不一致] ${s}`); issues.push(s); }
       if (num(rec.review && rec.review.maxRework) !== num(ctx.desiredMaxRework)) { const s = `工作流 ${ctx.workflowId} 的 review.maxRework 是 ${JSON.stringify(num(rec.review && rec.review.maxRework))}，声明的是 ${JSON.stringify(num(ctx.desiredMaxRework))}`; emit(`  [不一致] ${s}`); issues.push(s); }
-      if (JSON.stringify(rec.nodes) !== JSON.stringify(wfBody.nodes)) { const s = `工作流 ${ctx.workflowId} 的 nodes 与 workflow.json 不一致`; emit(`  [不一致] ${s}`); issues.push(s); }
+      if (!deepEqual(rec.nodes, wfBody.nodes)) { const s = `工作流 ${ctx.workflowId} 的 nodes 与 workflow.json 不一致（逐字段结构比较，忽略键序）`; emit(`  [不一致] ${s}`); issues.push(s); }
       if ((rec.prompt || '') !== wfBody.prompt) { const s = `工作流 ${ctx.workflowId} 的 prompt（契约正文）与 adapters/00-workflow-contract.md 不一致`; emit(`  [不一致] ${s}`); issues.push(s); }
     }
     if (opts.skipSkill) {
