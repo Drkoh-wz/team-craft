@@ -1291,6 +1291,88 @@ if (process.env.P13_SKIP_MUTATIONS === '1') {
 }
 
 // ===========================================================================
+// Group J (found by the P13 adversarial review, item B1): the TOOL path.
+// Every earlier group declares haltOnFailure through svc.upsertWorkflow or
+// rawPut, so the tool an agent actually calls was never exercised -- and it
+// turned out to DROP the field: the parameter was declared (and validated) while
+// execute() never passed args.haltOnFailure to upsertWorkflow, i.e. a capability
+// nobody could ever declare through the agent path, returned as success. That is
+// the "declared-but-unstored" defect class this plugin's write path was already
+// fixed for twice, so it gets its own group rather than a note.
+//
+// These checks drive the REAL registered tool against an isolated ctx (the main
+// ctx has no `tools` service on purpose, and adding one would change the
+// behaviour every existing check was written against). Deleting
+// `haltOnFailure: args.haltOnFailure` from execute() turns J2.1 red.
+// ===========================================================================
+{
+  const toolStorage = makeStorageStub()
+  const toolRegs = new Map()
+  const toolsStub = { register(def) { toolRegs.set(def.name, def); return () => { toolRegs.delete(def.name) } } }
+  const toolCtx = {
+    storageDomain: toolStorage,
+    agents: agentsSvcStub,
+    webServer: webServerStub,
+    get(n) {
+      if (n === 'storageDomain') return toolStorage
+      if (n === 'subagents') return subagentsStub
+      if (n === 'agents') return agentsSvcStub
+      if (n === 'webServer') return webServerStub
+      if (n === 'tools') return toolsStub
+      return undefined
+    },
+    provide() {},
+    effect(fn) { const d = fn(); if (typeof d === 'function') d(); return () => {} },
+    on() { return () => {} },
+    logger: { warn() {}, error() {}, info() {} },
+  }
+  const prevWarnJ = console.warn
+  console.warn = () => {}
+  // A PRISTINE module instance, not the one already applied for the main ctx:
+  // the plugin is a Cordis plugin and its apply() is single-shot per instance
+  // (a second apply() on the same instance registers tools but never resolves
+  // its domains, so the tool silently writes nowhere). The cache-busting query
+  // gives this group its own instance, so the tool's closures bind to THIS
+  // storage. Mutation mode still works: SRC_URL already points at the mutant.
+  let toolMod = null
+  try {
+    toolMod = await import(SRC_URL + '?p13-tool-path')
+    toolMod.apply(toolCtx)
+  } catch (e) {
+    check('J0.1 工具路径的独立模块实例能挂载（失败则 J 组无依据）', false, String(e && e.message ? e.message : e))
+  } finally { console.warn = prevWarnJ }
+
+  const tool = toolRegs.get('team_create_workflow')
+  check('J1.1 tools 服务在场时宿主真的注册了 team_create_workflow（否则本组无依据）',
+    tool !== undefined && typeof tool.execute === 'function', tool === undefined ? 'not registered' : typeof tool.execute)
+  check('J1.2 工具 schema 声明了 haltOnFailure:boolean —— 声明与实现必须同时在场（只有声明就是本组要抓的缺陷）',
+    tool !== undefined && !!(tool.parameters && tool.parameters.properties && tool.parameters.properties.haltOnFailure) &&
+      tool.parameters.properties.haltOnFailure.type === 'boolean',
+    tool === undefined ? 'no tool' : Object.keys((tool.parameters && tool.parameters.properties) || {}).join(','))
+
+  if (tool !== undefined && typeof tool.execute === 'function') {
+    const flows = () => { const d = toolStorage.stores.get('team_workflows'); return d === undefined ? new Map() : d.get('flows') }
+    const node1 = { id: 'n1', agent: 'Coder', dependsOn: [], taskTemplate: { requirement: 'r' } }
+
+    await tool.execute({ name: 'J-probe-on', nodes: { n1: node1 }, haltOnFailure: true })
+    const stored = [...flows().values()].find((w) => w.name === 'J-probe-on')
+    check('J2.1 经 team_create_workflow 声明 haltOnFailure:true 必须真的写进存储（execute 漏传 args.haltOnFailure 即红）',
+      stored !== undefined && stored.haltOnFailure === true,
+      stored === undefined ? 'no record' : JSON.stringify({ id: stored.id, keys: Object.keys(stored).sort().join(',') }))
+
+    await tool.execute({ name: 'J-probe-off', nodes: { n1: node1 } })
+    const stored2 = [...flows().values()].find((w) => w.name === 'J-probe-off')
+    check('J2.2 不声明时存储记录不得凭空多出 haltOnFailure 键（键集契约）',
+      stored2 !== undefined && !('haltOnFailure' in stored2),
+      stored2 === undefined ? 'no record' : Object.keys(stored2).sort().join(','))
+
+    check('J2.3 两条记录都没有其他节点字段泄漏（n1 原样存回）',
+      stored !== undefined && stored.nodes && stored.nodes.n1 && stored.nodes.n1.agent === 'Coder',
+      stored === undefined ? 'no record' : JSON.stringify(Object.keys((stored.nodes && stored.nodes.n1) || {}).sort()))
+  }
+}
+
+// ===========================================================================
 // Cleanup: remove every temp artefact this file created.
 try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
 
