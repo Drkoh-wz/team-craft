@@ -1,0 +1,169 @@
+{
+  "id": "leasing-risk-assessment",
+  "name": "融资租赁客户还款风险评估",
+  "description": "面向融资租赁承租人的还款风险评估流水线：调度就绪检查 -> 数据标准化 ∥ 公开渠道收集 -> 三个专业分析师并行 -> 数据复核师独立核验 -> 调度协调员冲突仲裁 -> 风控评审员综合定级 -> 报告撰写 -> 反馈优化。节点顺序来自 dependsOn（不来自键序），同一波内并行。haltOnFailure=true：任一步骤失败、或其阻塞项在返工上限内未解决时，本次运行停止且未开始的步骤记为 skipped——下游必须在数据可信的前提下才允许产出风险结论。",
+  "haltOnFailure": true,
+  "review": {
+    "maxRework": 1,
+    "enabled": true
+  },
+  "prompt": "adapters/00-workflow-contract.md",
+  "nodes": {
+    "coord-open": {
+      "id": "coord-open",
+      "title": "0. 发起与就绪检查（调度协调员）",
+      "agent": "lease-coordinator",
+      "dependsOn": [],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/00-plan.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【0. 发起与就绪检查】读取 Input 里的 case_dir，检查 inputs/ 下的材料清单，判定本次评估能否启动。\n产出：写出 <case_dir>/00-plan.json，字段按你的人设规定的输出格式，并补充：can_proceed（true|false）、required_inputs（本次评估必需的材料清单，逐项标注 已提供/缺失）、limitation_flags（因材料缺失而必须在下游标注的局限，例如“中登网数据未提供”）、downstream_plan（三个分析师的激活顺序与各自需要的输入）、arbitration_protocol（你将在 07-arbitration 节点使用的冲突分类规则）。\n不得在此节点做任何专业分析判断：不评估偿债能力、不出风险等级、不判断法律风险。",
+        "acceptanceCriteria": "- <case_dir>/00-plan.json 存在且是合法 JSON。\n- 含 current_stage / agent_status / conflicts / next_action 四个人设规定的字段。\n- can_proceed 为布尔值；材料缺失时仍可为 true，但缺失项必须逐条出现在 limitation_flags 与 required_inputs。\n- required_inputs 每项给出 已提供 或 缺失，不得省略缺失项。\n- 产物中不出现风险等级、偿债能力评分或法律结论（本节点不得做专业判断）。"
+      }
+    },
+    "intake": {
+      "id": "intake",
+      "title": "1. 数据标准化（数据整理员）",
+      "agent": "lease-data-organizer",
+      "dependsOn": [
+        "coord-open"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/01-data.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【1. 数据标准化】按 <case_dir>/00-plan.json 的 required_inputs，读取 <case_dir>/inputs/ 下的原始材料（财务报表、银行流水、征信报告、诉讼记录、中登网登记数据），按你的人设规定的数据类型与处理规则提取并标准化。\n产出：写出 <case_dir>/01-data.json，每个数据字段附 source_ref（页码/行号）与 confidence（high/medium/low）。缺失科目标 MISSING，不要填 0；异常值标 “ANOMALY: 原值 -> 新值”。\n若 00-plan.json 的 can_proceed 为 false，按工作流契约写出阻断产物并停止。",
+        "acceptanceCriteria": "- <case_dir>/01-data.json 存在且是合法 JSON。\n- 数值型字段都带 source_ref 与 confidence（缺任一项即不达标）。\n- 缺失科目标为 MISSING 而不是 0；异常值标注 ANOMALY: 原值 -> 新值。\n- 金额统一为万元、保留两位小数。\n- 产物中不含分析性结论：无风险等级、无指标评价、无“建议”。"
+      }
+    },
+    "collect": {
+      "id": "collect",
+      "title": "2. 公开渠道资料收集（网络资料收集员）",
+      "agent": "lease-web-collector",
+      "dependsOn": [
+        "coord-open"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/02-web.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【2. 公开渠道资料收集】按 <case_dir>/00-plan.json 中的承租人信息，收集中登网登记、工商信息、司法涉诉、行业舆情。\n产出：写出 <case_dir>/02-web.json。每条记录包含 source_type / source_name / query_date / raw_content / relevance_flag；中登网专项需含登记日期、登记期限、出租人名称，并给出按月登记笔数趋势。\n查不到就明确写“未查询到中登网登记记录”，不要编造。若本次无法访问公开渠道，如实写明限制，不要用记忆中的数据顶替。",
+        "acceptanceCriteria": "- <case_dir>/02-web.json 存在且是合法 JSON。\n- 每条记录都有 source_name 与 query_date，或有明确的“未查询到”说明。\n- 中登网部分给出按月登记笔数，或给出明确的未查询到说明。\n- 无编造来源：不得出现无法指认来源的登记记录、案号或工商数据。"
+      }
+    },
+    "finance": {
+      "id": "finance",
+      "title": "3. 财务分析（财务分析师）",
+      "agent": "lease-financial-analyst",
+      "dependsOn": [
+        "intake"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/03-finance.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【3. 财务分析】读取 <case_dir>/01-data.json（<case_dir>/02-web.json 中的行业数据可作为对照），按你的人设的四段框架（偿债能力40%、现金流覆盖35%、盈利能力趋势15%、数据质量10%）分析。\n产出：写出 <case_dir>/03-finance.json。每个指标给出公式与中间步骤；“经营活动现金流净额/年租金 < 1.5”必须给出明确红色预警；无法计算的指标写“无法计算：<原因>”并用行业均值做敏感性分析。\n若 01-data.json 不存在、为空或 blocked=true，按工作流契约写出阻断产物并停止。",
+        "acceptanceCriteria": "- <case_dir>/03-finance.json 存在且是合法 JSON，含 indicators / cash_flow_coverage / data_quality_flags / key_findings。\n- 每个 indicator 都有 formula 与 status（red|yellow|green）。\n- cash_flow_coverage 给出具体数值；若低于 1.5 必须存在红色预警标记。\n- 无法计算的指标显式写“无法计算：<原因>”，未静默跳过。\n- 不出现“总体风险可控”这类无阈值支撑的笼统结论。"
+      }
+    },
+    "credit": {
+      "id": "credit",
+      "title": "4. 信用与法律分析（信用与法律分析师）",
+      "agent": "lease-credit-legal-analyst",
+      "dependsOn": [
+        "intake",
+        "collect"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/04-credit-legal.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【4. 信用与法律分析】读取 <case_dir>/01-data.json 与 <case_dir>/02-web.json。\n产出：写出 <case_dir>/04-credit-legal.json，含 credit_scorecard / legal_risk_level / veto_flags / evidence_citations / key_findings。\n存在失信被执行人记录时必须一票否决（输出“建议拒绝”并写入 veto_flags）；诉讼要区分原告/被告；征信查询次数异常要区分“贷款审批”与“贷后管理”。\n每条结论附原文引用（裁判文书案号 / 征信报告页码）。\n若上游产物不存在、为空或 blocked=true，按工作流契约写出阻断产物并停止。",
+        "acceptanceCriteria": "- <case_dir>/04-credit-legal.json 存在且是合法 JSON。\n- 每条结论在 evidence_citations 中有对应来源（claim + source）。\n- 若存在失信被执行人记录，veto_flags 非空且结论为“建议拒绝”。\n- 诉讼案件标注了原告/被告身份。\n- legal_risk_level ∈ {low, medium, high, critical}。"
+      }
+    },
+    "asset": {
+      "id": "asset",
+      "title": "5. 租赁物与中登网核查（租赁物与中登网核查分析师）",
+      "agent": "lease-asset-registry-analyst",
+      "dependsOn": [
+        "intake",
+        "collect"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/05-asset-registry.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【5. 租赁物与中登网核查】读取 <case_dir>/01-data.json 与 <case_dir>/02-web.json。\n产出：写出 <case_dir>/05-asset-registry.json，含 registration_trend / duplicate_registrations / lessor_changes / asset_residual_value / risk_flags。\n登记频率趋势必须给具体数值（近6个月笔数、前6个月笔数、增幅百分比，例如“近6个月12笔，前6个月5笔，增幅140%”）；同一租赁物多重登记逐项列出；中登网数据无法获取时明确写“中登网数据缺失，以下分析基于有限信息”，不要推测。",
+        "acceptanceCriteria": "- <case_dir>/05-asset-registry.json 存在且是合法 JSON。\n- registration_trend 给出 period / count / change_pct 具体数值，或明确的数据缺失说明。\n- duplicate_registrations 逐项比对，未使用“大致/可能”等模糊表述。\n- 中登网不可得时产物中出现“中登网数据缺失”字样且未做推测。\n- 残值评估给出类型与估算比率（或明确的数据缺失说明）。"
+      }
+    },
+    "verify": {
+      "id": "verify",
+      "title": "6. 独立核验（数据复核师）",
+      "agent": "lease-data-verifier",
+      "dependsOn": [
+        "finance",
+        "credit",
+        "asset",
+        "collect"
+      ],
+      "reviewer": "lease-risk-reviewer",
+      "promptAddon": "产物文件：<case_dir>/06-verify.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【6. 独立核验】读取 <case_dir>/03-finance.json、<case_dir>/04-credit-legal.json、<case_dir>/05-asset-registry.json，并与 <case_dir>/01-data.json 的原始标准化数据对照。\n产出：写出 <case_dir>/06-verify.json，含 recalculation_results / citation_verification / overall_verdict / required_corrections。\n对财务分析师输出的每个比率独立重算（用与原作者不同的计算路径）；现金流覆盖倍数同时用“经营活动现金流净额/年租金”与“(净利润+折旧摊销)/年租金”两个口径计算，差异 > 10% 标记“计算口径差异需确认”。\n另需核对三个分析师是否使用了同一版本数据、结论之间是否存在未说明的逻辑矛盾。\noverall_verdict 只能是 PASS / CONDITIONAL_PASS / FAIL。只给验证性意见，不给分析性建议。",
+        "acceptanceCriteria": "- <case_dir>/06-verify.json 存在且是合法 JSON。\n- recalculation_results 覆盖财务分析师输出的每一个比率，各含 original_value / recalculated_value / match。\n- 现金流覆盖倍数用两个口径计算并给出两者差异。\n- overall_verdict ∈ {PASS, CONDITIONAL_PASS, FAIL}。\n- FAIL 时 required_corrections 给出可操作修正（含正确数值或具体位置）。\n- 产物中不含分析性建议（不出现“建议进一步关注…”这类表述）。"
+      }
+    },
+    "arbitrate": {
+      "id": "arbitrate",
+      "title": "7. 冲突仲裁与流程裁决（调度协调员）",
+      "agent": "lease-coordinator",
+      "dependsOn": [
+        "verify"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/07-arbitration.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【7. 冲突仲裁与流程裁决】读取 <case_dir>/06-verify.json 以及三份分析产物（03/04/05）。\n产出：写出 <case_dir>/07-arbitration.json，字段按你的人设输出格式（current_stage / agent_status / conflicts / next_action），并补充：decision（proceed | proceed_with_conditions | return_to_intake | stop_for_human）、conflicts 每条含 agents / issue / kind（口径差异 | 判断逻辑差异）/ resolution 与所需动作、intake_recheck_items（判为口径差异时退回数据整理员重新校验的逐项清单）、double_blind_items（判为判断逻辑差异时需数据复核师用独立方法重算的关键指标清单）。\n判定规则：口径差异 → decision=return_to_intake 并在 intake_recheck_items 逐项列明；判断逻辑差异 → 启动“双盲复算”，在 double_blind_items 列明指标。\n不得自行裁决专业结论：本节点不得给出风险等级。",
+        "acceptanceCriteria": "- <case_dir>/07-arbitration.json 存在且是合法 JSON。\n- 含 current_stage / agent_status / conflicts / next_action。\n- decision ∈ {proceed, proceed_with_conditions, return_to_intake, stop_for_human}。\n- 每条 conflict 有 kind 且 ∈ {口径差异, 判断逻辑差异}，并有对应处置。\n- decision=return_to_intake 时 intake_recheck_items 非空且逐项可执行；涉及判断逻辑差异时 double_blind_items 非空。\n- 产物中未出现风险等级（本节点不得定级）。"
+      }
+    },
+    "review": {
+      "id": "review",
+      "title": "8. 综合评审与定级（风控评审员）",
+      "agent": "lease-risk-reviewer",
+      "dependsOn": [
+        "arbitrate"
+      ],
+      "reviewer": "lease-data-verifier",
+      "promptAddon": "产物文件：<case_dir>/08-risk-review.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【8. 综合评审与定级】读取 <case_dir>/03-finance.json、04-credit-legal.json、05-asset-registry.json、06-verify.json、07-arbitration.json。\n前置条件（必须先检查）：若 07-arbitration.json 的 decision 为 return_to_intake 或 stop_for_human，或 06-verify.json 的 overall_verdict 为 FAIL，则不要输出风险等级，按工作流契约写出阻断产物（原样带出 decision 与 overall_verdict）并停止；否则继续。\n产出：写出 <case_dir>/08-risk-review.json，含 risk_level / risk_dimensions / yellow_flags_escalation_check / missing_data_flags / compliance_check / final_verdict。\n必须逐一检查红色预警是否传导到风险等级、多个黄色预警叠加是否应升级；必须检查租赁物残值是否纳入 LGD、行业是否处于下行周期、中登网登记频率趋势与现金流覆盖度是否形成交叉验证；并给出金管总局 25 号文合规性结论。\n不得引入分析数据中不存在的新信息；无法判断就写“无法判断”。",
+        "acceptanceCriteria": "- <case_dir>/08-risk-review.json 存在且是合法 JSON。\n- 前置条件命中时产物为阻断产物且未给出 risk_level（数据不可信时不得定级）。\n- 否则 risk_level ∈ {低, 中低, 中, 中高, 高}，且 risk_dimensions 覆盖 credit / asset / cashflow / legal / industry 五个维度。\n- yellow_flags_escalation_check 给出明确结论（已升级，或说明为何不升级）。\n- missing_data_flags 逐条列出缺失维度及未标注项。\n- compliance_check 给出 25 号文的 compliant | non_compliant | partial。"
+      }
+    },
+    "report": {
+      "id": "report",
+      "title": "9. 报告撰写（报告撰写）",
+      "agent": "lease-report-writer",
+      "dependsOn": [
+        "review"
+      ],
+      "reviewer": "lease-risk-reviewer",
+      "promptAddon": "产物文件：<case_dir>/09-report.md（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【9. 报告撰写】读取 <case_dir>/08-risk-review.json，以及 03/04/05/06/07 各产物。\n前置条件：若 08-risk-review.json 是阻断产物（没有 risk_level），则不要撰写风险报告，写出 <case_dir>/09-report.md 并只写一节「## 阻断」说明原因与所缺材料，然后停止。\n产出：写出 <case_dir>/09-report.md，按你的人设的六段结构：评估结论摘要（≤200字，风险等级+核心依据≤3条）、承租人基本情况、财务与现金流分析、信用与法律风险、租赁物与中登网分析、综合风险判断。\n报告中的每个数字都必须能在上游产物中找到；红色预警必须在摘要中出现；不确定信息标“待确认”，不要用“可能/大概”。",
+        "acceptanceCriteria": "- <case_dir>/09-report.md 存在且为非空 Markdown。\n- 前置条件命中时只含「## 阻断」一节，未产出风险等级。\n- 否则含人设规定的六节；摘要 ≤200 字且提及全部红色预警。\n- 报告中的数字均可在上游产物中找到（未引入新数据）。\n- 未出现“可能/大概”等模糊表述，不确定处写“待确认”。"
+      }
+    },
+    "feedback": {
+      "id": "feedback",
+      "title": "10. 反馈与偏差诊断（反馈优化Agent）",
+      "agent": "lease-feedback-optimizer",
+      "dependsOn": [
+        "report"
+      ],
+      "promptAddon": "产物文件：<case_dir>/10-feedback.json（落盘后再回复；回复正文必须带上你的结论本体，评审者读的是回复正文而不是文件）。",
+      "taskTemplate": {
+        "requirement": "【10. 反馈与偏差诊断】读取 <case_dir>/ 下的 00 至 09 全部产物。\n产出：写出 <case_dir>/10-feedback.json，含 evaluation_id / agent_quality_scores / bias_diagnosis / optimization_suggestions。\n记录各角色输出质量：数据整理员的缺失率与异常率、分析师的结论是否被复核师打回、评审员的结论是否可被后续结果验证。\n若 inputs/ 下提供了实际还款结果，据此诊断假阳性/假阴性；没有实际结果就明确写“尚无实际结果，不做偏差诊断”，不要推测。\n优化建议必须附数据支撑（引用本次产物中的具体条目），并且只输出建议，不修改任何角色的人设。",
+        "acceptanceCriteria": "- <case_dir>/10-feedback.json 存在且是合法 JSON。\n- agent_quality_scores 覆盖本次实际参与的角色，问题项引用产物具体位置。\n- 无实际还款结果时 bias_diagnosis 为空且明确写出“尚无实际结果”，未做推测。\n- 每条 optimization_suggestions 附 evidence（引用本次产物条目），且未修改任何角色定义。"
+      }
+    }
+  }
+}

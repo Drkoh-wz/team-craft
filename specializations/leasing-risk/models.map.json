@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "why": "用户需求只指定了模型的对外名称（DeepSeek V4.1 Flash / GPT Terra / GPT Astra），没有指定 provider 与 model id。这份映射把“意图名”翻译成具体路由，并在目标部署上按 prefer 顺序解析；解析不到就留空、如实告警，绝不猜一个模型出来。",
+  "resolution": "对每个 intent 按 prefer 顺序取第一个在目标部署真实存在的 (provider, model)。解析不到该角色就不写 model 字段（继承会话模型）并告警。改优先级只需调整 prefer 数组顺序。",
+  "revisionNote": "v2（2026-09-21）：把三个 intent 的首选全部改为 deepseek-official。原因是实测 amd 提供方响应极慢且会让 worker 以 stopReason=error 收场（同一波里 deepseek-official 的节点正常完成）。用户明确指示“直接用 deepseek 官方的”。用户原本指定的模型（amd/DeepSeek-V4.1-Flash、hub16/gpt-5.6-terra、hub16/gpt-6-astra）保留为第二/第三选择，在它们可用的部署上把 prefer 顺序调回去即可恢复按角色分模型。",
+  "reasoningEffort": {
+    "policy": "never-declare",
+    "why": "deepseek-official 的模型支持 off/low/high/max（defaultEffort=high），而 amd/* 与 hub16/* 的 reasoning.efforts 为空数组、defaultEffort 为 null。给后面这类模型声明 reasoningEffort 会让整层路由不可用并回退到父级路由——即“配了等于没配，还不告诉你”。因此本移植包一律不声明 reasoningEffort，使用模型自身的默认值；需要固定推理强度时再按目标模型真实支持的 efforts 列表显式添加。"
+  },
+  "intents": {
+    "flash": {
+      "label": "DeepSeek V4.1 Flash",
+      "prefer": [
+        { "provider": "deepseek-official", "model": "deepseek-flash" },
+        { "provider": "deepseek-official", "model": "deepseek-v4-flash" },
+        { "provider": "amd", "model": "DeepSeek-V4.1-Flash" },
+        { "provider": "kuafu", "model": "deepseek-v4.1-flash" }
+      ]
+    },
+    "terra": {
+      "label": "GPT Terra",
+      "prefer": [
+        { "provider": "deepseek-official", "model": "deepseek-v4-pro" },
+        { "provider": "hub16", "model": "gpt-5.6-terra" },
+        { "provider": "hub16", "model": "gpt-5.6-sol" }
+      ]
+    },
+    "astra": {
+      "label": "GPT Astra",
+      "prefer": [
+        { "provider": "deepseek-official", "model": "deepseek-v4-pro" },
+        { "provider": "hub16", "model": "gpt-6-astra" },
+        { "provider": "hub16", "model": "gpt-5.6-sol" }
+      ]
+    }
+  }
+}
