@@ -356,7 +356,20 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 | 工作流启动即失败 | `workflowId` 不存在 | `team_create_workflow` 的返回值 / `GET /api/team-flowise/workflows` |
 | 重启后某次运行永远 `running` | 上个进程被杀，run 没来得及收尾 | 启动时会自动 reap 并标为 `interrupted` |
 | 子代理挂死不返回 | worker 拿到了会等浏览器的工具（例如客户端平台的 Inspect） | 已由 worker 拒绝清单拦下（§1.3）；若仍出现，查该节点的 `tools` 记录 |
+| **某个 provider 一直不响应/极慢**（例如实测中的 `amd`：单次调用 1000 秒后才以 `stopReason=error` 收场） | 该 provider 的适配器本身有问题。P14 起有两层保护，见 §7.1 | 看节点 `route.health`（`blocked: true` 表示派发被守卫拦下）、运行摘要里的 `provider health:` 段 |
+| **整次运行卡住不动、某个节点永远 `working`** | P14 之前 `subagents.start('spawn')` **没有超时**，而它又是被 `Promise.all` 等待的一环：一个永不 resolve 的 spawn 会把整轮连同其他角色一起冻住 | 旧版本会这样；P14 起 spawn 有独立限时，节点会以 `spawn of <node> timed out after Nms` 失败 |
 | 面板显示错误态而不是空态 | 请求失败（401 / 404 / 500）与「真的没有运行」是两件事 | 面板会写明状态码含义，别把 401 读成「没有运行」 |
+
+### 7.1 provider 持续失败时的两层保护（P14）
+
+1. **派发被真正限时**。spawn 有自己的上限 `SPAWN_TIMEOUT_MS`（2 分钟），并且**不超过该节点自己的预算**（角色 `timeoutMs` 或插件上限里更小的那个）。所以一个永不 resolve 的 spawn 只会让**那一个节点**失败，不会再冻住整轮。节点错误里会写 `spawn of <node> timed out after <N>ms`。
+2. **持续失败的 provider 停止收到派发**（`PROVIDER_HEALTH.maxConsecutiveFailures = 2`，**每次运行独立计数**）：
+   - 只统计**真的是 provider 侧**的失败：子代理以 `stopReason=error` 收场（含 `NO_ADAPTER`），或 spawn 超时。工具报错、提示词问题、插件自身的 bug **一律不算**，不会冤枉一个健康的 provider。
+   - 连续失败达到 2 次后，该 provider 在本轮被判定为不健康：**声明**了该 provider 的节点不再把路由套用上去，而是**继承父级路由**（与「路由无法解析」同一个安全方向），并在该节点的 `route.health` 里留下 `{blocked:true, provider, failCount}`，`route.warning` 也会说明。
+   - 如果**没有路可退**（连继承来的父级路由也是这个 provider），该节点**直接以明确原因失败、不再派发**——不再白等一个完整超时。错误文本形如 `provider "X" 已在本轮连续失败 2 次，且该角色没有其他可用路由；…本次不再派发`。
+   - 成功一次就把该 provider 的计数清零（是「连续」而不是「累计」）；一旦被判为不健康，本轮不再恢复。
+   - 运行结束时，只要有 provider 被判不健康，摘要里会追加 `; provider health: "X" 连续失败 N 次，本轮不再派发到它`，所以「快速失败」不会被误读成「卡住」或「就是失败了」。
+   - 计数是**内存里的、每轮独立的**：不写存储、不跨轮共享——某个 provider 今天下午不稳，不该变成对它的永久判决。
 
 ---
 

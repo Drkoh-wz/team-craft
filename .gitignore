@@ -7,3 +7,9 @@ node_modules/
 *.tmp
 grepout.txt
 tool-test.txt
+
+# Built distribution archives. They are generated from committed sources, so
+# tracking one only creates a stale binary that no longer matches the tree --
+# which is exactly what a leftover packages.zip did before P12. Ignored here as
+# well as on the specialization branch so the two cannot conflict on merge.
+dist/

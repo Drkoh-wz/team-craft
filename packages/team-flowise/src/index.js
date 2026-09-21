@@ -1023,6 +1023,26 @@ const NODE_OUTPUT_MAX_TOTAL = 120000;
 // A reasoning block can be very large at high effort. Keep a bounded trace and
 // report its true length, so a capped trace is never mistaken for a short one.
 const REASONING_MAX = 12000;
+// P14: bound the SPAWN, not just the work. `subagents.start('spawn', ...)` had no
+// timeout anywhere, and all five call sites await it OUTSIDE the `withTimeout`
+// that wraps `run.result` afterwards. A spawn that never settles therefore pinned
+// its node -- and, because a wave is awaited with `Promise.all`, every other agent
+// in that run with it, forever, with the run's status stuck at `running`. Two
+// minutes is orders of magnitude above a real spawn (a session plus a child), and
+// it is additionally clamped to the node's own budget below, so a role that
+// declares a short timeout keeps a short total.
+const SPAWN_TIMEOUT_MS = 2 * 60 * 1000;
+// P14: a provider that keeps failing must stop receiving work. Observed live: a
+// role routed to `amd` ended with `stopReason=error` only after 1000 seconds, and
+// every later node routed to that same provider paid the same full ceiling again.
+// After this many CONSECUTIVE provider-attributable failures inside ONE run, that
+// provider counts as unhealthy for the rest of that run: a node whose declared
+// route points at it falls back to inheriting the parent route, and a node whose
+// only remaining route IS that provider fails fast with an explicit reason instead
+// of burning another whole ceiling. Deliberately scoped to the run -- one bad
+// afternoon is not a permanent verdict on a provider, and nothing here writes to
+// process-global state.
+const PROVIDER_HEALTH = { maxConsecutiveFailures: 2 };
 const withTimeout = (p, ms, label) => {
   let timer;
   const guard = new Promise((_res, rej) => {
@@ -1118,7 +1138,19 @@ export function apply(ctx) {
     const parentRoute = o.parentRoute === undefined ? routeConfigOf(parent) : o.parentRoute;
     const verify = await verifyRoute(ctx.get('llm'), picked, parentRoute);
     const applied = {};
-    if (verify.ok) {
+    // P14 provider health guard. `providerFails` is the run-scoped ledger of
+    // CONSECUTIVE provider-attributable failures. Once a provider has crossed the
+    // threshold the run stops sending it work: the declared route is not applied,
+    // so the child inherits the parent route -- the same "cannot run, do not
+    // apply" direction an unresolvable route already takes, and the only safe one.
+    // Recorded as a warning, never silent.
+    const fails = o.providerFails;
+    const declaredProvider = picked.route.provider;
+    const failCount = fails !== undefined && fails !== null && typeof declaredProvider === 'string'
+      ? (fails.get(declaredProvider) || 0)
+      : 0;
+    const healthBlocked = failCount >= PROVIDER_HEALTH.maxConsecutiveFailures;
+    if (verify.ok && !healthBlocked) {
       // provider/model only EVER travel together: either both or neither. A lone
       // provider would be merged with the parent's model by the runtime.
       if (picked.route.provider !== undefined && picked.route.model !== undefined) {
@@ -1160,14 +1192,23 @@ export function apply(ctx) {
       };
     }
     const warns = routeWarnings(picked, parentRoute);
-    const warning = verify.warning !== null && verify.warning !== undefined
+    const baseWarning = verify.warning !== null && verify.warning !== undefined
       ? verify.warning
       : (warns.length ? warns.join(' ') : null);
+    // Built by joining, so the single-warning case is byte-identical to before
+    // P14 and a node that is not health-blocked gains no warning at all.
+    const healthWarning = healthBlocked
+      ? 'provider "' + String(declaredProvider) + '" 已在本轮连续失败 ' + String(failCount) + ' 次，本次不再派发到它，回退为继承父级路由（回退是唯一安全方向）'
+      : null;
+    const warning = [healthWarning, baseWarning].filter((x) => x !== null && x !== undefined && x !== '').join(' ') || null;
     return {
       picked, verify, applied, effective, warning,
       note: verify.note === undefined ? null : verify.note,
       efforts: resolved ? resolved.efforts : null,
       defaultEffort: resolved ? resolved.defaultEffort : null,
+      // P14: carried so the node record can say WHY the declared route was not
+      // used. `blocked:false` is the normal case and adds no key to the record.
+      health: { blocked: healthBlocked, provider: healthBlocked ? declaredProvider : null, failCount },
     };
   };
   // The evidence record written onto the node. `measured` says whether the child's
@@ -1184,6 +1225,12 @@ export function apply(ctx) {
     efforts: decision.efforts,
     defaultEffort: decision.defaultEffort,
     timeoutMs,
+    // P14: present ONLY when the provider-health guard kept the declared route
+    // from being applied, so `clean()` leaves every other node's route key set
+    // exactly as it was before this change.
+    health: decision.health !== undefined && decision.health !== null && decision.health.blocked === true
+      ? { blocked: true, provider: decision.health.provider, failCount: decision.health.failCount }
+      : undefined,
   });
   const spawnSpecFor = (def, parent, opts) => {
     const o = opts || {};
@@ -1277,14 +1324,19 @@ export function apply(ctx) {
   // actually took effect. A filter the runtime rejects is narrowed to exactly the
   // names it reported and retried; dropping the filter outright -- the previous
   // fallback -- is what left workers fully unrestricted.
-  const startWorker = async (subagentsSvc, base, spec, note0) => {
+  const startWorker = async (subagentsSvc, base, spec, note0, spawnCeilingMs) => {
     let filter = spec.toolFilter;
     let note = (note0 ? note0 + ' ' : '') + (filter === undefined ? 'no tool filter' : 'filter=' + JSON.stringify(filter));
+    // P14: the spawn gets its own bound (see SPAWN_TIMEOUT_MS). It never exceeds
+    // the caller's own budget for this dispatch, so a role that declares a short
+    // timeout cannot end up waiting longer for the spawn than for the work.
+    const declaredCeiling = typeof spawnCeilingMs === 'number' && isFinite(spawnCeilingMs) && spawnCeilingMs > 0 ? spawnCeilingMs : SPAWN_TIMEOUT_MS;
+    const spawnMs = Math.min(SPAWN_TIMEOUT_MS, declaredCeiling);
     for (let attempt = 0; ; attempt++) {
       const merged = Object.assign({}, base, spec);
       if (filter === undefined) delete merged.toolFilter; else merged.toolFilter = filter;
       try {
-        return { run: await subagentsSvc.start('spawn', merged), note };
+        return { run: await withTimeout(subagentsSvc.start('spawn', merged), spawnMs, 'spawn of ' + String(base && base.label !== undefined ? base.label : 'worker')), note };
       } catch (e) {
         const msg = String(e && e.message ? e.message : e);
         if (filter === undefined || attempt >= 8 || !/unknown global tool/i.test(msg)) throw e;
@@ -1953,6 +2005,17 @@ export function apply(ctx) {
       // block as their check (see the rework decision below) -- an `await`
       // between checking and incrementing would let a concurrent wave overspend.
       const reviews = {};
+      // P14: run-scoped provider health. `providerFails` counts CONSECUTIVE
+      // provider-attributable failures per provider; a node that succeeds on a
+      // provider clears its count. Deliberately per-run and in-memory: a provider
+      // having a bad afternoon must not become a permanent verdict, and nothing
+      // here is written to storage or shared with other runs.
+      const providerFails = new Map();
+      const noteProviderResult = (provider, failed) => {
+        if (typeof provider !== 'string' || provider === '') return;
+        if (failed) providerFails.set(provider, (providerFails.get(provider) || 0) + 1);
+        else providerFails.delete(provider);
+      };
       const reworkByNode = {};
       let runRework = 0;
       const subagents = ctx.get('subagents');
@@ -2024,7 +2087,7 @@ export function apply(ctx) {
             // The reviewed node's deny-list or persona must never be applied to
             // it: those describe the worker being judged, not the judge.
             const reviewDef = def;
-            const decision = await decideRoute(reviewDef, parent, { runRoute, node: null, workflow: wf, parentRoute });
+            const decision = await decideRoute(reviewDef, parent, { runRoute, node: null, workflow: wf, parentRoute, providerFails });
             const built = spawnSpecFor(reviewDef, parent, { node: null, workflow: wf, decision });
             reviewSpec = built.spec;
             reviewTimeoutMs = timeoutFor(reviewDef, REVIEW_LIMITS.timeoutMs);
@@ -2033,7 +2096,7 @@ export function apply(ctx) {
             reviewRoute = routeRecordOf(decision, null, reviewTimeoutMs);
             reviewPersona = built.persona;
             if (reviewRoute.warning) console.warn('team-flowise: node ' + nid + ' review route: ' + reviewRoute.warning);
-            const started = await startWorker(subagents, { label: nid + ':review', prompt: [{ type: 'text', text: prompt }], parent, signal: ctl.signal }, built.spec, parentToolNote(parent));
+            const started = await startWorker(subagents, { label: nid + ':review', prompt: [{ type: 'text', text: prompt }], parent, signal: ctl.signal }, built.spec, parentToolNote(parent), reviewTimeoutMs);
             toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
             if (built.presetNote) console.warn('team-flowise: reviewer of node ' + nid + ' tools: ' + built.presetNote);
             let reviewMeasured = measureChildRoute(started);
@@ -2065,7 +2128,7 @@ export function apply(ctx) {
           const reason = parsed.parseError;
           try {
             const rCtl = new AbortController();
-            const started2 = await startWorker(subagents, { label: nid + ':review-repair', prompt: [{ type: 'text', text: buildReviewRepairPrompt({ reason, knownBlocking }) }], parent, signal: rCtl.signal }, reviewSpec, parentToolNote(parent));
+            const started2 = await startWorker(subagents, { label: nid + ':review-repair', prompt: [{ type: 'text', text: buildReviewRepairPrompt({ reason, knownBlocking }) }], parent, signal: rCtl.signal }, reviewSpec, parentToolNote(parent), reviewTimeoutMs);
             const res2 = await withTimeout(started2.run.result, reviewTimeoutMs, 'review repair of node ' + nid);
             const t2 = (res2.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
             const p2 = res2.stopReason === 'completed'
@@ -2193,13 +2256,25 @@ export function apply(ctx) {
               // cannot run is NOT applied (the child inherits the parent route --
               // the pre-P11 effect) but is recorded and warned about, never
               // silently dropped and never allowed to fail the node.
-              const workerDecision = await decideRoute(def, parent, { runRoute, node, workflow: wf, parentRoute });
+              const workerDecision = await decideRoute(def, parent, { runRoute, node, workflow: wf, parentRoute, providerFails });
               const built = spawnSpecFor(def, parent, { node, workflow: wf, decision: workerDecision });
               const workerTimeoutMs = timeoutFor(def, NODE_TIMEOUT_MS);
               personaState = built.persona;
               routeState = routeRecordOf(workerDecision, null, workerTimeoutMs);
               if (routeState.warning) console.warn('team-flowise: node ' + nid + ' route: ' + routeState.warning);
-              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent));
+              // P14: if the route this node would ACTUALLY run on is a provider
+              // that has already failed repeatedly in this run, and the role has no
+              // other route to fall back to (the inherited parent route IS that
+              // provider), do not dispatch at all. Dispatching would only buy the
+              // same failure again at the price of a whole ceiling -- observed
+              // live as 1000 seconds for one dead call, paid once per node. The
+              // node fails with an explicit reason instead.
+              const effProvider = workerDecision.effective && typeof workerDecision.effective.provider === 'string' ? workerDecision.effective.provider : null;
+              const effFails = effProvider === null ? 0 : (providerFails.get(effProvider) || 0);
+              if (effFails >= PROVIDER_HEALTH.maxConsecutiveFailures) {
+                throw new Error('provider "' + effProvider + '" 已在本轮连续失败 ' + effFails + ' 次，且该角色没有其他可用路由；为避免再消耗一个完整超时，本次不再派发');
+              }
+              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent), workerTimeoutMs);
               toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
               if (built.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + built.presetNote);
               // The ONLY authoritative answer to "what did it run on": the child's
@@ -2290,11 +2365,11 @@ export function apply(ctx) {
               // (cheap, no IO beyond the llm check) so the rework prompt's tool
               // policy and the route evidence stay truthful for THIS dispatch too.
               const reworkDef = agentDefs.find((d) => d.id === node.agent || d.name === node.agent);
-              const reworkDecision = await decideRoute(reworkDef, parent, { runRoute, node, workflow: wf, parentRoute });
+              const reworkDecision = await decideRoute(reworkDef, parent, { runRoute, node, workflow: wf, parentRoute, providerFails });
               const reworkBuilt = spawnSpecFor(reworkDef, parent, { node, workflow: wf, decision: reworkDecision });
               const reworkTimeoutMs = timeoutFor(reworkDef, NODE_TIMEOUT_MS);
               if (reworkBuilt.persona) personaState = reworkBuilt.persona;
-              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, reworkBuilt.spec, parentToolNote(parent));
+              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, reworkBuilt.spec, parentToolNote(parent), reworkTimeoutMs);
               toolNote = restarted.note + (reworkBuilt.presetNote ? ' | ' + reworkBuilt.presetNote : '');
               if (reworkBuilt.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + reworkBuilt.presetNote);
               workerMeasured = measureChildRoute(restarted);
@@ -2312,6 +2387,11 @@ export function apply(ctx) {
             }
             await completeTask(taskId, output, null);
             outputs[nid] = output; completed[nid] = true; succeeded[nid] = true;
+            // P14: this provider just worked, so it is not "consecutively failing"
+            // any more. Only the count is cleared -- a provider that was already
+            // declared unhealthy stays unhealthy for the rest of the run, because
+            // it was declared unhealthy precisely to stop sending it work.
+            noteProviderResult(routeState !== null && routeState.effective ? routeState.effective.provider : null, false);
             // The single completion write. With no reviewer in effect it carries
             // exactly the keys it always did (`reviewState` stays null, so the
             // spread contributes nothing) -- unchanged field set, unchanged shape.
@@ -2319,6 +2399,20 @@ export function apply(ctx) {
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
+            // P14: attribute this failure to a PROVIDER only when it really was
+            // one, so a healthy provider is never condemned by a tool error, a bad
+            // prompt or a bug in this plugin. The three shapes that are genuinely
+            // provider-side are: a child that stopped with `error` (a real adapter
+            // / provider failure, e.g. NO_ADAPTER after a 1000-second silence), the
+            // same thing on a rework dispatch, and a spawn that never settled
+            // (P14's own bound). Everything else leaves the ledger untouched.
+            const failMsg = String(e);
+            const providerSide = /Error: worker error\b/.test(failMsg)
+              || /Error: worker\(rework\) error\b/.test(failMsg)
+              || /spawn of .* timed out after/.test(failMsg);
+            if (providerSide && routeState !== null && routeState.effective) {
+              noteProviderResult(routeState.effective.provider, true);
+            }
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
             // A failed node keeps its route evidence too: "it died on THIS route"
@@ -2330,7 +2424,15 @@ export function apply(ctx) {
       const allDone = nodeIds.every((nid) => completed[nid]);
       const allOk = nodeIds.every((nid) => succeeded[nid] === true);
       const status = allOk ? 'completed' : (allDone ? 'failed' : 'interrupted');
-      const summary = allOk ? 'workflow completed' : (allDone ? 'workflow finished with failed nodes' : 'workflow interrupted');
+      const baseSummary = allOk ? 'workflow completed' : (allDone ? 'workflow finished with failed nodes' : 'workflow interrupted');
+      // P14: say it out loud when the run stopped trusting a provider, so a run
+      // that failed fast is never mistaken for a run that hung or simply failed.
+      // Appended only when it applies, which keeps every other run's summary
+      // byte-identical to what it was before this change.
+      const sickProviders = [...providerFails.entries()].filter(([, n]) => n >= PROVIDER_HEALTH.maxConsecutiveFailures);
+      const summary = sickProviders.length === 0
+        ? baseSummary
+        : baseSummary + '; provider health: ' + sickProviders.map(([p, n]) => '"' + String(p) + '" 连续失败 ' + String(n) + ' 次，本轮不再派发到它').join('; ');
       // `reviews` is the per-node LIGHT projection (same shape /progress serves),
       // so a finished run carries its review outcome without re-reading
       // nodeStates. An unreviewed run yields `{}`, i.e. no behaviour change.
@@ -2412,7 +2514,7 @@ export function apply(ctx) {
           // used before P11, plus the same verification and the same pair rule.
           const dDecision = await decideRoute(def, dParent, { parentRoute: routeConfigOf(dParent) });
           const dBuilt = spawnSpecFor(def, dParent, { decision: dDecision });
-          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''));
+          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''), NODE_TIMEOUT_MS);
           const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'delegated task ' + t.id);
           output = (result.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (result.stopReason !== 'completed') throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + ' [' + started.note + ']');
