@@ -8,8 +8,11 @@ node_modules/
 grepout.txt
 tool-test.txt
 
-# Built distribution archives. They are generated from committed sources, so
-# tracking one only creates a stale binary that no longer matches the tree --
-# which is exactly what a leftover packages.zip did before P12. Ignored here as
-# well as on the specialization branch so the two cannot conflict on merge.
+# Built distribution archives: both the specialization packs that
+# scripts/pack-specialization.mjs emits and the plugin's own install packages.
+# They are generated from the committed sources, so tracking one would only
+# create a stale binary that no longer matches the tree -- which is exactly what
+# a leftover packages.zip did before P12. One entry now covers both families
+# because P15 merged the specialization branch: there is no longer a second
+# branch whose copy of this file has to stay in sync.
 dist/

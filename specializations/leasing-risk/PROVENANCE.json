@@ -1,0 +1,57 @@
+{
+  "note": "prompts/ 下用户提供的人设原文的 sha256。由 tools/record-provenance.mjs 生成；selftest.mjs 会重算校验（防误改，不用于证明转录正确）。",
+  "generatedBy": "tools/record-provenance.mjs",
+  "source": "用户需求原文「各角色Prompt设计」（2026-09-21 提供）",
+  "files": {
+    "01-coordinator.md": {
+      "sha256": "1a4a98b691706fdfb5b21257096c085d2317f9283e957867a928fc7cd9c7041e",
+      "bytes": 1629,
+      "chars": 747
+    },
+    "02-data-organizer.md": {
+      "sha256": "dcfef52a2c75aa173b532212bc6f119817a128c6764c2d0bc35d96e203459170",
+      "bytes": 1382,
+      "chars": 572
+    },
+    "03-web-collector.md": {
+      "sha256": "75e69ed90891a8a114ad6d3ec1f3b1f6cc39beb895970ffd51e2bb4330eb8a7d",
+      "bytes": 1265,
+      "chars": 513
+    },
+    "04-financial-analyst.md": {
+      "sha256": "c649e8cc9604e890a37eb7a9c3c2f2b05101fd163523ae630a53eb1800c127b5",
+      "bytes": 1542,
+      "chars": 800
+    },
+    "05-credit-legal-analyst.md": {
+      "sha256": "f82846fbdda7550baf0176f558f16260befbf9a6c7c19a29368ee458be5df09b",
+      "bytes": 1526,
+      "chars": 734
+    },
+    "06-asset-registry-analyst.md": {
+      "sha256": "3700b28f0ffbbfc5265dbda04a7be57e95b29becbe8cbe78ceb9dce2ea2ba963",
+      "bytes": 1807,
+      "chars": 901
+    },
+    "07-data-verifier.md": {
+      "sha256": "74ae7aac97c0ee05f40b9b93cfa80f96c03e00d56d6b2c93936e6a6917687c5e",
+      "bytes": 1639,
+      "chars": 829
+    },
+    "08-risk-reviewer.md": {
+      "sha256": "27e0706b9920d6500de8c02ca9a48475257ab54d3c9bb6bde9881e032b5d4232",
+      "bytes": 1805,
+      "chars": 881
+    },
+    "09-report-writer.md": {
+      "sha256": "c9d29263ddc46d365a4a7e48d50d2dde63df8029a229215cf6465e9e546256cc",
+      "bytes": 1121,
+      "chars": 461
+    },
+    "10-feedback-optimizer.md": {
+      "sha256": "b442d84ef8ca9a9eed7906f88d90c98a4d7e589c98906bc41ad55c56db22802b",
+      "bytes": 1339,
+      "chars": 729
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "packId": "leasing-risk",
+  "version": "1.0.0",
+  "note": "本文件只声明角色元数据；人设正文在 prompts/ 下逐字保存，评审附加职责在 adapters/ 下。安装器把 systemPrompt 组装为 [prompt 正文] + 空行 + [adapter]（若有）。",
+  "roles": [
+    {
+      "id": "lease-coordinator",
+      "name": "调度协调员",
+      "role": "编排与仲裁：判定流程能否继续、仲裁角色间的结论冲突并给出处置决定",
+      "prompt": "prompts/01-coordinator.md",
+      "adapter": null,
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 600000
+    },
+    {
+      "id": "lease-data-organizer",
+      "name": "数据整理员",
+      "role": "多源异构数据标准化：提取与对齐，不做分析判断",
+      "prompt": "prompts/02-data-organizer.md",
+      "adapter": null,
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "lease-web-collector",
+      "name": "网络资料收集员",
+      "role": "公开渠道资料收集：中登网登记、工商、司法涉诉、行业舆情",
+      "prompt": "prompts/03-web-collector.md",
+      "adapter": null,
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "lease-financial-analyst",
+      "name": "财务分析师",
+      "role": "偿债能力、现金流覆盖、盈利趋势与数据质量的量化分析",
+      "prompt": "prompts/04-financial-analyst.md",
+      "adapter": null,
+      "modelIntent": "terra",
+      "toolsPreset": "full",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "lease-credit-legal-analyst",
+      "name": "信用与法律分析师",
+      "role": "征信记录与法律风险评估，失信被执行人一票否决",
+      "prompt": "prompts/05-credit-legal-analyst.md",
+      "adapter": null,
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "lease-asset-registry-analyst",
+      "name": "租赁物与中登网核查分析师",
+      "role": "租赁物权属与中登网登记穿透分析：多重登记、登记频率趋势、残值",
+      "prompt": "prompts/06-asset-registry-analyst.md",
+      "adapter": null,
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "lease-data-verifier",
+      "name": "数据复核师",
+      "role": "独立数值重算与引用回溯；同时担任多数节点的独立评审者",
+      "prompt": "prompts/07-data-verifier.md",
+      "adapter": "adapters/07-data-verifier-review-duty.md",
+      "modelIntent": "flash",
+      "toolsPreset": "full",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "lease-risk-reviewer",
+      "name": "风控评审员",
+      "role": "综合评审与风险等级定级；同时担任复核节点与报告节点的独立评审者",
+      "prompt": "prompts/08-risk-reviewer.md",
+      "adapter": "adapters/08-risk-reviewer-review-duty.md",
+      "modelIntent": "astra",
+      "toolsPreset": "no-shell",
+      "timeoutMs": 1200000
+    },
+    {
+      "id": "lease-report-writer",
+      "name": "报告撰写",
+      "role": "基于已确认结论生成面向审批人员的 Markdown 风险评估报告",
+      "prompt": "prompts/09-report-writer.md",
+      "adapter": null,
+      "modelIntent": "terra",
+      "toolsPreset": "no-shell",
+      "timeoutMs": 900000
+    },
+    {
+      "id": "lease-feedback-optimizer",
+      "name": "反馈优化Agent",
+      "role": "记录各角色输出质量、诊断假阳性/假阴性、给出经数据支撑的优化建议",
+      "prompt": "prompts/10-feedback-optimizer.md",
+      "adapter": null,
+      "modelIntent": "astra",
+      "toolsPreset": "full",
+      "timeoutMs": 900000
+    }
+  ]
+}

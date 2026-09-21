@@ -1,0 +1,65 @@
+{
+  "packId": "leasing-risk",
+  "version": "1.0.0",
+  "name": "融资租赁客户还款风险评估专用团队",
+  "language": "zh-CN",
+  "summary": "为 team-flowise 装载一支 10 角色的融资租赁还款风险评估团队：1 条 11 节点的确定性流水线、10 份逐字保存的角色人设、2 份评审职责适配、1 个使用技能。",
+  "requires": {
+    "runtime": "team-flowise（DSH 宿主组合中的 flowise-team 行）",
+    "capabilities": [
+      { "id": "role.model", "why": "角色级 provider/model 路由" },
+      { "id": "workflow.prompt", "why": "工作流级人设层，用于注入工作流契约" },
+      { "id": "node.reviewer", "why": "节点级独立评审者（复核师/评审员）" },
+      { "id": "workflow.review.maxRework", "why": "返工上限，避免评审把任务拉长" },
+      { "id": "haltOnFailure", "why": "失败即停：任一步骤失败或阻塞项未解决时停止运行、未开始节点记为 skipped。缺失时流水线仍可运行，但下游必须靠产物级阻断自查（见 README「能力探测」）" }
+    ]
+  },
+  "targets": {
+    "workflowId": "leasing-risk-assessment",
+    "roleIds": [
+      "lease-coordinator",
+      "lease-data-organizer",
+      "lease-web-collector",
+      "lease-financial-analyst",
+      "lease-credit-legal-analyst",
+      "lease-asset-registry-analyst",
+      "lease-data-verifier",
+      "lease-risk-reviewer",
+      "lease-report-writer",
+      "lease-feedback-optimizer"
+    ],
+    "skillName": "leasing-risk-assessment"
+  },
+  "caseDirContract": {
+    "why": "team-flowise 的节点之间不传递上游输出（input 是运行级的），因此本流水线的产物总线是文件系统：调用方通过运行 input 传入 case_dir，各节点按固定文件名读写。",
+    "inputKey": "case_dir",
+    "inputsSubdir": "inputs",
+    "artifacts": [
+      { "file": "00-plan.json", "node": "coord-open" },
+      { "file": "01-data.json", "node": "intake" },
+      { "file": "02-web.json", "node": "collect" },
+      { "file": "03-finance.json", "node": "finance" },
+      { "file": "04-credit-legal.json", "node": "credit" },
+      { "file": "05-asset-registry.json", "node": "asset" },
+      { "file": "06-verify.json", "node": "verify" },
+      { "file": "07-arbitration.json", "node": "arbitrate" },
+      { "file": "08-risk-review.json", "node": "review" },
+      { "file": "09-report.md", "node": "report" },
+      { "file": "10-feedback.json", "node": "feedback" }
+    ]
+  },
+  "hardStops": {
+    "engine": "workflow.haltOnFailure = true（任一步骤失败，或阻塞项在返工上限内未解决 → 运行停止，未开始节点 skipped）",
+    "artifactGate": "每个节点在任务模板里必须自检上游产物：缺失/为空/blocked/FAIL/return_to_intake/stop_for_human 时，写阻断产物并停止，不产出风险结论",
+    "why_both": "引擎级停止需要 team-flowise 支持 haltOnFailure；产物级阻断在任何版本上都有效。两者叠加：支持时靠引擎立刻停，不支持时下游也不会编出结论。"
+  },
+  "provenance": {
+    "rolePrompts": "10 份角色人设由用户提供并在 prompts/ 下逐字保存；PROVENANCE.json 记录其 sha256，selftest 会重算校验（用于发现后续被误改，不用于证明转录无误）。",
+    "adapters": "adapters/ 下的评审职责映射与工作流契约由本移植包编写，不属于用户原文。"
+  },
+  "entrypoints": {
+    "install": "node install.mjs [--profile <dir>] [--endpoint <url>] [--dry-run] [--check] [--force]",
+    "uninstall": "node uninstall.mjs [--profile <dir>] [--endpoint <url>] [--dry-run]",
+    "selftest": "node selftest.mjs"
+  }
+}

@@ -392,8 +392,14 @@ const EXPECTED_PARAMS = {
     props: { id: 'string', name: 'string', role: 'string', systemPrompt: 'string', provider: 'string', model: 'string', reasoningEffort: 'string', maxTokens: 'number', timeoutMs: 'number', toolsPreset: 'string' },
     required: [],
   },
+  // P13 (branch feat/leasing-risk-team) added ONE parameter to this tool:
+  // `haltOnFailure`. The expectation below is EXTENDED to include it, never
+  // weakened: every pre-P13 key and type is still asserted verbatim, `required`
+  // is still exactly ['name'], and the nested `route` contract is unchanged. The
+  // P13 suite (validation/p13-halt.mjs) is what asserts the new parameter's
+  // semantics; this entry only keeps "the declared shape is exactly this" true.
   team_create_workflow: {
-    props: { name: 'string', description: 'string', nodes: 'object', route: 'object', prompt: 'string' },
+    props: { name: 'string', description: 'string', nodes: 'object', route: 'object', prompt: 'string', haltOnFailure: 'boolean' },
     required: ['name'],
     nested: { route: { provider: 'string', model: 'string', reasoningEffort: 'string', maxTokens: 'number' } },
   },
