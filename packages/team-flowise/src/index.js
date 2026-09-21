@@ -114,6 +114,16 @@ export const workflowSchema = z.object({
     maxRework: z.number().int().min(0).max(2).optional(),
     enabled: z.boolean().optional(),
   }).optional(),
+  // P13: opt-in fail-fast, OFF unless declared `true`. Without it the scheduler
+  // behaves exactly as it did before P13 -- a failed node still counts as
+  // `completed` for its dependents, so the rest of the pipeline runs on an empty
+  // artifact. With it, the FIRST node that fails, or that ends with an
+  // unresolved BLOCKING review finding, stops the run: every node that has not
+  // started yet is recorded `skipped` instead of being dispatched, and the run
+  // ends as `halted`. Halt is whole-run, not just the causal chain: "stop the
+  // flow" has to mean the flow stopped, not "that one branch stopped".
+  // Optional like every other workflow field, so old records still validate.
+  haltOnFailure: z.boolean().optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -148,7 +158,14 @@ const taskSchema = z.object({
 const runSchema = z.object({
   id: z.string().min(1),
   workflowId: z.string().optional(),
-  status: z.enum(['running', 'completed', 'failed', 'cancelled', 'interrupted']).default('running'),
+  // P13 adds `halted`. It is NOT a synonym for `failed`: `failed` means every
+  // node ran and at least one of them failed, while `halted` means the run was
+  // stopped ON PURPOSE and some nodes therefore never ran at all. Collapsing the
+  // two would hide the only thing a fail-fast run needs to say. It is also not
+  // `interrupted`, which already means "the process restarted mid-run".
+  // Adding an enum VALUE is a loosening: every stored record still validates, so
+  // the domain still opens on a storage file written by an older version.
+  status: z.enum(['running', 'completed', 'failed', 'cancelled', 'interrupted', 'halted']).default('running'),
   nodeStates: z.record(z.any()).default({}),
   result: z.any().optional(),
   startedAt: z.number().int().nonnegative(),
@@ -1392,7 +1409,10 @@ export function apply(ctx) {
     // every node" and nothing would ever be reviewed.
     // P11 adds `route` / `prompt` to the same write path for the same reason:
     // declared-but-unstored is exactly the defect this comment was written about.
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, updatedAt: now() }));
+    // P13 adds `haltOnFailure` to the same write path for exactly the same
+    // reason: a workflow that declares "stop when a step fails" and then stores
+    // nothing would report a halt setting that can never take effect.
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
@@ -1496,6 +1516,12 @@ export function apply(ctx) {
   // (i.e. "not started yet") -- a directionally wrong statement, not a rounding
   // error. `percent` is deliberately NOT derived from these; it stays
   // completed/total so its meaning is unchanged.
+  // P13: a `skipped` node (its run was halted before it started) deliberately
+  // falls into the `pending` bucket. The roll-up key set is a stability contract
+  // the client asserts against, and "not completed, not failed, not in flight"
+  // is genuinely the same bucket. The distinction is NOT lost -- it stays on the
+  // node itself (`status: 'skipped'` + `blockedBy`), which is what the UI reads
+  // to render 「已跳过」 and to count them for the halt notice.
   const bucketOf = (status) => {
     if (status === 'completed') return 'completed';
     if (status === 'failed') return 'failed';
@@ -1626,6 +1652,10 @@ export function apply(ctx) {
         brief: brief(def.taskTemplate && def.taskTemplate.requirement, 110),
         title: nodeTitle(def, def.taskTemplate && def.taskTemplate.requirement) || null,
         summary: st.summary === undefined ? null : st.summary,
+        // P13: which node's failure cut this step off. `clean` drops the
+        // undefined, so this key exists ONLY on a skipped node and every other
+        // node's projected key set is byte-for-byte what it was before P13.
+        blockedBy: st.blockedBy,
         // P11: the route this node actually ran on, LIGHTLY. /progress is a
         // 3-second poll, so this carries only what the card needs to be honest
         // (which layer won, what it really ran, whether that was MEASURED, and
@@ -1954,6 +1984,20 @@ export function apply(ctx) {
       // between checking and incrementing would let a concurrent wave overspend.
       const reviews = {};
       const reworkByNode = {};
+      // P13 fail-fast, in `runWorkflow` scope. `haltedBy` names the ONE node
+      // whose failure (or unresolved blocking review) stopped the run; `skipped`
+      // lists the nodes the halt prevented from ever starting. Both are read at
+      // the end to decide the run's status, which is why they cannot live inside
+      // the wave loop.
+      const haltOnFailure = wf.haltOnFailure === true;
+      let haltedBy = null;
+      // WHY the halt happened. The two triggers are not equivalent at the end of
+      // the run: a crashed node already makes `allOk` false (so `failed` is
+      // reachable without help), but an UNRESOLVED blocking finding leaves the
+      // node `succeeded` -- so without distinguishing the reason, a run whose
+      // last node could not be repaired would still report `completed`.
+      let haltReason = null;
+      const skipped = [];
       let runRework = 0;
       const subagents = ctx.get('subagents');
       const parent = resolveParentAgent(ctx);
@@ -2103,6 +2147,12 @@ export function apply(ctx) {
         return { st, route: reviewRoute, persona: reviewPersona };
       };
       for (let round = 0; round < 1000; round++) {
+        // P13: the halt is re-checked at the TOP of every wave. Nodes in the wave
+        // where the failure happened are already running and are allowed to
+        // finish -- they cannot be un-run, and throwing their real work away
+        // would make the run's records lie about what was actually computed.
+        // What a halt guarantees is that NOTHING NEW starts.
+        if (haltedBy !== null) break;
         const ready = nodeIds.filter((nid) => {
           if (completed[nid]) return false;
           return (nodes[nid].dependsOn || []).every((d) => completed[d]);
@@ -2266,6 +2316,15 @@ export function apply(ctx) {
                 reviewState.unresolved = true;
                 reviewState.unresolvedReason = '已达' + which + '，不再返工；该节点的阻塞项未解决，需人工介入。';
                 reviews[nid] = lightReview(reviewState);
+                // P13: an unresolved BLOCKING finding is the second halt trigger,
+                // and the one this whole feature exists for in a risk pipeline:
+                // the artifact was judged untrustworthy AND could not be repaired
+                // inside the rework budget. The node still completes -- its
+                // artifact exists and its verdict is recorded -- but nothing
+                // downstream may build on it. Advisory findings and a rework that
+                // was actually satisfied never reach here, so this cannot turn an
+                // ordinary "passed with notes" into a halted run.
+                if (haltOnFailure && haltedBy === null) { haltedBy = nid; haltReason = 'unresolved-blocking'; }
                 await persistReview('completed', null);
                 break;
               }
@@ -2319,6 +2378,11 @@ export function apply(ctx) {
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
+            // P13: this failure is the halt trigger. Only the FIRST one that
+            // settles is recorded -- with a whole-run halt the skip set does not
+            // depend on which node triggered it, so this field is evidence, not
+            // control flow, and every failed node is still listed in nodeStates.
+            if (haltOnFailure && haltedBy === null) { haltedBy = nid; haltReason = 'node-failed'; }
             // Never leave an abandoned task at `working`: nothing can advance it.
             if (taskId) await settleTask(taskId).catch(() => undefined);
             // A failed node keeps its route evidence too: "it died on THIS route"
@@ -2327,14 +2391,44 @@ export function apply(ctx) {
           }
         }));
       }
+      // P13: materialise the halt as records BEFORE the run's final status
+      // write, so the board can tell "this step never ran because the run was
+      // stopped" from "this step has not started yet". A skipped node keeps
+      // `endedAt: null` deliberately: nothing happened to it, so inventing an
+      // end time would be a fabricated event. `blockedBy` names the failure that
+      // cut it off, which is the one thing a reader of a halted run wants.
+      if (haltOnFailure && haltedBy !== null) {
+        for (const nid of nodeIds) {
+          if (completed[nid]) continue;
+          skipped.push(nid);
+          await setRunState({ nodeStates: { [nid]: { status: 'skipped', assignee: nodes[nid].agent, endedAt: null, summary: '未执行：运行在节点 ' + haltedBy + ' 失败后已停止', blockedBy: haltedBy } } });
+        }
+      }
       const allDone = nodeIds.every((nid) => completed[nid]);
       const allOk = nodeIds.every((nid) => succeeded[nid] === true);
-      const status = allOk ? 'completed' : (allDone ? 'failed' : 'interrupted');
-      const summary = allOk ? 'workflow completed' : (allDone ? 'workflow finished with failed nodes' : 'workflow interrupted');
+      // P13: `halted` covers BOTH fail-fast outcomes that leave the run without a
+      // trustworthy result: something was cut off before it could start, OR a node
+      // ended with an unresolved blocking finding. The second case needs saying
+      // explicitly because such a node still counts as `succeeded` (its artifact
+      // exists and its verdict IS recorded) -- so a run whose LAST node could not
+      // be repaired would otherwise report `completed`, i.e. exactly the silent
+      // success fail-fast exists to prevent. A crash with nothing left to skip
+      // stays `failed`: the new status must not swallow "it just failed".
+      const halted = skipped.length > 0 || haltReason === 'unresolved-blocking';
+      const status = halted ? 'halted' : (allOk ? 'completed' : (allDone ? 'failed' : 'interrupted'));
+      const summary = halted
+        ? 'workflow halted: ' + (haltReason === 'unresolved-blocking'
+          ? 'node ' + haltedBy + ' ended with an UNRESOLVED blocking review finding'
+          : 'node ' + haltedBy + ' failed') + (skipped.length > 0
+          ? ', ' + skipped.length + ' node(s) skipped (' + skipped.join(', ') + ')'
+          : ', nothing was left to skip')
+        : (allOk ? 'workflow completed' : (allDone ? 'workflow finished with failed nodes' : 'workflow interrupted'));
       // `reviews` is the per-node LIGHT projection (same shape /progress serves),
       // so a finished run carries its review outcome without re-reading
       // nodeStates. An unreviewed run yields `{}`, i.e. no behaviour change.
-      await withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, status, endedAt: now(), result: { outputs, summary, reviews } })));
+      // `haltedBy`/`haltReason`/`skipped` appear ONLY on a halted run, so every
+      // other run's result object keeps exactly the key set it had before P13.
+      await withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, status, endedAt: now(), result: { outputs, summary, reviews, ...(halted ? { haltedBy: haltedBy, haltReason: haltReason, skipped: skipped.slice() } : {}) } })));
       return { id: runRec.id, status };
     } finally { liveRuns.delete(runRec.id); }
   };
@@ -2392,7 +2486,7 @@ export function apply(ctx) {
       const am = a.model || {};
       return clean({ ok: true, id: a.id, name: a.name || a.role || a.id, provider: am.provider, model: am.model, reasoningEffort: am.reasoningEffort, maxTokens: am.maxTokens, timeoutMs: a.timeoutMs, toolsPreset: a.tools && a.tools.preset, warning: pairWarn.length ? pairWarn.join(' ') : undefined });
     }));
-    disposers.push(mk('team_create_workflow', 'Create or modify a durable multi-role workflow: a name plus a node map that the scheduler turns into dependency waves. Use it to define a repeatable pipeline ONCE - the nodes, who owns each one, what each must produce and who reviews it - and then start it with team_run_workflow. `nodes` is an object keyed by node id; each node declares at least its owning role (`agent`) and its dependency list (`dependsOn`), and may declare title, reviewer, taskTemplate and promptAddon. Order comes from dependsOn, never from key order, and independent nodes run concurrently. A workflow-level `review` block supplies the default reviewer. LIMITATION: declaring a workflow does NOT run it.', { name: { type: 'string', required: true, description: 'Workflow display name, shown in the run selector. Keep it unique enough that a human can tell two runs apart.' }, description: { type: 'string', description: 'One-paragraph explanation of what the pipeline produces and why the nodes are ordered that way; written for a human reading the run list.' }, nodes: { type: 'object', additionalProperties: true, description: 'Node map keyed by node id. Each value declares the owning role (`agent`, by name or id), its `dependsOn` array of node ids, and optionally title, reviewer, taskTemplate:{requirement,acceptanceCriteria} and promptAddon. An empty or missing map declares a workflow with zero nodes, which can be started but will do nothing.' }, route: { type: 'object', additionalProperties: false, description: 'Workflow-level model route layer, shared by every step unless a node declares its own (node wins) or the run overrides it (run wins).', properties: { provider: { type: 'string', description: 'Provider id of the workflow-level route; must be declared together with `model` or that half is ignored.' }, model: { type: 'string', description: 'Model id of the workflow-level route; must be declared together with `provider` or that half is ignored.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list; an unsupported effort makes this whole layer unusable.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for every step of this workflow; must be a positive number.' } } }, prompt: { type: 'string', description: 'Workflow-level persona text, merged above the role\'s own systemPrompt and below a node\'s promptAddon. Use it for pipeline-wide standards. An empty string counts as not declared.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
+    disposers.push(mk('team_create_workflow', 'Create or modify a durable multi-role workflow: a name plus a node map that the scheduler turns into dependency waves. Use it to define a repeatable pipeline ONCE - the nodes, who owns each one, what each must produce and who reviews it - and then start it with team_run_workflow. `nodes` is an object keyed by node id; each node declares at least its owning role (`agent`) and its dependency list (`dependsOn`), and may declare title, reviewer, taskTemplate and promptAddon. Order comes from dependsOn, never from key order, and independent nodes run concurrently. A workflow-level `review` block supplies the default reviewer. Set `haltOnFailure` to true when a step that fails must STOP the run instead of letting later steps build on an empty artifact. LIMITATION: declaring a workflow does NOT run it.', { name: { type: 'string', required: true, description: 'Workflow display name, shown in the run selector. Keep it unique enough that a human can tell two runs apart.' }, description: { type: 'string', description: 'One-paragraph explanation of what the pipeline produces and why the nodes are ordered that way; written for a human reading the run list.' }, nodes: { type: 'object', additionalProperties: true, description: 'Node map keyed by node id. Each value declares the owning role (`agent`, by name or id), its `dependsOn` array of node ids, and optionally title, reviewer, taskTemplate:{requirement,acceptanceCriteria} and promptAddon. An empty or missing map declares a workflow with zero nodes, which can be started but will do nothing.' }, route: { type: 'object', additionalProperties: false, description: 'Workflow-level model route layer, shared by every step unless a node declares its own (node wins) or the run overrides it (run wins).', properties: { provider: { type: 'string', description: 'Provider id of the workflow-level route; must be declared together with `model` or that half is ignored.' }, model: { type: 'string', description: 'Model id of the workflow-level route; must be declared together with `provider` or that half is ignored.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list; an unsupported effort makes this whole layer unusable.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for every step of this workflow; must be a positive number.' } } }, prompt: { type: 'string', description: 'Workflow-level persona text, merged above the role\'s own systemPrompt and below a node\'s promptAddon. Use it for pipeline-wide standards. An empty string counts as not declared.' }, haltOnFailure: { type: 'boolean', description: 'P13 opt-in fail-fast, default false. With false (the pre-P13 behaviour) a failed node still counts as done for its dependents, so the rest of the pipeline runs on an empty artifact. With true, the FIRST node that fails - or that ends with an UNRESOLVED blocking review finding - stops the run: every node that has not started yet is recorded `skipped` and the run ends as `halted`. The halt is whole-run, not just the branch that failed.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
     disposers.push(mk('team_delegate_agent', 'Hand ONE task to ONE role and BLOCK until that worker agent finishes, then return its output. Use it for a single self-contained step whose result you want in this same turn: it creates a ledger task, moves it to working, spawns the worker through the subagent registry and completes the task. IMPORTANT: it BLOCKS, so the call returns only when the worker stops or its step timeout (default 30 minutes) fires - which means a long task holds this turn open, and do not chain several of these to build a pipeline by hand. A worker that fails is reported as the text `delegate failed: ...`. For anything multi-step or supervised prefer the workflow route: create the roles, then team_create_workflow, then team_run_workflow.', { agent: { type: 'string', required: true, description: 'Role to delegate to, by role name or id from team_list_agents. An unmatched name is used verbatim as the assignee: the work still runs, but no role configuration (model route, tool preset, persona, timeout) is applied.' }, task: { type: 'string', required: true, description: 'The complete task brief for the worker: what to produce, where, and under what constraints. The worker sees only this text plus the acceptance criteria, so it cannot infer context you do not state.' }, acceptanceCriteria: { type: 'string', description: 'Checkable conditions for this one delegation, appended to the worker prompt. Omit only when the task is trivially self-verifying.' }, reviewer: { type: 'string', description: 'Reviewer role recorded on the created ledger task. NOTE: this free-delegation path does not run a review pass - the value is recorded for the ledger and the UI only, and no reviewer agent is spawned.' } }, { ok: { type: 'boolean', required: true }, taskId: { type: 'string', required: true }, status: { type: 'string', required: true }, output: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'delegated -> task ' + v.taskId + ' [' + v.status + ']' }], async (args) => {
       const agentsList = await listAgents();
       const def = agentsList.find((a) => a.id === args.agent || a.name === args.agent);

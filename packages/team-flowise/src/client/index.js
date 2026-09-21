@@ -834,6 +834,10 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   var DONE_COLOR = '#22c55e';
   var REVIEW_COLOR = '#7c3aed';
   var REWORK_COLOR = '#ec4899';
+  // P13: a halted run is not a failed run. It gets its own colour so a glance at
+  // the header cannot mistake "we stopped the flow on purpose" for "everything
+  // ran and something broke".
+  var HALTED_COLOR = '#f59e0b';
   var NODE_STATUS = {
     pending: { label: '等待', color: IDLE_COLOR, mark: 'tf-ar-i' },
     working: { label: '进行中', color: RUNNING_COLOR, mark: 'tf-ar-w' },
@@ -842,14 +846,22 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     reviewing: { label: '审核中', color: REVIEW_COLOR, mark: 'tf-ar-w' },
     rework: { label: '返工中', color: REWORK_COLOR, mark: 'tf-ar-w' },
     completed: { label: '已完成', color: DONE_COLOR, mark: 'tf-ar-c' },
-    failed: { label: '失败', color: FAILED_COLOR, mark: 'tf-ar-f' }
+    failed: { label: '失败', color: FAILED_COLOR, mark: 'tf-ar-f' },
+    // P13: never dispatched because the run was halted first. It must NOT read as
+    // '等待' (which promises it will still run) and must not read as '失败'
+    // (which blames this step for something another step did).
+    skipped: { label: '已跳过', color: HALTED_COLOR, mark: 'tf-ar-i' }
   };
   var RUN_STATUS = {
     running: { label: '运行中', color: RUNNING_COLOR },
     completed: { label: '已完成', color: DONE_COLOR },
     failed: { label: '失败', color: FAILED_COLOR },
     cancelled: { label: '已取消', color: IDLE_COLOR },
-    interrupted: { label: '已中断', color: IDLE_COLOR }
+    interrupted: { label: '已中断', color: IDLE_COLOR },
+    // P13: the run stopped early on purpose, so some steps never ran. Distinct
+    // from '失败' (everything ran, something failed) and from '已中断' (the
+    // process restarted mid-run) -- collapsing them would hide which happened.
+    halted: { label: '已停止（未跑完）', color: HALTED_COLOR }
   };
   function nodeInfo(status) { return NODE_STATUS[status] || NODE_STATUS.pending; }
   function runInfo(status) { return RUN_STATUS[status] || { label: String(status || '未知'), color: IDLE_COLOR }; }
@@ -1144,7 +1156,12 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         // must therefore not get one: it gets a short dashed stub instead. Drawing
         // a full arrow for those would be the same fabrication as drawing a review
         // step the scheduler never runs.
-        var dispatched = n.status !== 'pending';
+        // P13: a `skipped` node was never dispatched either -- the run was halted
+        // before it could be. Drawing it as dispatched would be exactly the same
+        // fabrication as drawing a review step the scheduler never ran, so it is
+        // drawn like an undispatched step but labelled as skipped.
+        var isSkipped = n.status === 'skipped';
+        var dispatched = n.status !== 'pending' && !isSkipped;
         // P10: a node under review, or one sent back for rework, HAS returned its
         // artifact -- that is exactly why it is being judged or redone. Treating
         // those as "尚未交付" would contradict the review label on the same row.
@@ -1161,8 +1178,8 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
           ));
           kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fontWeight: 600, fill: info.color }, '«task» ' + clip(nodeLabel(n), 22)));
         } else {
-          kids.push(React.createElement('line', { key: 'c' + k, x1: xOrch, y1: yCall, x2: xOrch + 26, y2: yCall, stroke: IDLE_COLOR, strokeWidth: 1.2, strokeDasharray: '2 3' }));
-          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fill: IDLE_COLOR }, '「' + clip(nodeLabel(n), 22) + '」尚未派发（等待依赖）'));
+          kids.push(React.createElement('line', { key: 'c' + k, x1: xOrch, y1: yCall, x2: xOrch + 26, y2: yCall, stroke: isSkipped ? info.color : IDLE_COLOR, strokeWidth: 1.2, strokeDasharray: '2 3' }));
+          kids.push(React.createElement('text', { key: 'cl' + k, x: (xOrch + xRole) / 2, y: yCall - 6, textAnchor: 'middle', fontSize: 11, fill: isSkipped ? info.color : IDLE_COLOR }, isSkipped ? ('「' + clip(nodeLabel(n), 22) + '」未执行（运行已停止）') : ('「' + clip(nodeLabel(n), 22) + '」尚未派发（等待依赖）')));
         }
         // 第二行给出「这一步在做什么 / 做出了什么」：优先 worker 自己产出的摘要，
         // 没有摘要时退回需求的开头，最后才是节点 id。
@@ -1187,7 +1204,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
           kids.push(React.createElement('text', { key: 'rl' + k, x: (xOrch + xRole) / 2, y: yRet - 6, textAnchor: 'middle', fontSize: 11, fill: info.color }, retLabel));
         } else {
           kids.push(React.createElement('line', { key: 'r' + k, x1: xRole, y1: yRet, x2: xRole - 26, y2: yRet, stroke: info.color, strokeWidth: 1.2, strokeDasharray: '2 3' }));
-          kids.push(React.createElement('text', { key: 'rl' + k, x: (xOrch + xRole) / 2, y: yRet - 6, textAnchor: 'middle', fontSize: 11, fill: info.color }, n.status === 'working' ? ('进行中' + (typeof n.elapsedMs === 'number' ? ' · ' + fmtElapsed(n.elapsedMs) : '') + '（尚未交付）') : '尚未交付'));
+          kids.push(React.createElement('text', { key: 'rl' + k, x: (xOrch + xRole) / 2, y: yRet - 6, textAnchor: 'middle', fontSize: 11, fill: info.color }, isSkipped ? '未执行（运行已停止）' : (n.status === 'working' ? ('进行中' + (typeof n.elapsedMs === 'number' ? ' · ' + fmtElapsed(n.elapsedMs) : '') + '（尚未交付）') : '尚未交付')));
         }
       })(nodes[k], k);
     }
@@ -1616,6 +1633,20 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #f5a623', background: '#fffbeb', color: '#92400e', fontSize: 12, lineHeight: 1.5 }
     }, note);
 
+    // P13: a halted run has to SAY why it stopped and which steps therefore never
+    // ran. Derived from the NODE list rather than from `totals` on purpose: the
+    // roll-up bucket set is a stability contract the test suite pins, and the
+    // steps that were cut off are exactly the ones the API already marks
+    // `skipped`. Deleting this block would make a halted run look like an
+    // ordinary unfinished one, which is the whole thing this state exists to
+    // prevent.
+    var skippedNodes = nodes.filter(function (n) { return n.status === 'skipped'; });
+    var haltBlock = (run !== null && run.status === 'halted') ? React.createElement('div', {
+      style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid ' + HALTED_COLOR, background: '#fffbeb', color: '#92400e', fontSize: 12, lineHeight: 1.5 }
+    }, '本次运行已停止' +
+      (skippedNodes.length ? '：节点 ' + String(skippedNodes[0].blockedBy || '?') + ' 失败后不再继续，' + skippedNodes.length + ' 个步骤未执行（' + skippedNodes.map(function (n) { return n.id; }).join('、') + '）' : '') +
+      '。下游结论**没有**生成，不要把未执行的步骤当作"已完成"。') : null;
+
     var header = React.createElement('div', { className: 'tf-pg-head' },
       React.createElement(compact ? 'h3' : 'h2', { className: 'tf-pg-title' }, compact ? '多 Agent 进度' : '多 Agent 团队进度'),
       scopeBadge,
@@ -1746,6 +1777,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       header,
       errorBlock,
       noteBlock,
+      haltBlock,
       content,
       reviewsBlock
     );
