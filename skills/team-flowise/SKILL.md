@@ -359,6 +359,7 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 | **某个 provider 一直不响应/极慢**（例如实测中的 `amd`：单次调用 1000 秒后才以 `stopReason=error` 收场） | 该 provider 的适配器本身有问题。P14 起有两层保护，见 §7.1 | 看节点 `route.health`（`blocked: true` 表示派发被守卫拦下）、运行摘要里的 `provider health:` 段 |
 | **整次运行卡住不动、某个节点永远 `working`** | P14 之前 `subagents.start('spawn')` **没有超时**，而它又是被 `Promise.all` 等待的一环：一个永不 resolve 的 spawn 会把整轮连同其他角色一起冻住 | 旧版本会这样；P14 起 spawn 有独立限时，节点会以 `spawn of <node> timed out after Nms` 失败 |
 | 面板显示错误态而不是空态 | 请求失败（401 / 404 / 500）与「真的没有运行」是两件事 | 面板会写明状态码含义，别把 401 读成「没有运行」 |
+| **`/runs` 与 `/progress` 一起变成 500，而 `/agents`、`/workflows` 正常** | 正在跑的插件版本**比存储文件旧**：记录在读取时要过 schema，而存储里有这个版本不认识的取值（实测：P13 写入的 `status: "halted"` 被只带 P14 的版本拒收）。存储没坏，是代码旧 | 见 §7.2。升级（或把分支合并进来）后**重启**即恢复，存储不需要修 |
 
 ### 7.1 provider 持续失败时的两层保护（P14）
 
@@ -370,6 +371,19 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
    - 成功一次就把该 provider 的计数清零（是「连续」而不是「累计」）；一旦被判为不健康，本轮不再恢复。
    - 运行结束时，只要有 provider 被判不健康，摘要里会追加 `; provider health: "X" 连续失败 N 次，本轮不再派发到它`，所以「快速失败」不会被误读成「卡住」或「就是失败了」。
    - 计数是**内存里的、每轮独立的**：不写存储、不跨轮共享——某个 provider 今天下午不稳，不该变成对它的永久判决。
+
+### 7.2 代码版本与存储的关系：只允许「新代码读旧存储」
+
+`runSchema` / `workflowSchema` 通过 `domainTable(schema)` 挂在存储域上，**每一次读记录都会跑一遍 schema**（`dsh-storage-domain/lib/index.js` 的 `parseRecord(name, table, key, () => tableSpec.valueSchema.parse(raw))`）。由此有两条**不对称**的规则：
+
+- **加字段、加枚举值 = 放宽**：老记录仍然合法，新代码能读老存储。这是安全的——也正因如此，「加一个枚举值」看起来毫无风险。
+- **反过来不成立**：老代码读不了新存储。实测：P13 给运行状态加了 `halted`；一个只带 P14 的 `main` 去读那条 `halted` 记录时 schema 直接抛 `Invalid option: expected one of "running"|"completed"|"failed"|"cancelled"|"interrupted"`，于是 `GET /api/team-flowise/runs` 和 `/progress` 一起 **500**，而 `/agents`、`/workflows` 完全正常（它们读的是别的表）。
+
+所以：
+
+1. **重启前先确认代码版本**。分支未合并时，`haltOnFailure` 这类字段还会被旧版 schema **静默丢弃**（zod 默认 strip），并在下一次 upsert 时按丢过的样子落盘——安装器会如实告警「该版本丢弃了该字段」。
+2. 遇到「同一张表的接口 500、别的表正常」，先怀疑**代码与存储的记录形状不匹配**，而不是存储损坏。修法是让代码追上存储（升级/合并后重启），**不要手工去改存储文件**。
+3. `validation/p15-merge.mjs` 把这条规律做成了差分测试：取本机真实存储里的 `halted` 记录，用**合并前**的 schema 解析必须被拒（复现那次 500），用**合并后**的 schema 解析必须通过，并检查放宽是**单调**的——旧版接受的每一条，新版都必须接受（`regressions=0`）。
 
 ---
 
