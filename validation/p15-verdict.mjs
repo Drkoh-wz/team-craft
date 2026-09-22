@@ -308,5 +308,8 @@ if (CHILD) {
   try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
   check('D2.1 反证用的临时副本已删除', !existsSync(MUT_TMP), MUT_TMP)
 }
+// Cleanup belongs OUTSIDE the parent-only branch: the child creates the same temp
+// copy and used to exit before removing it, leaking one directory per run.
+try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
 
 process.exit(summary() === 0 ? 0 : 1)

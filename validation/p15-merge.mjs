@@ -338,8 +338,11 @@ if (CHILD) {
     if (m) console.log('       [反证原始输出] exit=' + status + ' checks=' + m[1] + ' failures=' + m[2])
   }
   try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
-  check('D2.1 反证用的临时副本已删除，仓库源码零改动（被测文件 hash 由 A 组与 C 组之外的 p13/p14 套件各自复核）',
-    !existsSync(MUT_TMP), MUT_TMP)
 }
+// Cleanup belongs OUTSIDE the parent-only branch: the child creates the same temp
+// copy and used to exit before removing it, leaking one directory per run.
+try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
+check('D2.1 反证用的临时副本已删除，仓库源码零改动（被测文件 hash 由 A 组与 C 组之外的 p13/p14 套件各自复核）',
+  !existsSync(MUT_TMP), MUT_TMP)
 
 process.exit(summary() === 0 ? 0 : 1)
