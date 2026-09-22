@@ -309,12 +309,26 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 - `seeded` = 子代理真的继承了**多少个日志事件**（来自它自己的 `session/end-seed` 标记）。**这个字段是关键**：`seeded: 0` 意味着父级当时还没有任何已完成轮次，此时"没有缓存收益"说的是夹具，不是这个功能。
 - `usage` 是**实测**的（子代理自己 `assistant/message` 上的 usage），读不到时是 `null`（未知），**不是 0**。它**只算子代理自己发出的请求**：fork 出来的子会话日志会**重放**继承来的事件，而那些事件带的是父级的用量——把整份日志求和，量到的是父级的账单。P16 第一次活体 A/B 就踩了这一点：一条"回答一个字"的探针节点被测成 1634 次请求 / 337 万 input / 3.89 亿 cacheRead。现在以子代理自己的 `session/end-seed` 为界只统计它自己的请求，边界不可计算时给 `null` 而不是把整份算进去。
 - `routeChanged: true` 表示该节点的路由与父级不同 —— 按 fork 后端的文档，继承的前缀只有在 provider/model/人设/工具过滤**都没变**的前提下才可能命中 KV 缓存，所以这是"缓存可能没命中"的先验提示，不是结论。
+- `prefixEvents` = **派发前预测**的前缀大小（父级日志里到最后一个 `turn/end` 为止的事件数，与 fork provider 的规则同源）。它先于派发存在，所以上限可以在**花钱之前**执行，而不是在账单上才发现。
+- `budget` / `budgetSource` = 本次生效的上限与它是哪一层声明的（没声明就没有这两个键）。
 
-**代价与收益（要么实测，要么别说）**：继承会把那段历史复制进子代理的请求。它**只有在 KV 缓存复用该前缀时才便宜**；本插件给每个 worker 都设了人设与工具过滤，而这两者恰好在 fork 的文档里被点名为"可能让前缀在继承历史之前就失配"的因素。所以：
+**代价与收益（实测数字，不是估计）**：同一条工作流、同样的两个"回答一个字"的节点：
+
+| 臂 | 每节点 input | 每节点 cacheRead | 命中率 | 两节点墙钟 |
+|---|---|---|---|---|
+| 继承（缓存冷） | 29,163 | 573,312 | 95.2% | 14.6 s |
+| 继承（缓存热，同前缀再跑一次） | **235** | 602,240 | **100%** | 18.1 s |
+| 不继承 | 162 | 7,552 | 97.9% | **2.0 s** |
+
+读法：**缓存确实接住了继承的前缀**（95–100% 命中，热的时候只要 235 个新 input token），所以"省 token"是真的；但**这不等于更高效** —— 模型仍然要处理那 60 万 token 的提示词，墙钟慢了约 9 倍；而且 cacheRead 也不是白送的（按缓存价计费）。所以：
 
 - 默认**不开**（`inheritContext` 缺省 = 不继承），要用就逐层显式声明；
-- 打开后每个节点都会记下 `usage.cacheReadTokens` / `cacheHitRate`，**用数字判断划算与否**，不要因为它叫"继承"就默认它省钱；
-- `validation/p16-live-context.mjs` 就是为此存在的 A/B：同一条工作流跑两次，唯一差别是 run 层 `inheritContext: 'none'`，然后把两臂的实测 token 并排打出来。
+- 打开后每个节点都记 `usage.cacheReadTokens` / `cacheHitRate`，**用数字判断**，别因为它叫"继承"就默认它划算；
+- `validation/p16-live-context.mjs` 就是为此存在的 A/B：同一条工作流跑三次（继承 / 杀开关 / 超上限），把三臂的实测 token 并排打出来。
+
+**成本上限（`inheritMaxEvents`）**：继承会把父级**全部**已完成历史拖进提示词，而种子窗口**没法截断**——`ctx.subagents.start(name, request)` 的 `SubagentStartRequest` 里没有 seed 字段，种子是 driver 层 `startInProcessRun(request, {seed})` 的参数，只有 fork provider 自己会调。所以本插件能做的同类事情是**先预测、再拒绝**：声明 `inheritMaxEvents`（正整数的**日志事件数**，四层可声明，run 层只能经 HTTP body 传，缺省不设上限），派发前用 `prefixEvents` 核对；超了就**不继承**（退回干净子代理）并在 `context.reason` 里同时写出实际大小、上限与是哪一层声明的。
+
+两条 fail-closed（宁可不继承，也不无界继承）：`inheritMaxEvents` 不是正数；或声明了上限但**读不到**父级日志（无法核对）。两者都会记进 `reason`，不会静默放行。注意这是**策略**不是硬界：预测发生在派发时，provider 切片发生在紧随其后的 start，中间父级日志若有变化，实际种子可能略大于预测值。
 
 **当前不支持**：下游节点继承**上游节点**（或某个角色上一轮）的上下文。那需要把 worker 做成**可续期子代理**（宿主 subagents 服务上的 startContinuable + sendMessage）并管理其生命周期；现在 worker 是一次性的，跑完即释放，它的会话不能再被 fork。这条不是"没做"，是"要做得先把 worker 的生命周期换掉"。
 
@@ -421,7 +435,7 @@ R9 的做法：
 | 面板显示「**本会话暂无运行**」 | 这不是错误，是本会话名下确实没有运行。可能是别的会话发起的，也可能是旧记录（没有 `sessionId`，归属未知） | 看 `scope`：`mode: "session"` + `runCountInScope: 0`，`hasAnyGlobal` 说明进程里别处有运行；点「看全部运行」 |
 | **角色建了，却没有评审** | 节点没写 `reviewer`，工作流级 `review` 也没写 reviewer（或写了 `enabled: false`） | 只有节点级 `reviewer`（或工作流级默认值）才会派发评审者；检查定义，`team_create_workflow` 重新声明后重跑 |
 | **评审者明明写了 FAIL/驳回，节点却显示通过** | P15/R9 之前：结论只从 `verdict` 一个字段、只认 `rework` 一个词读，其它一律**静默**落到 `pass`（`notes=[]`）。`parseError: null` 只说明 JSON 合法，不说明结论被读懂了 | R9 起读 6 个字段 + 词汇表；读不出来 → `review.verdict = error` 并在 `review.notes` 写明原因（见 §5.4）。看节点的 `review.notes` 与 `review.verdict` |
-| **声明了 `inheritContext: "session"`，节点却没有继承** | 三种可能：本部署没有声明 inheritsParentContext 的 provider；父级当时还没有**已完成**的轮次（种子为空）；或者更高层写了 `none` | 看节点的 `context`：`effective`（`none` = 没生效）、`reason`、`qualified`（哪些 provider 合格）、`seeded`（0 = 父级还没有已完成轮次，详见 §4.4）、`overridden`（被哪一层压掉了） |
+| **声明了 `inheritContext: "session"`，节点却没有继承** | 三种可能：本部署没有声明 inheritsParentContext 的 provider；父级当时还没有**已完成**的轮次（种子为空）；或者更高层写了 `none`；或者父级历史超过了 `inheritMaxEvents` | 看节点的 `context`：`effective`（`none` = 没生效）、`reason`、`qualified`（哪些 provider 合格）、`prefixEvents`（预测的前缀大小）、`budget`/`budgetSource`（生效的上限与来源层）、`seeded`（0 = 父级还没有已完成轮次，详见 §4.4）、`overridden`（被哪一层压掉了） |
 | **节点一直 pending** | `dependsOn` 里的前置节点没完成，或写了**不存在的节点 id**（悬空依赖永远不会完成） | `/progress` 里看该节点的 `dependsOn` 与各前置节点 `status`；核对节点 id 拼写 |
 | **模型没生效** | 只声明了 `provider` 或只声明了 `model`（成对规则作废该半），或 provider 未注册 / model 不存在 / effort 不被接受 → **回退继承父级** | 看节点的 `route.warning` 与 `route.source`（`inherited` 就是回退了）、`route.effective` / `route.measured`；`GET /api/team-flowise/models` 或设置页看真实可选值；`team_create_agent` 返回的 `warning` |
 | **API 返回 401** | 本部署的网关把**未注册**的 `/api` 路径伪装成 401：宿主半没加载，或 **dsh 还没重启** | 先 `GET /api/team-flowise/ping`；确认插件行已插入并在 profile 里、然后重启 dsh（宿主代码与客户端 bundle 在启动时加载/快照） |

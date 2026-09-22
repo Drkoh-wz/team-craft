@@ -131,8 +131,11 @@ const arm = (rec) => Object.keys(rec.nodeStates || {}).sort().map((nid) => {
     requested: c ? c.requested : null,
     overridden: c && c.overridden ? c.overridden.map((o) => o.source).join(',') : '',
     provider: c ? c.provider : null,
+    prefixEvents: c && typeof c.prefixEvents === 'number' ? c.prefixEvents : (c ? null : undefined),
+    budget: c && typeof c.budget === 'number' ? c.budget : null,
     seeded: c && typeof c.seeded === 'number' ? c.seeded : (c ? null : undefined),
     routeChanged: c ? c.routeChanged : null,
+    reason: c ? c.reason : null,
     usage: c ? c.usage : null,
   }
 })
@@ -205,13 +208,63 @@ try {
 
   const tOn = totals(onRows)
   const tOff = totals(offRows)
+  console.log('\n--- ARM BUDGET: the same workflow, but this run caps the inherited prefix ---')
+  // The cap is a RUN-level declaration here, so one workflow serves all three arms.
+  // Support is probed from a record rather than assumed: a process that predates the
+  // cap would silently ignore the body field and this arm would "pass" while
+  // measuring nothing.
+  let capSupported = false
+  try {
+    const probe = await api.post('/api/team-flowise/workflow', {
+      id: WF + '-cap-probe', name: 'cap probe', inheritContext: 'session', inheritMaxEvents: 7,
+      nodes: { p: { id: 'p', agent: ROLE, dependsOn: [], taskTemplate: { requirement: 'x', acceptanceCriteria: 'y' } } },
+    })
+    if (probe.status === 200) {
+      const pf = listOf((await api.get('/api/team-flowise/workflows')).body, 'workflows').filter((f) => f.id === WF + '-cap-probe')[0]
+      capSupported = pf !== undefined && pf.inheritMaxEvents === 7
+    }
+  } catch { /* treat as unsupported */ } finally {
+    await api.del('/api/team-flowise/workflow?id=' + encodeURIComponent(WF + '-cap-probe')).catch(() => undefined)
+  }
+  let capRows = null
+  if (!capSupported) {
+    skip('the running dsh predates the inheritMaxEvents cap (it did not store the field) -- RESTART REQUIRED, budget arm deferred')
+  } else {
+    const cap = await startAndWait({ inheritMaxEvents: 7 })
+    capRows = arm(cap.rec)
+    console.log('  run ' + cap.runId + '  status=' + cap.rec.status + '  (' + cap.seconds.toFixed(1) + 's)')
+    check('D1 the run-level cap is named in the record (budget + which layer declared it)',
+      capRows.every((r) => r.budget === 7), JSON.stringify(capRows.map((r) => r.budget)))
+    check('D2 [核心] the parent history is far bigger than the cap, so inheritance is REFUSED and the child is a fresh spawn',
+      capRows.every((r) => r.effective === 'none' && r.provider === 'spawn'),
+      JSON.stringify(capRows.map((r) => r.effective + '/' + r.provider)))
+    check('D3 the refusal names the real numbers (predicted prefix size and the declared cap)',
+      capRows.every((r) => typeof r.reason === 'string' && r.reason.indexOf('7') !== -1 && r.reason.indexOf('run') !== -1
+        && typeof r.prefixEvents === 'number' && r.prefixEvents > 7),
+      JSON.stringify(capRows.map((r) => ({ prefixEvents: r.prefixEvents, reason: String(r.reason).slice(0, 90) }))))
+    check('D4 a node refused by the budget still completes (a cap is policy, not a failure)',
+      capRows.every((r) => r.status === 'completed'), JSON.stringify(capRows.map((r) => r.nid + ':' + r.status)))
+    const tCap = totals(capRows)
+    console.log('  CAP ' + fmt(tCap))
+    check('D5 [cap 就是省钱] the capped arm costs what a fresh child costs, not what the inherited prefix costs',
+      tCap.measured === 2 && tCap.inputTokens <= tOff.inputTokens * 4,
+      JSON.stringify({ capInput: tCap.inputTokens, offInput: tOff.inputTokens, onInput: tOn.inputTokens }))
+  }
+
   console.log('\n--- measured usage (this is the answer, not an estimate) ---')
   const fmt = (t) => 'requests=' + t.requests + ' input=' + t.inputTokens + ' cacheRead=' + t.cacheReadTokens + ' cacheWrite=' + t.cacheWriteTokens + ' output=' + t.outputTokens + ' (measured nodes=' + t.measured + '/2)'
   console.log('  ON  ' + fmt(tOn))
   console.log('  OFF ' + fmt(tOff))
   console.log('  per node:')
-  for (const r of onRows) console.log('    ON  ' + r.nid + ' seeded=' + JSON.stringify(r.seeded) + ' routeChanged=' + r.routeChanged + ' usage=' + JSON.stringify(r.usage))
+  for (const r of onRows) console.log('    ON  ' + r.nid + ' prefixEvents=' + JSON.stringify(r.prefixEvents) + ' seeded=' + JSON.stringify(r.seeded) + ' routeChanged=' + r.routeChanged + ' usage=' + JSON.stringify(r.usage))
   for (const r of offRows) console.log('    OFF ' + r.nid + ' seeded=' + JSON.stringify(r.seeded) + ' routeChanged=' + r.routeChanged + ' usage=' + JSON.stringify(r.usage))
+  if (onRows.some((r) => typeof r.prefixEvents === 'number') && onRows.some((r) => typeof r.seeded === 'number')) {
+    // The prediction mirrors the host's own rule (up to the last turn/end). Printing
+    // both is the honest way to show how close it is; no equality is asserted,
+    // because the parent's log can legitimately move between prediction and fork.
+    console.log('  prediction check: prefixEvents=' + JSON.stringify(onRows.map((r) => r.prefixEvents))
+      + ' seeded=' + JSON.stringify(onRows.map((r) => r.seeded)))
+  }
 
   check('C1 both arms produced a measurable child (an unreadable session would leave usage null and make this A/B meaningless)',
     tOn.measured === 2 && tOff.measured === 2, 'measured ON=' + tOn.measured + ' OFF=' + tOff.measured)

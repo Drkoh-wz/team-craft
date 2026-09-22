@@ -175,6 +175,30 @@ try {
   check('A5.3 有标记但没有可用 seq -> null（不知道新工作从哪开始；把整份算进去就是重犯这个缺陷）',
     own([{ type: 'assistant/message', seq: 1, data: { usage: { inputTokens: 7 } } }, { type: 'session/end-seed', data: {} }]) === null)
   check('A5.4 非数组 / 空日志不抛异常 -> null', own(null) === null && own([]) === null)
+
+  // A6: the COST knob. The seed window cannot be trimmed from a plugin (the
+  // SubagentStartRequest has no seed field; the seed belongs to the driver call the
+  // fork provider makes), so the implementable form is to predict the size and
+  // refuse to inherit over a declared cap.
+  const prefixLen = mod.completedTurnPrefixLength
+  const budgetOf = mod.pickInheritBudget
+  const log = (n) => Array.from({ length: n }, (_, i) => (i === n - 1
+    ? { type: 'turn/end', seq: i, data: { turn: 1, reason: { kind: 'completed' } } }
+    : { type: 'turn/start', seq: i, data: { turn: 1 } }))
+  check('A6.1 前缀长度 = 到最后一个 turn/end 为止的事件数（与 fork provider 的规则一致）',
+    prefixLen(log(1000)) === 1000 && prefixLen(log(1)) === 1, 'log(1000)=' + String(prefixLen(log(1000))))
+  check('A6.2 还没有任何 turn/end -> 0（父级没有已完成轮次时种子为空）', prefixLen([{ type: 'turn/start', seq: 0 }]) === 0)
+  check('A6.3 只算最后一个 turn/end（前面还有别的轮次时不能少算）',
+    prefixLen([{ type: 'turn/end', seq: 1 }, { type: 'turn/start', seq: 2 }, { type: 'turn/end', seq: 9 }, { type: 'turn/start', seq: 10 }]) === 10)
+  check('A6.4 日志读不到 -> null（不知道就不许当成 0，否则预算会被拿去核对一个编造的数字）', prefixLen(null) === null)
+  check('A6.5 未声明预算 -> default/null（不设上限，保持既有行为）',
+    JSON.stringify(budgetOf({})) === JSON.stringify({ limit: null, source: 'default', declared: null }), JSON.stringify(budgetOf({})))
+  check('A6.6 声明了正数 -> 生效，并记下来源层', budgetOf({ node: 200 }).limit === 200 && budgetOf({ node: 200 }).source === 'node')
+  check('A6.7 run > node > workflow > role（与决策同一套层级）',
+    budgetOf({ run: 5, node: 200 }).source === 'run' && budgetOf({ node: 200, workflow: 7 }).source === 'node'
+    && budgetOf({ workflow: 7, role: 9 }).source === 'workflow' && budgetOf({ role: 9 }).source === 'role')
+  check('A6.8 不是正数的声明标成 :invalid（调用方据此 fail closed，而不是当成"没声明"）',
+    budgetOf({ node: 0 }).source === 'node:invalid' && budgetOf({ node: 0 }).limit === null, JSON.stringify(budgetOf({ node: 0 })))
 } catch (e) { blockFailure('A 纯函数', e) }
 
 /* ------------------------------------------------------------------ harness */
@@ -241,12 +265,24 @@ function makeSubagentsStub(providers, usageEvents) {
 }
 
 let scenarioSeq = 0
-/** Mount a fresh module instance; `providers` seeds the subagent registry. */
-async function mount(providers, usageEvents) {
+/**
+ * Mount a fresh module instance; `providers` seeds the subagent registry.
+ *
+ * `parentEvents` is the parent's own log. It matters because the plugin PREDICTS
+ * the seed size from it before dispatching, so a declared budget is enforced
+ * against a real number rather than discovered in the bill. Omit it and the log is
+ * unreadable, which is itself a case the guard has to handle.
+ */
+async function mount(providers, usageEvents, parentEvents) {
   scenarioSeq += 1
   const storage = makeStorageStub()
   const subagents = makeSubagentsStub(providers, usageEvents)
-  const parent = { session: { requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) } }
+  const parent = {
+    session: {
+      requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+      ...(parentEvents === undefined ? {} : { snapshotEvents: () => parentEvents }),
+    },
+  }
   const agentsSvc = { currentInitiator: () => parent, roots: () => [] }
   const captured = {}
   const ctx = {
@@ -419,6 +455,56 @@ try {
   check('B9.3 没有 end-seed 标记时 seeded 不是 0 而是"没有这个字段"（未知 ≠ 零）',
     !Object.prototype.hasOwnProperty.call(run9.nodeStates.n1.context || {}, 'seeded'),
     'keys=' + Object.keys(run9.nodeStates.n1.context || {}).join(','))
+
+  // B10: the cost knob, end to end. Every case runs the real scheduler with a real
+  // (fake) parent log, so the prediction is exercised, not stubbed.
+  const log = (n) => Array.from({ length: n }, (_, i) => (i === n - 1
+    ? { type: 'turn/end', seq: i, data: { turn: 1, reason: { kind: 'completed' } } }
+    : { type: 'turn/start', seq: i, data: { turn: 1 } }))
+  const budgetCase = async (wfExtra, runOpts, parentEvents) => {
+    const s = await mount(FORK_OK, USAGE, parentEvents)
+    await s.svc.upsertAgent({ id: 'r1', name: 'r1', role: 'role', model: { provider: 'p', model: 'm' } })
+    await s.svc.upsertWorkflow(Object.assign({ id: 'wf-b', name: 'wf-b', inheritContext: 'session', nodes: oneNode() }, wfExtra || {}))
+    const rr = await run(s.svc, 'wf-b', runOpts)
+    return { s, rr, ctxRec: rr.nodeStates.n1.context || {}, provider: s.calls.filter((c) => c.role === 'worker')[0].provider }
+  }
+  const over = await budgetCase({ inheritMaxEvents: 100 }, {}, log(1000))
+  check('B10.1 [预算生效] 父级历史 1000 个事件 > 上限 100 -> 不继承，退回 spawn',
+    over.provider === 'spawn' && over.ctxRec.effective === 'none', 'provider=' + over.provider + ' effective=' + over.ctxRec.effective)
+  check('B10.2 [拒绝也要点名数字] 原因里同时有实际大小与声明的上限，以及是哪一层声明的',
+    typeof over.ctxRec.reason === 'string' && over.ctxRec.reason.indexOf('1000') !== -1
+    && over.ctxRec.reason.indexOf('100') !== -1 && over.ctxRec.reason.indexOf('workflow') !== -1,
+    String(over.ctxRec.reason))
+  check('B10.3 [可审计] 记录里带着预测的前缀大小与生效的预算（不是只写一句"超了"）',
+    over.ctxRec.prefixEvents === 1000 && over.ctxRec.budget === 100 && over.ctxRec.budgetSource === 'workflow',
+    JSON.stringify({ prefixEvents: over.ctxRec.prefixEvents, budget: over.ctxRec.budget, budgetSource: over.ctxRec.budgetSource }))
+  check('B10.4 被预算挡下时节点照常完成（预算不是故障，是策略）', over.rr.status === 'completed', 'status=' + over.rr.status)
+
+  const under = await budgetCase({ inheritMaxEvents: 5000 }, {}, log(1000))
+  check('B10.5 [预算内] 1000 <= 5000 -> 正常继承，且前缀大小与预算都记下来',
+    under.provider === 'fork' && under.ctxRec.effective === 'session'
+    && under.ctxRec.prefixEvents === 1000 && under.ctxRec.budget === 5000,
+    JSON.stringify({ provider: under.provider, prefixEvents: under.ctxRec.prefixEvents, budget: under.ctxRec.budget }))
+
+  const noBudget = await budgetCase({}, {}, log(1000))
+  check('B10.6 没声明预算 -> 不设上限（既有行为不变），且记录里不凭空多出 budget 键',
+    noBudget.provider === 'fork' && !Object.prototype.hasOwnProperty.call(noBudget.ctxRec, 'budget')
+    && noBudget.ctxRec.prefixEvents === 1000,
+    'keys=' + Object.keys(noBudget.ctxRec).join(','))
+
+  const runWins = await budgetCase({ inheritMaxEvents: 5000 }, { inheritMaxEvents: 10 }, log(1000))
+  check('B10.7 run 层预算压过 workflow 层（5 比 5000 严）',
+    runWins.provider === 'spawn' && runWins.ctxRec.budget === 10 && runWins.ctxRec.budgetSource === 'run',
+    JSON.stringify({ provider: runWins.provider, budget: runWins.ctxRec.budget, source: runWins.ctxRec.budgetSource }))
+
+  const unreadable = await budgetCase({ inheritMaxEvents: 5000 }, {}, undefined)
+  check('B10.8 [读不到大小就 fail closed] 声明了上限但父级日志不可读 -> 不继承，并说明是无法核对',
+    unreadable.provider === 'spawn' && typeof unreadable.ctxRec.reason === 'string' && unreadable.ctxRec.reason.indexOf('无法核对') !== -1,
+    String(unreadable.ctxRec.reason))
+  check('B10.9 该情形下 prefixEvents 是 null（未知），不是 0',
+    unreadable.ctxRec.prefixEvents === null, JSON.stringify(unreadable.ctxRec.prefixEvents))
+  check('B10.10 日志不可读但没声明预算时仍然照常继承（不能因为读不到就把功能关掉）',
+    (await budgetCase({}, {}, undefined)).provider === 'fork')
 } catch (e) { blockFailure('B 派发行为', e) }
 
 /* ------------------------------------------------------------------ group C */
@@ -470,6 +556,15 @@ const MUTATIONS = [
     expect: /^B8\.1/,
     min: 1,
     label: '只算子代理自己的用量',
+  },
+  {
+    tag: 'M3',
+    what: '让预算永不生效（超过上限也照旧继承）',
+    from: "if (typeof b.limit === 'number' && prefixEvents !== null && prefixEvents > b.limit) {",
+    to: 'if (false) {',
+    expect: /^B10\.1/,
+    min: 1,
+    label: '预算真的会被执行',
   },
 ]
 if (MUTATION_MODE) {

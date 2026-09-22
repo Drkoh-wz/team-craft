@@ -1382,6 +1382,10 @@ let skillFront = null
     'advisoryCount', 'blockingCount', 'unresolvedReason', 'reviewRoute', 'reviewPersona',
     'reviewedAgentName', 'reviewedStatus', 'nodeTitle', 'taskStatus', 'outputRef', 'reasoningLen',
     'maxReworkPerNode', 'maxReworkPerRun', 'hasAnyGlobal', 'runCountInScope', 'sessionId', 'taskId',
+    // P16: fields of the node record's `context` block. Same category as the entries
+    // above -- documented RESPONSE fields, not tool parameters -- and kept explicit
+    // and narrow so an invented name is still red.
+    'prefixEvents', 'budgetSource',
   ])
   // Everything else with a capital MUST be a real camelCase
   // parameter/schema field: two segments, first letter lower case. That filter is

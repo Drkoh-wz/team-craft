@@ -71,6 +71,10 @@ export const agentDefSchema = z.object({
   // that says `true` must survive parsing and be read, not vanish and read as
   // "undeclared". Reviewers ignore this on purpose -- see the P16 block above.
   inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
+  // P16: the cost knob -- cap the inherited prefix in EVENTS. Over the cap the
+  // plugin refuses to inherit and records why. Positive integer only: a bad value
+  // fails the WRITE loudly instead of being stored and misread later.
+  inheritMaxEvents: z.number().int().positive().optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -99,8 +103,9 @@ export const workflowNodeSchema = z.object({
   // (Same explicit gap as P11-PLAN section 2.4.)
   timeoutMs: z.number().int().positive().optional(),
   // P16: node-level context inheritance ('session' | 'none' | boolean). Same
-  // union-with-boolean reasoning as the role field.
+  // union-with-boolean reasoning as the role field, plus the same event cap.
   inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
+  inheritMaxEvents: z.number().int().positive().optional(),
 });
 
 export const workflowSchema = z.object({
@@ -136,6 +141,7 @@ export const workflowSchema = z.object({
   // P16: workflow-level context inheritance default for its nodes. Optional end
   // to end, and resolved run > node > workflow > role.
   inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
+  inheritMaxEvents: z.number().int().positive().optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -616,6 +622,62 @@ export function chooseInheritProvider(names, getProvider) {
   }
   const preferred = qualified.indexOf('fork') !== -1 ? 'fork' : qualified[0];
   return { name: preferred, qualified, reason: 'provider "' + preferred + '" 声明了 inheritsParentContext=true' };
+}
+
+/**
+ * The host's own seed rule, mirrored so the plugin can BUDGET before dispatch.
+ *
+ * The fork provider seeds everything up to and including the parent's last
+ * `turn/end` (`completedTurnPrefix`). That rule is the HOST's; this function exists
+ * only so the plugin can estimate the prefix size BEFORE deciding to inherit.
+ *
+ * What a "window" can and cannot be here -- checked against the real API, not
+ * assumed: `ctx.subagents.start(name, request)` takes a `SubagentStartRequest`,
+ * which has NO seed field. The seed is an argument of the driver-level
+ * `startInProcessRun(request, { seed })`, which only the fork provider calls. So a
+ * caller-specified window ("only the last N turns") is NOT reachable from a plugin
+ * today. The implementable form of the same intention is to PREDICT the size and
+ * REFUSE to inherit when it exceeds a declared budget -- refuse rather than trim --
+ * and this function is what lets the refusal name real numbers.
+ *
+ * Unreadable returns null: "we could not tell" must not be reported as 0, or a
+ * budget would be enforced against an invented size.
+ */
+export function completedTurnPrefixLength(events) {
+  if (!Array.isArray(events)) return null;
+  let lastEnd = -1;
+  for (const e of events) {
+    if (e === null || e === undefined || e.type !== 'turn/end') continue;
+    const seq = e.seq;
+    if (typeof seq === 'number' && isFinite(seq) && seq >= 0 && seq > lastEnd) lastEnd = seq;
+  }
+  return lastEnd < 0 ? 0 : lastEnd + 1;
+}
+
+/**
+ * The declared budget for one inheritance decision, same layer order as the
+ * decision itself (run > node > workflow > role, whole layer wins).
+ *
+ * Three outcomes, and the difference between the last two is the point:
+ *   limit: number, source: '<layer>'        -- a real cap
+ *   limit: null,   source: 'default'        -- nobody declared one: no cap
+ *   limit: null,   source: '<layer>:invalid' -- declared, but not a positive number
+ * The invalid case fails CLOSED (see inheritRecordFor): the knob exists to bound
+ * cost, so a typo must not silently restore an unbounded inherit. It is recorded,
+ * never silent.
+ */
+export function pickInheritBudget(layers) {
+  const l = layers || {};
+  for (const name of ['run', 'node', 'workflow', 'role']) {
+    if (!Object.prototype.hasOwnProperty.call(l, name)) continue;
+    const raw = l[name];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
+      return { limit: Math.floor(raw), source: name, declared: String(raw) };
+    }
+    return { limit: null, source: name + ':invalid', declared: String(raw) };
+  }
+  return { limit: null, source: 'default', declared: null };
 }
 
 /**
@@ -1667,7 +1729,13 @@ export function apply(ctx) {
   // layer turned it off -- so both "it happened / it could not happen" and "it was
   // switched off on purpose" are auditable. When nobody asked, nothing is written
   // and the record keeps its pre-P16 key set.
-  const inheritRecordFor = (pick) => {
+  //
+  // `budget` is the cost knob and `parent` is the agent whose completed history
+  // would be inherited. The prefix size can be PREDICTED from the parent's own log
+  // (it is the host's `completedTurnPrefix` rule), so a declared cap can be
+  // enforced BEFORE dispatching an expensive child instead of being noticed in the
+  // bill afterwards. Every refusal names the real numbers.
+  const inheritRecordFor = (pick, budget, parent) => {
     const asked = pick.requested === 'session';
     const suppressed = Array.isArray(pick.overridden) ? pick.overridden : [];
     if (!asked && suppressed.length === 0) return null;
@@ -1685,20 +1753,54 @@ export function apply(ctx) {
         dispatches: 0,
       };
     }
+    const b = budget || { limit: null, source: 'default', declared: null };
+    const prefixEvents = predictPrefixLength(parent);
+    const base = { requested: 'session', source: pick.source, declared: pick.declared, prefixEvents };
+    if (typeof b.limit === 'number') base.budget = b.limit;
+    if (b.source !== 'default') base.budgetSource = b.source;
+    const refuse = (reason) => {
+      return Object.assign({}, base, {
+        provider: 'spawn', effective: 'none', reason,
+        qualified: planForRecord(), usage: null, dispatches: 0,
+      });
+    };
+    // A declared cap that cannot be READ fails closed: the knob exists to bound
+    // cost, and "the bound is unreadable" is not a licence to inherit without one.
+    if (b.source !== 'default' && typeof b.limit !== 'number') {
+      return refuse('inheritMaxEvents 在 ' + b.source.replace(':invalid', '') + ' 层不是正数（' + JSON.stringify(b.declared) + '）：宁可不继承，也不无界继承，本节点退回 spawn');
+    }
+    // Likewise a cap that cannot be CHECKED. Guessing a size here would enforce the
+    // budget against an invented number.
+    if (typeof b.limit === 'number' && prefixEvents === null) {
+      return refuse('声明了 inheritMaxEvents=' + String(b.limit) + '（' + b.source + ' 层），但读不到父级日志、无法核对上限：按不放行处理，本节点退回 spawn');
+    }
+    if (typeof b.limit === 'number' && prefixEvents !== null && prefixEvents > b.limit) {
+      return refuse('父级已完成历史 ' + String(prefixEvents) + ' 个事件 > 声明的上限 inheritMaxEvents=' + String(b.limit) + '（' + b.source + ' 层）：按不放行处理，本节点退回 spawn（继承会把这段历史整段拖进提示词）');
+    }
     const plan = resolveInheritProviderOnce();
     const provider = plan.name === null ? 'spawn' : plan.name;
-    return {
-      requested: 'session',
-      source: pick.source,
-      declared: pick.declared,
+    return Object.assign({}, base, {
       provider,
       effective: plan.name === null ? 'none' : 'session',
       reason: plan.reason,
       qualified: plan.qualified,
       usage: null,
       dispatches: 0,
-    };
+    });
   };
+
+  // The size of the prefix this parent WOULD seed, or null when the log is
+  // unreadable. Read-only and side-effect free; it never changes the dispatch by
+  // itself, it only feeds the budget guard above.
+  const predictPrefixLength = (agent) => {
+    try {
+      const session = agent && agent.session;
+      if (session === undefined || session === null || typeof session.snapshotEvents !== 'function') return null;
+      return completedTurnPrefixLength(session.snapshotEvents());
+    } catch (e) { return null; }
+  };
+  // The registry answer, for a refusal that still has to say who was available.
+  const planForRecord = () => resolveInheritProviderOnce().qualified;
 
   const spawnSpecFor = (def, parent, opts) => {
     const o = opts || {};
@@ -1908,7 +2010,7 @@ export function apply(ctx) {
     // `route` and P13 added `haltOnFailure` -- a field the schema accepts but this
     // builder forgets is accepted and then silently dropped, so the caller's
     // declaration is lost on the very next write.
-    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, timeoutMs: def && def.timeoutMs, inheritContext: def && def.inheritContext, updatedAt: now() }));
+    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, timeoutMs: def && def.timeoutMs, inheritContext: def && def.inheritContext, inheritMaxEvents: def && def.inheritMaxEvents, updatedAt: now() }));
     await withTable('team_agent_defs', 'defs', (t) => t.put(rec.id, rec)); return rec;
   };
   const listAgents = async () => withTable('team_agent_defs', 'defs', (t) => [...t.entries()].map(([, v]) => v));
@@ -1926,7 +2028,7 @@ export function apply(ctx) {
     // reason: a workflow that declares "stop when a step fails" and then stores
     // nothing would report a halt setting that can never take effect.
     // P16 adds `inheritContext` for the identical reason.
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, inheritContext: wf && wf.inheritContext, updatedAt: now() }));
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, inheritContext: wf && wf.inheritContext, inheritMaxEvents: wf && wf.inheritMaxEvents, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
@@ -2468,6 +2570,11 @@ export function apply(ctx) {
   // the only layer an HTTP or tool caller can set. `'none'` here is a real
   // kill-switch: it outranks a node/role/workflow that asked to inherit.
   const runInherit = opts ? opts.inheritContext : undefined;
+  // P16: the run-level COST cap. Deliberately not exposed on team_run_workflow: a
+  // budget is an operator decision about this deployment's history size, not
+  // something a model should be guessing at, and the tool surface is frozen by
+  // p12-usability. The HTTP body and in-process callers can set it.
+  const runInheritMax = opts ? opts.inheritMaxEvents : undefined;
     const wf = await withTable('team_workflows', 'flows', (t) => t.get(workflowId));
     if (!wf) throw new Error('team-flowise: workflow not found ' + workflowId);
     const nodes = (wf.nodes || {});
@@ -2793,7 +2900,12 @@ export function apply(ctx) {
                 node: node.inheritContext,
                 workflow: wf.inheritContext,
                 role: def ? def.inheritContext : undefined,
-              }));
+              }), pickInheritBudget({
+                run: runInheritMax,
+                node: node.inheritMaxEvents,
+                workflow: wf.inheritMaxEvents,
+                role: def ? def.inheritMaxEvents : undefined,
+              }), parent);
               const workerProvider = contextState === null ? 'spawn' : contextState.provider;
               // Cache-risk evidence, not control flow: the inherited prefix is only
               // reusable while the route matches the parent's, and this plugin lets a
@@ -3149,7 +3261,7 @@ export function apply(ctx) {
           // P16: team_delegate_agent has no node/workflow layer, so a role's own
           // `inheritContext` is the only declaration that can apply here. Same
           // discovery, same recorded reason, same refusal to guess.
-          const dContext = inheritRecordFor(pickInheritContext({ role: def ? def.inheritContext : undefined }));
+          const dContext = inheritRecordFor(pickInheritContext({ role: def ? def.inheritContext : undefined }), pickInheritBudget({ role: def ? def.inheritMaxEvents : undefined }), dParent);
           const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''), NODE_TIMEOUT_MS, dContext === null ? 'spawn' : dContext.provider);
           const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'delegated task ' + t.id);
           output = (result.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -3357,7 +3469,7 @@ export function apply(ctx) {
         // `body.inheritContext` (P16) is the run-level inheritance layer: the
         // operator's override, and the kill switch ('none') that outranks every
         // node / role / workflow that asked to inherit the session context.
-      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, inheritContext: body.inheritContext, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
+      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, inheritContext: body.inheritContext, inheritMaxEvents: body.inheritMaxEvents, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
         console.error('team-flowise: run failed', String(e));
         if (!rec) return;
         try {

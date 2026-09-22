@@ -336,6 +336,10 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       // recorded state "the role declares nothing" -- so the key is omitted and
       // the server drops it, rather than writing a value that says something else.
       if (d.inheritContext === 'session' || d.inheritContext === 'none') body.inheritContext = d.inheritContext;
+      // P16 budget: an empty box means "no cap declared", which is the recorded
+      // state "this role declares no cap" -- so the key is omitted, not written as 0.
+      var ime = parseInt(String(d.inheritMaxEvents === undefined ? '' : d.inheritMaxEvents).trim(), 10);
+      if (isFinite(ime) && ime > 0) body.inheritMaxEvents = ime;
       post('/agent', body)
         .then(function () {
           // The save itself SUCCEEDED, so report that first and only then refresh.
@@ -411,6 +415,8 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         // inheritance the first time someone edited its persona.
         inheritContext: (a && (a.inheritContext === 'session' || a.inheritContext === 'none')) ? a.inheritContext
           : ((a && a.inheritContext === true) ? 'session' : ((a && a.inheritContext === false) ? 'none' : '')),
+        // P16: same reason as `inheritContext` above -- and the same trap.
+        inheritMaxEvents: (typeof (a && a.inheritMaxEvents) === 'number' && isFinite(a.inheritMaxEvents)) ? String(a.inheritMaxEvents) : '',
         preset: (typeof t.preset === 'string') ? t.preset : '',
         allow: listToText(t.allow),
         deny: listToText(t.deny),
@@ -611,6 +617,11 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
             React.createElement('option', { value: 'none' }, '明确不继承')
           ),
           React.createElement('div', { className: 'tf-help' }, '选「继承」时，这个角色的 worker 从当前会话已完成的轮次开始，而不是从零开始。评审者永远不继承。继承的代价是这段前缀的 token —— 只有当 provider 的 KV 缓存复用了它才划算，所以每个节点会把**实测**的 cacheReadTokens / cacheHitRate 记在节点的 context.usage 里，不靠假设。')
+        ),
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, '继承上限（inheritMaxEvents，可空）'),
+          React.createElement('input', { className: 'tf-input', inputMode: 'numeric', placeholder: '留空 = 不设上限', value: d.inheritMaxEvents || '', onChange: function (e) { patchAgent({ inheritMaxEvents: e.target.value }); } }),
+          React.createElement('div', { className: 'tf-help' }, '按「父级已完成历史的日志事件数」设上限：超过就**不继承**（退回干净子代理）并在节点的 context.reason 里写明实际大小与上限。留空 = 不设上限。注意：被拒绝时是"不做"，不是"截断"——截断种子在当前宿主的子代理接口里做不到。')
         )
       );
       var presetField = React.createElement('div', { className: 'tf-field' },
