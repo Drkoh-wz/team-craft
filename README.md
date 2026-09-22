@@ -17,6 +17,39 @@ bounded rework, a durable run ledger, and a progress panel in the web UI.
 
 ## Install
 
+### From GitHub, as a dsh plugin (the official route)
+
+The plugin is a plain package inside this repository, so dsh's own plugin command
+can install it straight from GitHub — no clone, no registry:
+
+```sh
+dsh plugin --profile web add "git+https://github.com/<owner>/team-craft.git#path:packages/team-flowise"
+```
+
+That command is a thin pnpm forwarder: it installs the package into the profile's
+`node_modules`, adds it to `dsh.profile.bundles`, and composes the layer. Because
+`packages/team-flowise/package.json` declares `dsh.bundle.patch`, the bundle is
+recognised as a profile layer, and because that bundle's own `cordis.patch.yml`
+declares the `flowise-team` row, **installing the package is enough to mount it**.
+
+Two details that are load-bearing rather than incidental:
+
+- the `#path:packages/team-flowise` fragment is required. This repository has no
+  root `package.json` (it is a multi-package repo: the plugin, a client package,
+  specializations, skills, validation tooling), so an install aimed at the repo
+  root resolves to nothing usable. pnpm's `#path:` fragment is what selects the
+  subdirectory — verified against a bare git remote before this line was written.
+- there is no `prepare` script, so nothing needs building on install and pnpm does
+  not have to be granted a build approval.
+
+Restart dsh afterwards; then verify with the table under
+[Verify after the restart](#verify-after-the-restart).
+
+### From a clone
+
+Everything below covers the local-clone path, which additionally installs the
+agent-facing skill and works with no network access.
+
 ### Prerequisites
 
 | Requirement | Why | How to check |
@@ -70,11 +103,14 @@ What it does, in order:
    package are on the same drive, otherwise `file:<absolute>`. An existing value
    that already resolves to this package is left **untouched** — so a live
    profile's hand-written `link:...` is preserved;
-4. appends the `- insert:` row for `flowise-team` to
-   `<profile>/cordis.patch.yml` if it is not there yet. Every existing line,
-   comment included, is kept byte-identical; a **duplicate** row id would make
-   dsh fail at boot (`duplicate loader entry id`), so the row is counted, not
-   guessed;
+4. **retires** a legacy `- insert:` row for `flowise-team` from
+   `<profile>/cordis.patch.yml`. The row is declared by the bundle that owns it
+   (`packages/team-flowise/cordis.patch.yml`), which is what makes installing the
+   package sufficient; a second copy in the profile would compose the same id
+   twice and dsh would fail at boot (`duplicate loader entry id`). A profile
+   wired by an older version of this repository still has one, so the script
+   removes it — never adding one. Every other line, comment included, is kept
+   byte-identical, and the file is left a valid top-level YAML array (`[]`);
 5. copies the skill into `<dsh-home>/skills` (override with
    `--skill-root agents|project|none` or `--skill-dir <dir>`), validating its
    frontmatter first;
@@ -99,6 +135,22 @@ Host code and the client bundle are both loaded, or snapshotted, **at startup**:
   watcher, **a client change also needs a restart**.
 
 So: stop dsh, start it again. Edits to the two source files behave the same way.
+
+There is one exception, and it is worth knowing because it bites during exactly
+the migration `scripts/install.mjs` performs: the profile's own patch file
+(`cordis.patch.yml`) is **watched while the host is running**. `dsh` reads
+`dsh.profile.patchReload` from the profile manifest and defaults it to `live`
+when it is absent. Removing a row from that file therefore does not wait for a
+restart — the host re-composes immediately, and the plugin is unmounted on the
+spot (observed: `/api/team-flowise/*` turning 401 and the `team_*` tools
+disappearing from the tool list, minutes before any restart).
+
+That cuts both ways. It means removing the legacy profile-level row takes effect
+at once and leaves the plugin unmounted until the next restart boots the bundle's
+own patch — so **do the migration and the restart in the same sitting**, as the
+verification table below assumes. And it is the same mechanism the plugin market
+uses for its hot disable/enable toggle: writing `- id: …` + `disabled:` into that
+file is a live-changeable switch, no restart involved.
 
 ### Verify after the restart
 
@@ -164,3 +216,105 @@ Restart dsh afterwards — for the same reason as above.
   itself. Do not edit a live profile by hand — run `scripts/install.mjs`.
 - Anything a client-plugin change requires (rebuild/refresh) is documented in
   `deploy/README.md`.
+- `packages/team-flowise-client/` is the P5 standalone client prototype. It is
+  **not** mounted by any profile — the shipped client half is
+  `packages/team-flowise/src/client/index.js`. A few scripts under `validation/`
+  import its build output, which is why it is still here.
+- The `P*.md` files at the repository root are the contemporaneous plan / review /
+  validation records of each development phase, kept verbatim. They describe the
+  code as it was at that phase, so they are history, not current documentation —
+  where they disagree with the code or with this README, the code wins. In
+  particular, several of them state that a bundle patch layer cannot add a new
+  row; that was wrong, and `deploy/README.md` records the measurement that
+  disproved it.
+
+## Publishing this plugin
+
+The community catalog is
+[`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin),
+which the dsh-market plugin reads. What an entry needs:
+
+| Requirement | Where it stands |
+|---|---|
+| a `dsh.bundle` manifest in `package.json` | `packages/team-flowise/package.json` |
+| a `cordis.patch.yml` next to it | `packages/team-flowise/cordis.patch.yml` |
+| root **or** a `packages/` / `plugins/` / `apps/` subpackage | this is a `packages/` subpackage |
+| `@deepseek-ai/*` declared as `peerDependencies` | the ones the host provides; the two this package imports are `dependencies` instead, with the measurement below |
+| the `dsh-plugin` topic on the repository | repository setting, not a file |
+| a repository at least one day old | waits itself out |
+| a description that is accurate, no marketing | README first paragraph |
+
+An entry for a monorepo subpackage points at the subdirectory and names the
+subpackage — see the registry's `contributing.md`. This repository also ships the
+plugin-market-compatible path fragment in the install command above.
+
+### Which official packages go where
+
+The registry advises declaring official `@deepseek-ai/*` packages as
+`peerDependencies`. That advice assumes the host makes them resolvable, and with
+a stock profile it does not: dsh's profile template sets
+`nodeLinker: hoisted` **and `autoInstallPeers: false`**, so a peer is never
+installed. A plugin that *statically imports* such a package therefore fails at
+`import` time on a clean machine — measured, not assumed:
+
+```text
+fresh `dsh plugin add`, stock profile:
+  @deepseek-ai/dsh-tools         -> MODULE_NOT_FOUND
+  @deepseek-ai/dsh-storage-domain-> MODULE_NOT_FOUND
+  zod                            -> resolved
+```
+
+The package that a bundle imports at runtime therefore goes in `dependencies`;
+only what the host genuinely provides stays a peer. That is the same split other
+listed host-plane plugins use (`dsh-heartbeat` keeps the package it imports in
+`dependencies`). With that split, on a stock profile:
+
+```text
+  @deepseek-ai/dsh-tools         -> <profile>/node_modules/@deepseek-ai/dsh-tools/lib/index.js
+  @deepseek-ai/dsh-storage-domain-> <profile>/node_modules/@deepseek-ai/dsh-storage-domain/lib/index.js
+```
+
+The remaining `peerDependencies` are the host bundles whose Cordis services this
+plugin `inject`s; they are intentionally not installed, and pnpm reports them as
+unmet peers on every host-plane plugin. That warning is expected.
+
+### Release tarball (optional)
+
+Storefronts prefer a prebuilt tarball over a source build. The repository's own
+`scripts/pack-plugin.mjs` emits an *installer* archive (package + skill +
+installer), which is a different artefact; the tarball a package manager consumes
+comes from `npm pack`:
+
+```sh
+npm pack ./packages/team-flowise --pack-destination dist
+# rename to a version-free asset name, because `releases/latest/download/<name>`
+# resolves `latest` at request time but takes the filename literally
+mv dist/local-team-flowise-0.1.0.tgz dist/team-flowise.tgz
+```
+
+Attach `dist/team-flowise.tgz` to a GitHub Release named after the version, and
+point the catalog entry at it.
+
+### Catalog entry
+
+The submission is one file added to `awesome-dsh-plugin/awesome-dsh-plugin`,
+named `data/plugins/<owner>__<repo>--packages-team-flowise.yml`:
+
+```yaml
+url: https://github.com/<owner>/team-craft/tree/main/packages/team-flowise
+name: <owner>/team-craft#team-flowise
+category: workflow
+tarball: https://github.com/<owner>/team-craft/releases/latest/download/team-flowise.tgz
+description:
+  en: 'Dependency-ordered multi-agent team runner for DeepSeek Harness: define roles, run a node graph with an independent review gate and bounded rework, and watch progress in the web UI.'
+  zh: 'DSH 的多角色团队编排插件：定义角色、按依赖跑节点图，带独立评审与有上限的返工，并在界面里看进度。'
+```
+
+A description is read as a claim about the code and is checked against it, so it
+names only what exists. `category` is the maintainers' call — `workflow` is the
+closest fit and being off by one is fixed on their side, not grounds for
+rejection.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

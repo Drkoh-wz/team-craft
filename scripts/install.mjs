@@ -8,8 +8,11 @@
  *   2. links/creates <profile>/node_modules/@local/team-flowise -> <package>;
  *   3. adds the dependency entry to <profile>/package.json (portable `file:` spec
  *      by default) and appends the bundle name to `dsh.profile.bundles`;
- *   4. appends the `- insert:` host-composition row to <profile>/cordis.patch.yml
- *      when it is not there yet (never rewrites the user's existing lines);
+ *   4. RETIRES the legacy `- insert:` host-composition row from
+ *      <profile>/cordis.patch.yml — the row is declared by the bundle itself
+ *      now (packages/team-flowise/cordis.patch.yml), so a copy left in the
+ *      profile would compose the same id twice and dsh would refuse to boot.
+ *      This step never ADDS a row; every other line is kept byte-identical;
  *   5. copies the plugin's skill (when the package ships one) into a skill root;
  *   6. prints what a restart is needed for and how to verify afterwards.
  *
@@ -59,14 +62,6 @@ const DSH_HOME = (() => {
 })();
 const DEFAULT_PROFILE_DIR = join(DSH_HOME, 'profiles', 'web');
 const DEFAULT_SKILL_DIR = join(DSH_HOME, 'skills');
-
-/** The row appended to cordis.patch.yml — identical in shape to the hand-written one. */
-const INSERT_BLOCK = [
-	'- insert:',
-	`    - id: ${ROW_ID}`,
-	`      name: '${PLUGIN_NAME}'`,
-	'      disabled: false',
-];
 
 const USAGE = `team-flowise installer — mount @local/team-flowise into a dsh profile
 
@@ -394,22 +389,55 @@ function scanPatchLayer(text) {
 	return { lines, rows, inserts, emptyArrayLines, entryLines };
 }
 
-/** Append the insert block, keeping every existing line byte-identical. */
-function appendInsertBlock(text, blockLines) {
-	const src = text.endsWith('\n') ? text.slice(0, -1) : text;
-	const lines = src === '' ? [] : src.split('\n');
-	while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-	if (lines.length > 0) lines.push('');
-	lines.push(...blockLines);
-	return `${lines.join('\n')}\n`;
+/** The [start,end] line span of one row: its `- id:` line plus its deeper-indented children. */
+function rowSpan(lines, rowLine) {
+	const rowIndent = lines[rowLine].length - lines[rowLine].trimStart().length;
+	let last = rowLine;
+	for (let j = rowLine + 1; j < lines.length; j += 1) {
+		if (lines[j].trim() === '') continue;
+		if (lines[j].length - lines[j].trimStart().length > rowIndent) last = j;
+		else break;
+	}
+	return { start: rowLine, end: last };
 }
 
-/** Replace the `[]` placeholders line (a valid empty patch array) with the block. */
-function replaceEmptyArrayLine(lines, index, blockLines) {
-	const out = lines.slice();
-	out.splice(index, 1, ...blockLines);
-	const joined = out.join('\n');
-	return joined.endsWith('\n') ? joined : `${joined}\n`;
+/** Remove whole `- insert:` blocks (list of {start,end}) from the line array. */
+function removeBlocks(lines, blocks) {
+	const drop = new Set();
+	for (const b of blocks) for (let i = b.start; i <= b.end; i += 1) drop.add(i);
+	const out = [];
+	for (let i = 0; i < lines.length; i += 1) if (!drop.has(i)) out.push(lines[i]);
+	// collapse blank runs left behind at the splice points, keep it minimal: at most one blank in a row
+	const collapsed = [];
+	for (const line of out) {
+		if (line.trim() === '' && collapsed.length > 0 && collapsed[collapsed.length - 1].trim() === '') continue;
+		collapsed.push(line);
+	}
+	while (collapsed.length > 0 && collapsed[0].trim() === '') collapsed.shift();
+	let text = collapsed.join('\n');
+	if (!text.endsWith('\n')) text += '\n';
+	return text;
+}
+
+/** Ensure the patch file stays a top-level YAML array: dsh fails loud on a non-array. */
+function ensureValidEmptyArray(text) {
+	const scan = scanPatchLayer(text);
+	if (scan.entryLines.length > 0) {
+		if (scan.emptyArrayLines.length === 0) return { text, appended: false };
+		// stray `[]` next to real entries would be a second YAML node: drop it
+		const lines = scan.lines.filter((_, i) => !scan.emptyArrayLines.includes(i));
+		let out = lines.join('\n');
+		while (out.includes('\n\n\n')) out = out.replace('\n\n\n', '\n\n');
+		if (!out.endsWith('\n')) out += '\n';
+		return { text: out, appended: false, dropped: true };
+	}
+	if (scan.emptyArrayLines.length === 1) return { text, appended: false };
+	const lines = scan.lines.filter((_, i) => !scan.emptyArrayLines.includes(i));
+	while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+	// No blank separator here: this reproduces the profile template (`…comment\n[]\n`)
+	// byte for byte, so install -> uninstall round-trips exactly.
+	lines.push('[]');
+	return { text: `${lines.join('\n')}\n`, appended: true };
 }
 
 /* ------------------------------------------------------------------ skill helpers */
@@ -791,59 +819,80 @@ function stepManifest(ctx, profile) {
 	else record('3-bundles', 'unchanged', bundleDetail);
 }
 
+/**
+ * Step 4 — retire the LEGACY profile-level row.
+ *
+ * Until the bundle learnt to declare its own row, this script wrote the
+ * `flowise-team` insert block into the profile's `cordis.patch.yml`. The row now
+ * lives in `packages/team-flowise/cordis.patch.yml`, so the profile copy is not
+ * merely redundant — two rows sharing one id make dsh fail to boot
+ * (`duplicate loader entry id`). This step therefore migrates an existing
+ * profile in the other direction: it removes the row this script once added, and
+ * never adds one. A profile that never had it is already correct.
+ */
 function stepPatchRow(ctx, profile) {
 	const file = profile.patchPath;
-	const existed = profile.patchExists;
-	const text = existed ? readText(file) : '';
-
-	if (!existed) {
-		const body = `# dsh profile patch layer (top-level YAML array of loader patch entries).\n${INSERT_BLOCK.join('\n')}\n`;
-		if (ctx.check) return record('4-patch-row', 'missing', `缺少 cordis.patch.yml（应包含 ${ROW_ID} 的 insert 行）：${file}`);
-		if (ctx.dryRun) return record('4-patch-row', 'added', `将创建 ${file} 并写入 ${ROW_ID} 的 insert 行`);
-		writeFileSync(file, body, 'utf8');
-		ctx.undo.push({ kind: 'file', file, backup: null });
-		CHANGES.push({ file, backup: null });
-		return record('4-patch-row', 'added', `已创建 ${file} 并写入 ${ROW_ID} 的 insert 行`);
+	if (!profile.patchExists) {
+		return record(
+			'4-patch-row',
+			'unchanged',
+			`不存在，跳过：${file}（宿主行由插件包自己的 cordis.patch.yml 声明，profile 补丁层无需再写）`,
+		);
 	}
 
+	const text = readText(file);
 	const scan = scanPatchLayer(text);
 	ctx.patchScan = scan;
 
-	if (scan.rows.length === 1) {
-		const row = scan.rows[0];
-		const insideInsert = row.block !== null;
-		const nameOk = row.name === PLUGIN_NAME;
-		const enabledOk = row.disabled === 'false';
-		if (insideInsert && nameOk && enabledOk) {
-			return record('4-patch-row', 'unchanged', `已存在，跳过：${file} 第 ${row.line + 1} 行的 insert 行（id: ${ROW_ID} / name: '${PLUGIN_NAME}' / disabled: false）`);
-		}
+	if (scan.rows.length === 0) {
+		return record('4-patch-row', 'unchanged', `已就绪：${file} 里没有 id: ${ROW_ID}（宿主行由插件包自己声明）`);
+	}
+
+	const nonInsert = scan.rows.filter((r) => r.block === null);
+	if (nonInsert.length > 0) {
+		const detail = `${file} 第 ${nonInsert.map((r) => r.line + 1).join(', ')} 行的 id: ${ROW_ID} 不在 insert 块内（像是人工写的覆盖行）`;
+		if (ctx.check) return record('4-patch-row', 'conflict', `${detail}（未处理）`);
+		throw new FatalError(`${detail}\n  脚本只删除自己插入过的 insert 块；请人工确认后再处理。`);
+	}
+
+	const foreign = scan.rows.filter((r) => r.name !== null && r.name !== PLUGIN_NAME);
+	if (foreign.length > 0) {
 		const detail =
-			`${file} 第 ${row.line + 1} 行的 id: ${ROW_ID} 已存在但形态不同` +
-			`（${insideInsert ? '在 insert 块内' : '不在 insert 块内'}，name=${row.name ?? '(缺失)'}，disabled=${row.disabled ?? '(缺失)'}）`;
-		if (ctx.check) return record('4-patch-row', 'conflict', detail);
-		throw new FatalError(`${detail}\n  --force 不会改写用户已有的行；请人工确认该行（它决定插件是否被装配）。`);
+			`${file} 第 ${foreign.map((r) => r.line + 1).join(', ')} 行的 id: ${ROW_ID} 指向 name=${foreign.map((r) => r.name).join(', ')}` +
+			`，不是 '${PLUGIN_NAME}'（像是人工复用了这个 id）`;
+		if (ctx.check) return record('4-patch-row', 'conflict', `${detail}（未处理）`);
+		throw new FatalError(`${detail}\n  脚本不会猜这个 id 该归谁；请人工确认后再处理。`);
 	}
 
-	if (scan.rows.length > 1) {
-		const detail = `${file} 里有 ${scan.rows.length} 条 id: ${ROW_ID}（第 ${scan.rows.map((r) => r.line + 1).join(', ')} 行）——重复 id 会让 dsh 启动直接抛 TypeError: duplicate loader entry id`;
-		if (ctx.check) return record('4-patch-row', 'conflict', detail);
-		throw new FatalError(`${detail}\n  请人工删除多余的行；脚本不会猜哪一条该留。`);
+	// Remove only OUR rows — never a whole block on the assumption that a block is
+	// ours. A hand-edited patch can put our row next to somebody else's inside one
+	// `- insert:` list, and deleting the block would take their row with it. An
+	// `- insert:` list left holding no rows at all is removed in a second pass.
+	const stripped = removeBlocks(scan.lines, scan.rows.map((r) => rowSpan(scan.lines, r.line)));
+	const emptied = scanPatchLayer(stripped);
+	const deadBlocks = emptied.inserts.filter(
+		(b) => emptied.lines.slice(b.start, b.end + 1).filter((l) => /^\s*-\s*id\s*:/.test(l)).length === 0,
+	);
+	const fixed = ensureValidEmptyArray(deadBlocks.length === 0 ? stripped : removeBlocks(emptied.lines, deadBlocks));
+	const after = fixed.text;
+	const verify = scanPatchLayer(after);
+	if (verify.rows.length !== 0) throw new FatalError(`内部校验失败：删除后 id: ${ROW_ID} 仍出现 ${verify.rows.length} 次，已放弃写入 ${file}`);
+
+	const removed = `${scan.rows.length} 行（第 ${scan.rows.map((r) => r.line + 1).join(', ')} 行）` + (deadBlocks.length > 0 ? `与随之空掉的 ${deadBlocks.length} 个 insert 块` : '');
+	const why = `宿主行现由插件包自己的 cordis.patch.yml 声明；profile 里留着它会让同一个 id 被装配两次（dsh 启动即报 duplicate loader entry id）`;
+
+	if (ctx.check) {
+		return record('4-patch-row', 'conflict', `需要迁移：${file} 里仍有 id: ${ROW_ID} 的 ${removed}（安装时会删除）——${why}`);
 	}
-
-	// No row yet: append (or fill the `[]` placeholder).
-	const canFillPlaceholder = scan.emptyArrayLines.length === 1 && scan.entryLines.length === 0;
-	const after = canFillPlaceholder ? replaceEmptyArrayLine(scan.lines, scan.emptyArrayLines[0], INSERT_BLOCK) : appendInsertBlock(text, INSERT_BLOCK);
-	const how = canFillPlaceholder ? `把第 ${scan.emptyArrayLines[0] + 1} 行的空数组 [] 替换为 insert 块` : '在文件末尾追加 insert 块';
-
-	if (ctx.check) return record('4-patch-row', 'missing', `${file} 里没有 id: ${ROW_ID} 的 insert 行（安装时会${how}）`);
 	if (ctx.dryRun) {
 		log(`[dry-run] ${file} 的逐行 diff：`);
 		for (const line of lineDiff(text, after)) log(`    ${line}`);
-		return record('4-patch-row', 'added', `将${how}`);
+		return record(
+			'4-patch-row',
+			'changed',
+			`将删除 id: ${ROW_ID} 的 ${removed}${fixed.appended ? '，并补一行 [] 保持补丁层是合法数组' : ''}`,
+		);
 	}
-
-	const verify = scanPatchLayer(after);
-	if (verify.rows.length !== 1) throw new FatalError(`内部校验失败：写入后 id: ${ROW_ID} 出现 ${verify.rows.length} 次，已放弃写入 ${file}`);
 
 	const backup = `${file}.bak-${ctx.ts}`;
 	if (!existsSync(backup)) copyFileSync(file, backup);
@@ -852,7 +901,13 @@ function stepPatchRow(ctx, profile) {
 	renameSync(tmp, file);
 	ctx.undo.push({ kind: 'file', file, backup });
 	CHANGES.push({ file, backup });
-	return record('4-patch-row', 'added', `已${how}（原文件备份为 ${backup}）`);
+	return record(
+		'4-patch-row',
+		'changed',
+		`已删除 id: ${ROW_ID} 的 ${removed}（其余行逐字未动）` +
+			`${fixed.appended ? '，并补一行 []（dsh 要求该文件是顶层 YAML 数组，仅剩注释会让宿主启动即报错）' : ''}` +
+			`——${why}（原文件备份为 ${backup}）`,
+	);
 }
 
 function stepSkill(ctx) {

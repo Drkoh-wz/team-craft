@@ -14,7 +14,7 @@ environment variable — so nothing here depends on one machine's layout.
 
 | File | Role |
 |---|---|
-| `cordis.patch.yml` | the profile's own patch layer; adds the `flowise-team` row via `- insert:` |
+| `cordis.patch.yml` | the profile's own patch layer — **empty (`[]`)** here; the `flowise-team` row is declared by the bundle, not by the profile |
 | `cordis.yml` | the profile's base composition |
 | `package.json` | profile dependencies (declares `@local/team-flowise` as a local `file:` dependency) plus the `dsh.profile.bundles` list |
 | `pnpm-workspace.yaml`, `.npmrc` | profile package-manager config |
@@ -24,11 +24,10 @@ Portable templates of all of these are snapshotted beside this file under
 must match the real locations of the profile and the package, and
 `scripts/install.mjs` writes exactly that (see the next section).
 
-## Why a `- insert:` row is required
+## Why the row lives in the bundle, not in the profile
 
-A bundle patch layer (`packages/team-flowise/cordis.patch.yml`) can only
-**override existing rows by id** — it cannot create a new row. So the package
-ships an **empty** patch array and the *profile* patch layer adds the row:
+The `flowise-team` row is declared by the bundle that owns it —
+`packages/team-flowise/cordis.patch.yml`:
 
 ```yaml
 - insert:
@@ -36,6 +35,25 @@ ships an **empty** patch array and the *profile* patch layer adds the row:
       name: '@local/team-flowise'
       disabled: false
 ```
+
+This is the only arrangement in which **installing the package is enough**. The
+official install route, `dsh plugin --profile <name> add <spec>`, only adds the
+package to `dsh.profile.bundles` and composes that bundle's patch layer; it never
+writes into the profile's own patch file. A row declared in the profile instead
+would therefore leave the bundle mounted and contributing nothing — no tools, no
+service, no UI.
+
+It was established by measurement, not by reading: two throwaway profiles were
+composed with `dsh --profile <p> --dump-config`, differing only in this file. With
+`[]` the composed tree contained no `flowise-team` row; with the `- insert:`
+above it did. The reference community plugin `dshmarket` ships its row the same
+way.
+
+A profile patch that *also* declares the row is not a harmless duplicate: the id
+would be composed twice and dsh fails at boot with `duplicate loader entry id`.
+`scripts/install.mjs` therefore **removes** a legacy profile-level row (older
+versions of this repository wrote one), and its `--check` reports exit 3 until
+that migration has run.
 
 `flowise-team` must be a **host** composition row (not behind a preset
 `isolate` realm): it publishes the `teamOrchestrator` service, registers the

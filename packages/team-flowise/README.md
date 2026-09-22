@@ -6,7 +6,7 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 
 - 版本：`0.1.0`（`private`，`type: "module"`）
 - 入口：`main` = `src/index.js`；客户端出口 = `./client` → `src/client/index.js`
-- bundle patch：`cordis.patch.yml`（**空数组**：`flowise-team` 这一行要加在 **profile 的** `cordis.patch.yml` 里，bundle patch 层只能覆盖既有行、不能新增行）
+- bundle patch：`cordis.patch.yml`（**声明 `flowise-team` 这一行**——行由拥有它的 bundle 自己声明，这样「装上这个包」就等于「挂上这行」。`dsh plugin --profile <名> add <spec>` 只把包加入 `dsh.profile.bundles` 并组合它的 patch 层，从不改写 profile 自己的 patch 文件；若把行写在 profile 里，装完就是「bundle 挂上了、什么都不注册」）
 
 ---
 
@@ -120,6 +120,6 @@ node scripts/uninstall.mjs [--profile <dir>] [--dry-run] [--check] [--help]
 ```
 
 - 默认 profile 为用户目录下的 `web` profile（`~/.dsh/profiles/web`），**脚本不写死机器专属绝对路径**。
-- 脚本做的事：把本包链接进 profile 的 `node_modules`；在 profile 的 `package.json` 里补依赖与 `dsh.profile.bundles` 项；在 profile 的 `cordis.patch.yml` 里补 `flowise-team` 的 `- insert:` 行（已存在则跳过——重复 insert 会让 profile 启动直接抛 `duplicate loader entry id`）；安装技能文件。
-- 全部幂等：重复执行不产生重复链接 / 重复依赖 / 重复 bundles 项 / 重复 insert 行。`--check` 用退出码区分「已装且一致」与「未安装/不一致」。
+- 脚本做的事：把本包链接进 profile 的 `node_modules`；在 profile 的 `package.json` 里补依赖与 `dsh.profile.bundles` 项；**删除** profile 的 `cordis.patch.yml` 里历史遗留的 `flowise-team` `- insert:` 行（本仓库早期版本写过它；宿主行现在由本包自己的 `cordis.patch.yml` 声明，profile 里留着会让同一个 id 被装配两次、宿主启动即抛 `duplicate loader entry id`）；安装技能文件。
+- 全部幂等：重复执行不产生重复链接 / 重复依赖 / 重复 bundles 项，也不会重复删行。`--check` 用退出码区分「已装且一致」与「未安装/不一致」——一个仍带着历史行的 profile 会报 3（需要迁移），这是刻意的。
 - **装完必须重启 dsh**：宿主代码与客户端 bundle 在启动时加载/快照。重启前访问新路径会得到 401（本部署的网关把未注册的 `/api` 路径伪装成 401），界面入口也不会出现。

@@ -11,11 +11,18 @@
 # domains (team_agent_defs / team_ledger / team_workflows / team_runs) therefore
 # auto-route to the file backend — no duplicate storage-domain row is added here
 # (a second one would collide with the already-mounted service).
-#
-# The `flowise-team` row itself is added in the PROFILE's cordis.patch.yml via
-# `- insert:` (a bundle patch layer cannot add a brand-new row; it can only
-# override existing rows by id). Do NOT add it here.
 
-# This bundle patch must be a top-level YAML array. It contributes no rows
-# (the plugin row lives in the profile's cordis.patch.yml), so it is empty.
-[]
+# The `flowise-team` row is declared HERE, by the bundle that owns it, so that
+# installing this package is enough to mount it. `dsh plugin --profile <name> add`
+# only adds the package to `dsh.profile.bundles` and composes this layer; it never
+# writes into the profile's own patch file, so a row declared there instead would
+# leave the bundle mounted and contributing nothing.
+#
+# This was verified, not assumed. Two throwaway profiles were composed with
+# `dsh --profile <p> --dump-config`, differing only in this file: with `[]` the
+# composed tree contained no `flowise-team` row; with the `- insert:` below it did.
+# The reference community plugin `dshmarket` ships its row the same way.
+- insert:
+    - id: flowise-team
+      name: '@local/team-flowise'
+      disabled: false

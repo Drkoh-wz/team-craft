@@ -1086,6 +1086,11 @@ try {
   const patchText = () => readFileSync(join(PROFILE, 'cordis.patch.yml'), 'utf8')
   const countIn = (h, needle) => (h.split(needle).length - 1)
   const base = ['--profile', PROFILE, '--package', PKG_DIR, '--skill-root', 'none']
+  // The bundle's OWN patch layer. This is where the host-composition row has to
+  // live for `dsh plugin add` to mount anything, so it is asserted as a fact
+  // about the shipped package rather than about the installer's report.
+  const bundlePatchText = readFileSync(join(PKG_DIR, 'cordis.patch.yml'), 'utf8')
+  const bundleRowIds = (bundlePatchText.match(/^\s*-\s*id\s*:\s*flowise-team\s*$/gm) || []).length
 
   // ---- D1: first install ------------------------------------------------
   const i1 = runScript(INSTALL_SRC, [...base, '--json'])
@@ -1104,13 +1109,16 @@ try {
     pkg1.dsh.profile.bundles.filter((b) => b === '@local/team-flowise').length === 1 &&
     eq(pkg1.dsh.profile.bundles.slice(0, 3), ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dshmarket']),
     JSON.stringify(pkg1.dsh.profile.bundles))
-  check('D1.5 cordis.patch.yml 里 id: flowise-team 恰好 1 次，且位于 - insert: 块内',
-    layer1.rowIds.filter((x) => x === 'flowise-team').length === 1 && layer1.insertRows.length === 1, JSON.stringify(layer1.rowIds) + ' insertRows=' + String(layer1.insertRows.length))
-  check('D1.6 insert 块内 name 指向 @local/team-flowise 且 disabled: false',
-    patch1.indexOf("name: '@local/team-flowise'") !== -1 && /-\s*id:\s*flowise-team[\s\S]{0,200}?disabled:\s*false/.test(patch1),
-    patch1.split('\n').slice(-6).join(' | '))
-  check('D1.7 首次安装的 added 计数如实：link/dep/bundles/insertRows 各 1',
-    r1 !== null && r1.added.bundles === 1 && r1.added.insertRows === 1 && r1.added.link === 1 && r1.added.dep === 1, JSON.stringify(r1 && r1.added))
+  check('D1.5 [格式] 安装后 profile 的 cordis.patch.yml 里没有 flowise-team 行（宿主行由插件包自己的 cordis.patch.yml 声明；写在 profile 里等于"包挂上了、什么都不注册"）',
+    layer1.rowIds.length === 0 && patch1.indexOf('flowise-team') === -1 && patch1.indexOf('- insert:') === -1,
+    JSON.stringify(layer1.rowIds) + ' insertRows=' + String(layer1.insertRows.length) + ' tail=' + patch1.trim().split('\n').slice(-1)[0])
+  check("D1.6 [格式] 插件包自带的 cordis.patch.yml 里 id: flowise-team 恰好 1 次、位于 - insert: 块内、name 指向 @local/team-flowise、disabled: false",
+    bundleRowIds === 1 && bundlePatchText.indexOf('- insert:') !== -1 &&
+    bundlePatchText.indexOf("name: '@local/team-flowise'") !== -1 &&
+    /-\s*id:\s*flowise-team[\s\S]{0,200}?disabled:\s*false/.test(bundlePatchText),
+    'ids=' + String(bundleRowIds) + ' | ' + bundlePatchText.split('\n').filter((l) => l.indexOf('insert') !== -1 || l.indexOf('flowise-team') !== -1 || l.indexOf('name:') !== -1).join(' / '))
+  check('D1.7 首次安装的 added 计数如实：link/dep/bundles 各 1，insertRows 为 0（脚本不再写宿主行）',
+    r1 !== null && r1.added.bundles === 1 && r1.added.insertRows === 0 && r1.added.link === 1 && r1.added.dep === 1, JSON.stringify(r1 && r1.added))
   const linkPath = join(PROFILE, 'node_modules', '@local', 'team-flowise')
   let linkInfo = null
   try {
@@ -1139,8 +1147,8 @@ try {
   check('D2.2 [幂等] 第二跑后 package.json 与 cordis.patch.yml 逐字节等于第一跑后（内容相同）',
     before2.pkg === after2.pkg && before2.patch === after2.patch,
     'pkgSame=' + String(before2.pkg === after2.pkg) + ' patchSame=' + String(before2.patch === after2.patch))
-  check('D2.3 [幂等] 第二跑后 bundles 里去重为 1、id: flowise-team 仍恰好出现 1 次（重复 insert = profile 启动即抛 TypeError: duplicate loader entry id）',
-    pkgJson().dsh.profile.bundles.filter((b) => b === '@local/team-flowise').length === 1 && countIn(patchText(), 'id: flowise-team') === 1,
+  check('D2.3 [幂等] 第二跑后 bundles 里去重为 1、profile 补丁层里 flowise-team 仍出现 0 次（宿主行由 bundle 声明，profile 里再来一份会让同一个 id 被装配两次）',
+    pkgJson().dsh.profile.bundles.filter((b) => b === '@local/team-flowise').length === 1 && countIn(patchText(), 'id: flowise-team') === 0,
     'bundles=' + JSON.stringify(pkgJson().dsh.profile.bundles) + ' idCount=' + String(countIn(patchText(), 'id: flowise-team')))
   check('D2.4 [幂等] 第二跑的 changes 为空数组（脚本自己报告"零改动"）',
     r2 !== null && Array.isArray(r2.changes) && r2.changes.length === 0, JSON.stringify(r2 && r2.changes))
@@ -1157,8 +1165,8 @@ try {
   const cMissingReport = reportOf(cMissing)
   check('D3.2 [--check 未装] exit 3（约定：3 = 缺失/不一致），与已装状态的 0 明确不同',
     cMissing.code === 3 && cMissing.code !== cInstalled.code, 'installed=' + String(cInstalled.code) + ' missing=' + String(cMissing.code))
-  check('D3.3 [--check 未装] 报告点名每一项缺失（link/bundles/insert 至少三项），而不是只给一个退出码',
-    cMissingReport !== null && Array.isArray(cMissingReport.checkFailures) && cMissingReport.checkFailures.length >= 3,
+  check('D3.3 [--check 未装] 报告点名每一项缺失（link/bundles 至少两项；宿主行不再是 profile 的职责，所以不再算一项），而不是只给一个退出码',
+    cMissingReport !== null && Array.isArray(cMissingReport.checkFailures) && cMissingReport.checkFailures.length >= 2,
     JSON.stringify(cMissingReport && cMissingReport.checkFailures))
   const cMissingExit1 = runScript(INSTALL_SRC, ['--profile', join(TMP, 'does-not-exist'), '--package', PKG_DIR, '--check', '--json'])
   check('D3.4 [--check 目标不存在] 是"错误"（exit 1）而不是"未安装"（exit 3）——两种失败必须可分',
@@ -1182,8 +1190,8 @@ try {
   // ---- D5: uninstall restores the original state ------------------------
   const u1 = runScript(UNINSTALL_SRC, [...base, '--json'])
   const ur1 = reportOf(u1)
-  check('D5.1 uninstall exit 0，tool=uninstall，且移除了 link/dep/bundles/insert 四项',
-    u1.code === 0 && ur1 !== null && ur1.tool === 'uninstall' && ur1.removed.link === 1 && ur1.removed.dep === 1 && ur1.removed.bundles === 1 && ur1.removed.insertRows === 1,
+  check('D5.1 uninstall exit 0，tool=uninstall，且移除了 link/dep/bundles 三项；insertRows=0（profile 补丁层本就没有宿主行，没得可删）',
+    u1.code === 0 && ur1 !== null && ur1.tool === 'uninstall' && ur1.removed.link === 1 && ur1.removed.dep === 1 && ur1.removed.bundles === 1 && ur1.removed.insertRows === 0,
     'exit=' + String(u1.code) + ' removed=' + JSON.stringify(ur1 && ur1.removed))
   const pkgU = pkgJson()
   check('D5.2 uninstall 后 dependencies 里的 @local/team-flowise 键消失（其它键仍在）',
@@ -1222,8 +1230,82 @@ try {
       const abs = /^[A-Za-z]:[\\/]/.test(v) ? v : join(PROFILE, v)
       try { return realpathSync.native(abs).replace(/\\/g, '/').toLowerCase() === realpathSync.native(PKG_DIR).replace(/\\/g, '/').toLowerCase() } catch { return false }
     })(), String(depSpec))
-  check('D6.3 [正向证据] 这次运行真的写了盘（第一跑后的文件里既有依赖项也有 insert 行），不是空跑',
-    pkg1.dependencies['@local/team-flowise'] !== undefined && patch1.indexOf('flowise-team') !== -1)
+  check('D6.3 [正向证据] 这次运行真的写了盘（第一跑后 package.json 里既有依赖项也有 bundles 项），而 profile 补丁层原封未动——不是空跑，也不是"什么都没做"换来的假绿',
+    pkg1.dependencies['@local/team-flowise'] !== undefined &&
+    pkg1.dsh.profile.bundles.indexOf('@local/team-flowise') !== -1 &&
+    patch1 === PATCH_HEADER)
+
+  // ---- D8: migrating a profile an OLDER installer wired -----------------
+  // The row used to be written into the profile patch. It is declared by the
+  // bundle now, so a profile that still carries one would compose the same id
+  // twice and dsh would refuse to boot. The retirement has to happen BEFORE the
+  // next restart, which is why --check reports it instead of shrugging.
+  const LEGACY_NOTE = '# a hand-written note that must survive the migration verbatim'
+  const LEGACY_ROW = ['- insert:', '    - id: flowise-team', "      name: '@local/team-flowise'", '      disabled: false', ''].join('\n')
+  const legacy = join(TMP, 'profile-legacy')
+  mkdirSync(legacy, { recursive: true })
+  writeFileSync(join(legacy, 'package.json'), JSON.stringify({ name: 'dsh-profile-p12e-legacy', private: true, dsh: { profile: { bundles: [] } } }, null, 2) + '\n', 'utf8')
+  const legacyBase = ['--profile', legacy, '--package', PKG_DIR, '--skill-root', 'none']
+  const legacyText = () => readFileSync(join(legacy, 'cordis.patch.yml'), 'utf8')
+
+  writeFileSync(join(legacy, 'cordis.patch.yml'), LEGACY_NOTE + '\n[]\n' + LEGACY_ROW, 'utf8')
+  const legacyCheck = runScript(INSTALL_SRC, [...legacyBase, '--check', '--json'])
+  check('D8.1 [迁移] 仍带着历史 insert 行的 profile 被 --check 报为"需要迁移"（exit 3），而不是"已装且一致"',
+    legacyCheck.code === 3, 'exit=' + String(legacyCheck.code))
+  const legacyInstall = runScript(INSTALL_SRC, [...legacyBase, '--json'])
+  const legacyReport = reportOf(legacyInstall)
+  check('D8.2 [迁移] 安装删掉了那一行，且脚本自报 insertRows=1（不是静默忽略、也不是悄悄留着）',
+    legacyInstall.code === 0 && legacyText().indexOf('flowise-team') === -1 && legacyReport !== null && legacyReport.added.insertRows === 1,
+    'exit=' + String(legacyInstall.code) + ' added=' + JSON.stringify(legacyReport && legacyReport.added))
+  const legacyAfter = parsePatchLayer(legacyText())
+  check('D8.3 [迁移] 用户的手写注释与 `[]` 逐字保留，`- insert:` 空块没有残留',
+    legacyAfter.comments.length === 1 && legacyAfter.comments[0] === LEGACY_NOTE &&
+    legacyAfter.rowIds.length === 0 && legacyText().indexOf('- insert:') === -1,
+    JSON.stringify({ comments: legacyAfter.comments.length, ids: legacyAfter.rowIds, hasInsert: legacyText().indexOf('- insert:') !== -1 }))
+  const legacyAgain = runScript(INSTALL_SRC, [...legacyBase, '--json'])
+  const legacyAgainReport = reportOf(legacyAgain)
+  check('D8.4 [迁移/幂等] 第二跑不再删任何东西（insertRows=0）、changes 为空、不再写盘',
+    legacyAgain.code === 0 && legacyAgainReport !== null && legacyAgainReport.added.insertRows === 0 && legacyAgainReport.changes.length === 0,
+    JSON.stringify(legacyAgainReport && { added: legacyAgainReport.added, changes: legacyAgainReport.changes.length }))
+  const legacyOk = runScript(INSTALL_SRC, [...legacyBase, '--check', '--json'])
+  check('D8.5 [迁移] 迁移完成后 --check 回到 exit 0', legacyOk.code === 0, 'exit=' + String(legacyOk.code))
+
+  // D8.6 — a row carrying our id but pointing at SOMEBODY ELSE'S package is not
+  //        ours to delete. Retiring it would unmount a stranger's plugin.
+  const foreignProfile = join(TMP, 'profile-foreign-row')
+  mkdirSync(foreignProfile, { recursive: true })
+  writeFileSync(join(foreignProfile, 'package.json'), JSON.stringify({ name: 'dsh-profile-p12e-foreign', private: true, dsh: { profile: { bundles: [] } } }, null, 2) + '\n', 'utf8')
+  const FOREIGN_PATCH = ['- insert:', '    - id: flowise-team', "      name: 'someone/else'", '      disabled: false', ''].join('\n')
+  writeFileSync(join(foreignProfile, 'cordis.patch.yml'), FOREIGN_PATCH, 'utf8')
+  const foreignRun = runScript(INSTALL_SRC, ['--profile', foreignProfile, '--package', PKG_DIR, '--skill-root', 'none', '--json'])
+  check('D8.6 [只删自己的行] 同一个 id 指向别的包时以冲突退出（exit 1），且那个文件一个字都没改',
+    foreignRun.code === 1 && readFileSync(join(foreignProfile, 'cordis.patch.yml'), 'utf8') === FOREIGN_PATCH,
+    'exit=' + String(foreignRun.code))
+
+  // D8.7 — our legacy row hand-merged into ONE `- insert:` list with another
+  //        plugin's row. Deleting the whole block would take the neighbour with
+  //        it, so only our own row may go.
+  const sharedProfile = join(TMP, 'profile-shared-block')
+  mkdirSync(sharedProfile, { recursive: true })
+  writeFileSync(join(sharedProfile, 'package.json'), JSON.stringify({ name: 'dsh-profile-p12e-shared', private: true, dsh: { profile: { bundles: [] } } }, null, 2) + '\n', 'utf8')
+  writeFileSync(join(sharedProfile, 'cordis.patch.yml'), [
+    '# shared block, hand-merged',
+    '- insert:',
+    '    - id: flowise-team',
+    "      name: '@local/team-flowise'",
+    '      disabled: false',
+    '    - id: unrelated-plugin',
+    "      name: 'someone/else'",
+    '      disabled: false',
+    '',
+  ].join('\n'), 'utf8')
+  const sharedRun = runScript(INSTALL_SRC, ['--profile', sharedProfile, '--package', PKG_DIR, '--skill-root', 'none', '--json'])
+  const sharedText = readFileSync(join(sharedProfile, 'cordis.patch.yml'), 'utf8')
+  check('D8.7 [只删自己的行] 与别人的行共处同一个 insert 块时只删我们那一行，别人的行与注释逐字保留（整块删除会连坐）',
+    sharedRun.code === 0 && sharedText.indexOf('flowise-team') === -1 &&
+    sharedText.indexOf('id: unrelated-plugin') !== -1 && sharedText.indexOf("name: 'someone/else'") !== -1 &&
+    sharedText.indexOf('# shared block, hand-merged') !== -1,
+    'exit=' + String(sharedRun.code) + ' :: ' + sharedText.trim().split('\n').slice(-6).join(' / '))
 } catch (e) { blockFailure('D 组安装/回滚场景', e) }
 
 // ---------------------------------------------------------------------------
@@ -1274,8 +1356,12 @@ try {
   check('D7.3 deploy/web-profile/package.json 不再硬编码 link:D:/ai-workspace/...（快照可移植）',
     deployPkg.indexOf('D:/ai-workspace') === -1 && deployPkg.indexOf('D:\\\\ai-workspace') === -1, deployPkg.slice(0, 200))
   const deployPatch = readFileSync(join(REPO, 'deploy/web-profile/cordis.patch.yml'), 'utf8')
-  check('D7.4 deploy/web-profile/cordis.patch.yml 的 insert 行用包名而不是绝对路径',
-    deployPatch.indexOf('D:/ai-workspace') === -1 && deployPatch.indexOf('@local/team-flowise') !== -1)
+  const deployPatchBody = deployPatch.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#'))
+  check('D7.4 deploy/web-profile/cordis.patch.yml 不再自己声明宿主行（行由 bundle 声明；快照里再留一份，用快照的人启动即 duplicate loader entry id），body 恰好是 []',
+    deployPatch.indexOf('D:/ai-workspace') === -1 &&
+    deployPatch.split(/\r?\n/).every((l) => !/^\s*-\s*id\s*:/.test(l)) &&
+    deployPatchBody.length === 1 && deployPatchBody[0] === '[]',
+    JSON.stringify(deployPatchBody))
   const deployReadme = readFileSync(join(REPO, 'deploy/README.md'), 'utf8')
   check('D7.5 deploy/README.md 给出可照抄的安装用法（含 install.mjs 与 --profile）',
     deployReadme.indexOf('install.mjs') !== -1 && deployReadme.indexOf('--profile') !== -1,
@@ -1579,21 +1665,21 @@ if (process.env.P12_SKIP_MUTATIONS === '1') {
       }
     } catch (e) { check('F0.2 [夹具] M2 变异体构造失败', false, String(e && e.message ? e.message : e)) }
   }
-  // M3: the installer's insert-row de-duplication removed.
+  // M3: the "this row is not ours, do not delete it" guard removed. Deleting the
+  // row of a DIFFERENT package unmounts a stranger's plugin, which is exactly the
+  // kind of migration damage this suite has to be able to see.
   {
-    const M3 = join(MUT_TMP, 'install-m3-nodedup.mjs')
+    const M3 = join(MUT_TMP, 'install-m3-noguard.mjs')
     try {
       let t = readFileSync(INSTALL_SRC, 'utf8')
-      const needle = 'if (scan.rows.length === 1) {'
+      const needle = 'if (foreign.length > 0) {'
       if (t.indexOf(needle) === -1) check('F0.3 [夹具] 变异靶点 M3 的替换串存在（找不到 = 测试自己过期，必须红）', false, 'needle not found')
       else {
-        // Short-circuit the "the row is already there" guard: the append path
-        // then lands a SECOND `- id: flowise-team` in the same file.
-        t = t.replace(needle, 'if (false && ' + needle.slice(3))
+        t = t.replace(needle, 'if (false && foreign.length > 0) {')
         writeFileSync(M3, t, 'utf8')
         mutations.push({
-          id: 'M3', what: '删掉安装脚本的 insert 判重（"已存在即跳过"的分支被短路）',
-          expectLabels: ['D2.1', 'D2.3', 'D3.1'],
+          id: 'M3', what: '删掉安装脚本的"id 指向别的包就不许删"守卫（会让别人的插件被卸载）',
+          expectLabels: ['D8.6'],
           env: { P12_INSTALL_SRC: M3, P12_SKIP_MUTATIONS: '1' },
         })
       }
@@ -1654,7 +1740,7 @@ if (process.env.P12_SKIP_MUTATIONS === '1') {
     } catch (e) { blockFailure('F.' + m.id + ' 变异运行', e) }
   }
   const copiedBack = []
-  for (const f of ['host-m1-description.js', 'host-m2-selectrun.js', 'install-m3-nodedup.mjs', 'skill-m4-tooltable.md']) {
+  for (const f of ['host-m1-description.js', 'host-m2-selectrun.js', 'install-m3-noguard.mjs', 'skill-m4-tooltable.md']) {
     const inRepo = join(PKG_DIR, 'src', f)
     if (existsSync(inRepo)) copiedBack.push(inRepo)
     const inScripts = join(REPO, 'scripts', f)

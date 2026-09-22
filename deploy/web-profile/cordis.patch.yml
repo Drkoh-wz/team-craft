@@ -3,14 +3,13 @@
 # overrides, disables, and insert lists; `!!js` expressions allowed).
 
 # Flowise-like multi-agent team orchestration plugin (host bundle).
-# A patch overlay can only override existing rows by id; to ADD a brand-new
-# row it must use `- insert:` with a nested row list. This adds flowise-team
-# as a new host-composition row. The package (@local/team-flowise) is a file:
-# dependency of this profile; its storage domains auto-route to the already
-# composed `json` backend.
-# NOTE: flowise-team is ENABLED for runtime verification of the P1-P3 host
-# bundle (team_* tools + teamOrchestrator service + 4 storage domains).
-- insert:
-    - id: flowise-team
-      name: '@local/team-flowise'
-      disabled: false
+#
+# This layer stays EMPTY on purpose. The `flowise-team` host-composition row is
+# declared by the bundle that owns it — `packages/team-flowise/cordis.patch.yml`,
+# which is composed from `dsh.profile.bundles` below. Declaring the row here as
+# well would compose it twice under one id, and dsh fails at boot with
+# `duplicate loader entry id`.
+#
+# This file must remain a top-level YAML array. A comments-only file is NOT one:
+# dsh throws on it. `[]` is the empty array it wants.
+[]

@@ -7,9 +7,11 @@
  *      the directory it points at);
  *   2. the `@local/team-flowise` entry from <profile>/package.json dependencies;
  *   3. the `@local/team-flowise` entry from dsh.profile.bundles;
- *   4. the `- insert:` row (whole block) for `flowise-team` from
- *      <profile>/cordis.patch.yml — every other line, comment included, is kept
- *      byte-identical;
+ *   4. any LEGACY `- insert:` row (whole block) for `flowise-team` from
+ *      <profile>/cordis.patch.yml — a profile wired by an older version of
+ *      install.mjs still carries one. The row is normally declared by the bundle
+ *      itself, so a current profile has nothing here and this step is a no-op;
+ *      every other line, comment included, is kept byte-identical;
  *   5. (opt-in, --remove-skill) the installed skill directory/file.
  *
  * Backups are always kept: each rewritten file becomes `<file>.bak-<timestamp>`.

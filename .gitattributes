@@ -1,0 +1,29 @@
+# One checkout, one set of bytes. Without this, a Windows contributor whose git
+# has the default `core.autocrlf=true` commits CRLF for every text file, and the
+# next Linux clone sees a whole-tree diff. The packers under scripts/ hash and
+# compare file contents (archive vs working tree), so a line-ending that depends
+# on who cloned it is a real defect, not cosmetics.
+* text=auto eol=lf
+
+# Windows-only helpers keep CRLF if any are ever added: some Windows tools
+# mis-read LF-only .ps1/.bat.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Archives and images: never normalised, never diffed.
+*.tgz binary
+*.tar.gz binary
+*.gz binary
+*.zip binary
+*.7z binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+
+# Generated or vendored trees are excluded from language statistics.
+dist/** linguist-generated=true
+packages/team-flowise-client/dist/** linguist-generated=true

@@ -485,6 +485,6 @@ R9 的做法：
   - `node scripts/uninstall.mjs [--profile <dir>] [--dry-run] [--check] [--help]`
   - `--dry-run` 只打印将要发生的每一处改动；`--check` 只校验现状并用退出码区分「已装/未装」。
   - 默认 profile 是用户目录下的 `web` profile（`~/.dsh/profiles/web`）；**不要手写某个人的绝对路径**。
-- 脚本会做的事：把包链接进 profile 的 `node_modules`，在 profile 的 `package.json` 里补依赖与 `dsh.profile.bundles` 项，在 `cordis.patch.yml` 里补 `flowise-team` 的 `- insert:` 行（已存在就跳过，重复 insert 会让 profile 启动直接抛错），并把本技能复制/链接到技能根目录（默认用户级 `~/.dsh/skills/team-flowise/`）。全部步骤幂等，重复执行不产生重复项。
+- 脚本会做的事：把包链接进 profile 的 `node_modules`，在 profile 的 `package.json` 里补依赖与 `dsh.profile.bundles` 项，**删除** profile 的 `cordis.patch.yml` 里历史遗留的 `flowise-team` `- insert:` 行（宿主行现在由插件包自己的 `cordis.patch.yml` 声明；profile 里再留一份会让同一个 id 被装配两次，宿主启动即抛 `duplicate loader entry id`），并把本技能复制/链接到技能根目录（默认用户级 `~/.dsh/skills/team-flowise/`）。全部步骤幂等，重复执行不产生重复项，也不会重复删行。
 - **装完必须重启 dsh**：宿主代码与客户端 bundle 在启动时加载/快照。重启前可能出现的现象就是 §7 里的「401（路径未注册）」或界面入口缺失。
 - 重启后如何确认：`GET /api/team-flowise/ping` 返回 200 与四个存储域；左栏出现「多 Agent 团队进度」图标、侧栏底部出现状态芯片；设置页出现「多 Agent 团队」一节；技能生效则本目录束出现在技能列表里。

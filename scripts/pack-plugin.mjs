@@ -335,8 +335,10 @@ What the installer does, all of it idempotent:
 1. links \`<profile>/node_modules/@local/team-flowise\` to \`${PACKAGE_REL}\`;
 2. adds the dependency to \`<profile>/package.json\` and its bundle to
    \`dsh.profile.bundles\`;
-3. appends the host-composition row (id \`${ROW_ID}\`) to
-   \`<profile>/cordis.patch.yml\`, leaving every existing line untouched;
+3. retires a LEGACY host-composition row (id \`${ROW_ID}\`) from
+   \`<profile>/cordis.patch.yml\` if an older installer left one there. The row
+   itself is declared by the bundle (\`${PACKAGE_REL}/cordis.patch.yml\`), so this
+   step only ever removes; a profile that never had one keeps its file byte-identical;
 4. copies the skill into a skill root.
 
 Every file it rewrites is first backed up to \`<file>.bak-<timestamp>\`.
@@ -365,7 +367,8 @@ The plugin contributes eight \`team_*\` tools plus a sidebar progress panel
     node scripts/uninstall.mjs --profile <dsh-profile-dir>
 
 It reverses all four steps, keeps every other line of \`cordis.patch.yml\`
-byte-identical, and is equally idempotent.
+byte-identical, and is equally idempotent. Step 3 is a no-op on a profile wired
+by this version, because there is no legacy row to retire.
 
 ## What is NOT in this archive
 
@@ -394,15 +397,24 @@ function runNode(args, cwd) {
 
 /**
  * A profile shaped like a real one: another plugin's `- insert:` row is already
- * present, so the installer has to APPEND rather than create the block, and the
- * uninstaller has to remove one row without touching the other. A comment-only
- * fixture would exercise neither.
+ * present, so the uninstaller has to remove one row without touching the other,
+ * AND a LEGACY `flowise-team` row is present, because a profile wired by an older
+ * version of this repository still carries one. That is the interesting case: the
+ * installer must retire it (the row is declared by the bundle now, and two rows
+ * with one id stop dsh from booting) while leaving the neighbouring row and the
+ * header byte-identical. A comment-only fixture would exercise none of this.
  */
 const FIXTURE_PATCH = [
 	'# fixture profile written by scripts/pack-plugin.mjs',
 	'- insert:',
 	'    - id: unrelated-plugin',
 	"      name: 'someone/else'",
+	'      disabled: false',
+	'',
+	'# legacy row, as written by an older team-flowise installer',
+	'- insert:',
+	`    - id: ${ROW_ID}`,
+	`      name: '${PLUGIN_NAME}'`,
 	'      disabled: false',
 	'',
 ].join('\n');
@@ -615,14 +627,20 @@ function main(argv) {
 			Array.isArray(profilePkg.dsh?.profile?.bundles) && profilePkg.dsh.profile.bundles.filter((b) => b === PLUGIN_NAME).length === 1,
 			JSON.stringify(profilePkg.dsh?.profile?.bundles));
 		const patch = readText(join(profileDir, 'cordis.patch.yml'));
-		check('I2.4 the host-composition row is in cordis.patch.yml exactly once',
-			(patch.match(new RegExp(`id:\\s*${ROW_ID}`, 'g')) || []).length === 1 && patch.includes('- insert:'),
+		check('I2.4 the host-composition row is NOT in the profile patch any more — it is declared by the bundle, and a copy here would compose the same id twice',
+			(patch.match(new RegExp(`id:\\s*${ROW_ID}`, 'g')) || []).length === 0,
 			patch.split('\n').filter((l) => l.includes(ROW_ID) || l.includes('insert')).join(' / '));
-		check('I2.5 the unrelated plugin\'s row and the fixture header survived the install untouched',
+		const bundledPatch = readText(join(extractDir, PACKAGE_REL, 'cordis.patch.yml'));
+		check('I2.5 the unrelated plugin\'s row and the fixture header survived the install untouched (only our legacy block was retired)',
 			patch.includes('id: unrelated-plugin') && patch.includes('name: \'someone/else\'')
 			&& patch.startsWith('# fixture profile written by scripts/pack-plugin.mjs\n')
-			&& insertRowCount(patch) === 2,
+			&& insertRowCount(patch) === 1,
 			'rows=' + insertRowCount(patch));
+		check('I2.6 the bundle\'s own cordis.patch.yml declares the row (this is what makes "installing the package" equal "mounting it")',
+			(bundledPatch.match(new RegExp(`id:\\s*${ROW_ID}`, 'g')) || []).length === 1
+			&& bundledPatch.includes('- insert:')
+			&& bundledPatch.includes(`name: '${PLUGIN_NAME}'`),
+			bundledPatch.split('\n').filter((l) => l.includes(ROW_ID) || l.includes('insert') || l.includes('name:')).join(' / '));
 		let linkOk = false;
 		let linkDetail = '';
 		try {
@@ -632,15 +650,15 @@ function main(argv) {
 			linkOk = real !== null && isFile(join(linkPath, 'package.json'));
 			linkDetail = linkPath;
 		} catch (e) { linkDetail = 'lstat failed: ' + e.message; }
-		check('I2.6 node_modules/@local/team-flowise resolves to a real package (not a dangling link)', linkOk, linkDetail);
+		check('I2.7 node_modules/@local/team-flowise resolves to a real package (not a dangling link)', linkOk, linkDetail);
 		const installedSkill = join(skillDir, 'team-flowise', 'SKILL.md');
 		const skillCopied = isFile(installedSkill);
 		const skillText = skillCopied ? readText(installedSkill) : '';
 		const skillFm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(skillText);
-		check('I2.7 the skill was copied with its YAML frontmatter intact (name + description present)',
+		check('I2.8 the skill was copied with its YAML frontmatter intact (name + description present)',
 			skillFm !== null && /(^|\n)name:\s*\S/.test(skillFm[1]) && /(^|\n)description:\s*\S/.test(skillFm[1]),
 			skillCopied ? `${skillText.length} chars, frontmatter=${skillFm !== null}` : 'not installed');
-		check('I2.8 the installed skill is byte-identical to the archive copy (nothing rewrites it on the way in)',
+		check('I2.9 the installed skill is byte-identical to the archive copy (nothing rewrites it on the way in)',
 			skillCopied && sha256(readFileSync(installedSkill)) === sha256(readFileSync(join(DEFAULT_SKILL_DIR, 'SKILL.md'))),
 			skillCopied ? sha256(readFileSync(installedSkill)).slice(0, 16) : 'not installed');
 
@@ -662,8 +680,8 @@ function main(argv) {
 			&& sha256(readFileSync(join(skillDir, 'team-flowise', 'SKILL.md'))) === skillHash1
 			&& backupsAfter === backupsBefore,
 			`exit=${second.code} backups ${backupsBefore}->${backupsAfter}`);
-		check('N1.2 after two installs there is still exactly one row and one bundle entry',
-			(readText(join(profileDir, 'cordis.patch.yml')).match(new RegExp(`id:\\s*${ROW_ID}`, 'g')) || []).length === 1
+		check('N1.2 after two installs there is still exactly one bundle entry and NO team-flowise row left in the profile patch',
+			(readText(join(profileDir, 'cordis.patch.yml')).match(new RegExp(`id:\\s*${ROW_ID}`, 'g')) || []).length === 0
 			&& JSON.parse(readText(join(profileDir, 'package.json'))).dsh.profile.bundles.filter((b) => b === PLUGIN_NAME).length === 1);
 
 		const un = runNode([join(extractDir, 'scripts', 'uninstall.mjs'), '--profile', profileDir, '--remove-skill', '--skill-dir', skillDir], extractDir);
