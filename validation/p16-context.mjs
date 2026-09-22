@@ -405,6 +405,24 @@ try {
     && (run6.nodeStates.n1.context || {}).source === 'node',
     JSON.stringify({ provider: s6.calls.filter((c) => c.role === 'worker')[0].provider, context: run6.nodeStates.n1.context }))
 
+  // B5.3: 声明 `none` 与**完全不声明**在"没有任何下层要 session"时是观察等价的。
+  // 这不是文字描述，是这个包（specializations/leasing-risk）钉 workflow 层 none 的**全部依据**：
+  // 那条钉住不改变任何运行结果，只增加了"压住下层单点继承并留痕"的能力。
+  // 变红方式：让 inheritRecordFor 在 `!asked && suppressed.length === 0` 时不再返回 null
+  // （即在没有任何层要 session 时也写一条 context 记录），本项立即变红。
+  const s8 = await mount(FORK_OK, USAGE)
+  await s8.svc.upsertAgent({ id: 'r1', name: 'r1', role: 'role', model: { provider: 'p', model: 'm' } })
+  await s8.svc.upsertWorkflow({ id: 'wf-none-layer', name: 'wf-none-layer', inheritContext: 'none', nodes: oneNode() })
+  const run8 = await run(s8.svc, 'wf-none-layer')
+  const keys8 = Object.keys(run8.nodeStates.n1).sort().join(',')
+  const keys2 = Object.keys(run2.nodeStates.n1).sort().join(',')
+  check('B5.3 [观察等价] workflow 层声明 none 而无人要 session 时：走 spawn、节点记录里连 context 键都没有，且键集与完全不声明时逐键相同',
+    s8.calls.filter((c) => c.role === 'worker')[0].provider === 'spawn'
+    && !('context' in run8.nodeStates.n1)
+    && !('context' in run2.nodeStates.n1)
+    && keys8 === keys2,
+    JSON.stringify({ provider: s8.calls.filter((c) => c.role === 'worker')[0].provider, declaredNoneKeys: keys8, undeclaredKeys: keys2, context: run8.nodeStates.n1.context }))
+
   // B6: reviewers never inherit, even when the workflow says session.
   const s7 = await mount(FORK_OK, USAGE)
   await s7.svc.upsertAgent({ id: 'r1', name: 'r1', role: 'role', model: { provider: 'p', model: 'm' } })
@@ -531,9 +549,10 @@ try {
 /* ------------------------------------------------------------------ group D */
 // Falsification: take the repository source, break exactly one thing, and require
 // this suite to go red on it. A behavioural suite that has never been seen to fail
-// is a suite that proves nothing. Two mutations, because the live A/B proved that
-// the second defect class is real and invisible to the first.
-console.log('\n--- GROUP D: 本套件真的会红（两个变异：派发 / 用量口径） ---')
+// is a suite that proves nothing. Four mutations, because the live A/B proved that
+// the second defect class is real and invisible to the first, and because the
+// workflow-layer `none` this specialization pins rests entirely on B5.3.
+console.log('\n--- GROUP D: 本套件真的会红（四个变异：派发 / 用量口径 / 预算 / none 的观察等价） ---')
 const MUTATIONS = [
   {
     tag: 'M1',
@@ -565,6 +584,18 @@ const MUTATIONS = [
     expect: /^B10\.1/,
     min: 1,
     label: '预算真的会被执行',
+  },
+  {
+    tag: 'M4',
+    what: '让"没人要 session"时也写一条 context 记录（声明的 none 不再与不声明等价）',
+    // B5.3 是本包（specializations/leasing-risk）能安全地在 workflow 层钉 none 的**唯一依据**：
+    // 那条钉住在无人要 session 时观察不到任何差别。把 inheritRecordFor 的这个早退拿掉，
+    // 每个节点都会多出一条 effective:'none' 的 context 记录，B5.3 立即变红。
+    from: 'if (!asked && suppressed.length === 0) return null;',
+    to: 'if (false) return null; // MUTATED: 无人要 session 时也写记录',
+    expect: /^B5\.3/,
+    min: 1,
+    label: 'none 与不声明观察等价',
   },
 ]
 if (MUTATION_MODE) {
@@ -611,7 +642,7 @@ if (MUTATION_MODE) {
   const leftovers = MUTATIONS.filter((m) => existsSync(join(dirname(SRC), '.p16-mutated-index-' + m.tag + '.mjs')))
   check('D3.1 变异副本没有留在仓库里（仓库源码零改动）', leftovers.length === 0,
     leftovers.map((m) => m.tag).join(',') || dirname(SRC))
-  check('D3.2 仓库源码仍然带着两个变异点（变异只存在于临时副本）',
+  check('D3.2 仓库源码仍然带着四个变异点（变异只存在于临时副本）',
     MUTATIONS.every((m) => readFileSync(SRC, 'utf8').indexOf(m.from) !== -1),
     MUTATIONS.filter((m) => readFileSync(SRC, 'utf8').indexOf(m.from) === -1).map((m) => m.tag).join(',') || 'both present')
 }

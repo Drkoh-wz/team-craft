@@ -1,6 +1,6 @@
 {
   "packId": "leasing-risk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "融资租赁客户还款风险评估专用团队",
   "language": "zh-CN",
   "summary": "为 team-flowise 装载一支 10 角色的融资租赁还款风险评估团队：1 条 11 节点的确定性流水线、10 份逐字保存的角色人设、2 份评审职责适配、1 个使用技能。",
@@ -11,7 +11,8 @@
       { "id": "workflow.prompt", "why": "工作流级人设层，用于注入工作流契约" },
       { "id": "node.reviewer", "why": "节点级独立评审者（复核师/评审员）" },
       { "id": "workflow.review.maxRework", "why": "返工上限，避免评审把任务拉长" },
-      { "id": "haltOnFailure", "why": "失败即停：任一步骤失败或阻塞项未解决时停止运行、未开始节点记为 skipped。缺失时流水线仍可运行，但下游必须靠产物级阻断自查（见 README「能力探测」）" }
+      { "id": "haltOnFailure", "why": "失败即停：任一步骤失败或阻塞项未解决时停止运行、未开始节点记为 skipped。缺失时流水线仍可运行，但下游必须靠产物级阻断自查（见 README「能力探测」）" },
+      { "id": "inheritContext", "why": "上下文继承开关：workflow 层显式钉住 inheritContext:\"none\"。这条流水线的产物总线是文件系统（case_dir），把主会话上下文拖进案情分析只会变慢并引入无关材料（实测：继承一次单价约 4~9 倍墙钟）。**缺失该字段是无害降级**：不声明时的默认就是不继承，行为一字不差，丢掉的只是这条显式策略声明，以及它在有人给某个 node/role 开了 session 时压住并留痕的能力（见 pack.json.contextPolicy）" }
     ]
   },
   "targets": {
@@ -52,6 +53,15 @@
     "engine": "workflow.haltOnFailure = true（任一步骤失败，或阻塞项在返工上限内未解决 → 运行停止，未开始节点 skipped）",
     "artifactGate": "每个节点在任务模板里必须自检上游产物：缺失/为空/blocked/FAIL/return_to_intake/stop_for_human 时，写阻断产物并停止，不产出风险结论",
     "why_both": "引擎级停止需要 team-flowise 支持 haltOnFailure；产物级阻断在任何版本上都有效。两者叠加：支持时靠引擎立刻停，不支持时下游也不会编出结论。"
+  },
+  "contextPolicy": {
+    "declared": "workflow.json 的 inheritContext = \"none\"（workflow 层）",
+    "why": "本流水线的产物总线是文件系统：调用方通过运行 input 传 case_dir，每个节点按固定文件名读写案情材料。节点不需要主会话的对话历史，而继承会把整段上下文拖进提示词——实测同一件事继承态每节点墙钟约 4~9 倍、cacheRead 可达 60 万 token 量级。对一条逐个案子跑的流水线，那是纯成本与污染。",
+    "resolution": "run > node > workflow > role（整层胜出）。本包只在 workflow 层声明，所以它同时是这条流水线所有节点的默认值。",
+    "runLevelOutranks": "调用方在运行级显式传 inheritContext:\"session\" 仍然优先——那是调用方的显式指令，本包不打算也无法否决它。workflow 层的 none 防的是**后来有人给某个 node/role 单点开 session**：那种情况下会被压住，并在该节点的 context 记录里留下 overridden（点名是哪一层开的）。",
+    "observationalEquivalence": "在没有任何下层声明 session 时，workflow 层的 none 不产生任何 context 记录：节点记录与完全不声明该字段时逐键相同（由 validation/p16-context.mjs 的 B5.3 差分证明）。因此装载到旧版本 team-flowise 上（字段被丢弃）得到的记录与本包声明的一致，行为也一致。",
+    "budget": "本包不声明 inheritMaxEvents：继承已关，预算无意义。要用预算（inheritMaxEvents）时必须先开继承，而这条流水线不该开。",
+    "costEvidence": "三臂活体实测（同一条工作流、两个只回一个词的节点）：开启继承 input 326 / cacheRead 1,297,664 / 16.5 s；关闭 input 324 / cacheRead 15,104 / 4.4 s；声明 inheritMaxEvents 但被拒绝（10,050 个事件 > 上限）input 324 / cacheRead 15,104 / 4.5 s——与关闭态逐项相同。"
   },
   "provenance": {
     "rolePrompts": "10 份角色人设由用户提供并在 prompts/ 下逐字保存；PROVENANCE.json 记录其 sha256，selftest 会重算校验（用于发现后续被误改，不用于证明转录无误）。",

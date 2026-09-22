@@ -65,7 +65,8 @@ const USAGE = `融资租赁客户还款风险评估专用团队 —— 移植包
   --help, -h         显示本帮助
 
 退出码：
-  0  成功（包括「读回校验发现 haltOnFailure 没存住」这类能力降级——那是告警，不是失败）
+  0  成功（包括「读回校验发现 haltOnFailure 没存住」这类能力降级——那是告警，不是失败；
+     同样包括「inheritContext 没存住」：那只是策略声明没落库，生效值仍是不继承，行为不变）
   1  参数错误 / 前置校验失败 / 写入失败
   2  运行时不可达（未启动 dsh，或 team-flowise 未安装）
   3  --check 发现缺失或不一致
@@ -431,6 +432,12 @@ function precheck() {
   // ---- 信息性提示
   const desiredHalt = wfDoc.haltOnFailure === true;
   if (!desiredHalt) warnings.push('workflow.json 没有声明 haltOnFailure: true —— 本次安装出来的流水线不会硬停');
+  // P16：上下文继承开关。`null` = 本包不做继承策略声明，此时安装器根本不写这个字段；
+  // 只要声明了就必须是宿主 workflowSchema 认的四个取值之一（布尔或 none/session）。
+  const desiredInherit = wfDoc.inheritContext === undefined ? null : wfDoc.inheritContext;
+  if (desiredInherit !== null && !['none', 'session', true, false].includes(desiredInherit)) {
+    warnings.push(`workflow.json 的 inheritContext=${JSON.stringify(desiredInherit)} 不是 none/session/true/false 之一，写入会被宿主 schema 拒绝`);
+  }
   const maxRework = wfDoc.review && wfDoc.review.maxRework;
   if (maxRework === undefined || maxRework === null) warnings.push('workflow.json 没有声明 review.maxRework');
   else if (!(Number.isInteger(maxRework) && maxRework >= 0 && maxRework <= 2)) warnings.push(`workflow.json 的 review.maxRework=${maxRework} 超出 schema 上限 2，写入会被拒绝`);
@@ -447,7 +454,7 @@ function precheck() {
   return {
     pack, packPaths: paths, roleDoc, roleById, roleByName, roleIds, workflowId, skillName,
     wfDoc, wfBytes, modelsMap, provenance, personaFiles, artifactFiles, warnings, notes,
-    desiredHalt, desiredMaxRework: maxRework, skillMeta,
+    desiredHalt, desiredMaxRework: maxRework, desiredInherit, skillMeta,
   };
 }
 
@@ -492,7 +499,24 @@ function desiredWorkflowBody(ctx) {
     prompt: readTextFile(join(PACK_DIR, 'adapters', '00-workflow-contract.md')),
   };
   if (wf.review && typeof wf.review === 'object') body.review = wf.review;
+  // P16：只在 workflow.json 真的声明了的时候才写。安装器写的是「本包声明的策略」，
+  // 不是一个它自己编出来的默认值——没声明就不该在目标上留下一条本包没做过的声明。
+  if (ctx.desiredInherit !== null) body.inheritContext = ctx.desiredInherit;
   return body;
+}
+
+/**
+ * 上下文继承的**生效值**：一个工作流记录实际会不会继承会话上下文。
+ *
+ * 为什么不能像 haltOnFailure 那样比较「字段在不在」：这两件事的缺失含义完全不同。
+ * `haltOnFailure` 缺失 = 真的没有硬停能力，是行为缺口；而 `inheritContext` 缺失
+ * = 默认不继承，与显式声明 `none` **行为完全相同**（宿主 pickInheritContext 在没有
+ * 任何层声明 session 时返回 requested:'none'，且不产生任何 context 记录）。
+ * 所以这里按生效值比较：旧版本丢弃该字段时 `--check` 仍然 exit 0（这是策略声明丢失，
+ * 不是状态不一致），只在安装时以告警如实说明丢掉了什么。
+ */
+function inheritEffect(v) {
+  return (v === 'session' || v === true) ? 'session' : 'none';
 }
 
 // 「已存在」判定：只比较本安装器声明/管理的字段，不动目标上多出来的其它设置。
@@ -552,6 +576,8 @@ function workflowMatches(existing, desired) {
   if ((existing.description || '') !== (desired.description || '')) return false;
   if ((existing.prompt || '') !== (desired.prompt || '')) return false;
   if ((existing.haltOnFailure === true) !== (desired.haltOnFailure === true)) return false;
+  // 见 inheritEffect 的注释：按生效值比较，缺失 == none。
+  if (inheritEffect(existing.inheritContext) !== inheritEffect(desired.inheritContext)) return false;
   const er = existing.review || {};
   const dr = desired.review || {};
   if (num(er.maxRework) !== num(dr.maxRework)) return false;
@@ -762,7 +788,7 @@ async function main() {
   const wfBodyBytes = Buffer.byteLength(JSON.stringify(wfBody), 'utf8');
   if (wfBodyBytes >= MAX_BODY_BYTES) throw new Fail(`组装出的工作流请求体有 ${wfBodyBytes} 字节，超过上限 ${MAX_BODY_BYTES}：workflow.prompt 太长`);
   const wfExisting = workflows.find((w) => w && w.id === ctx.workflowId) || null;
-  emit(`  · 工作流 ${wfBody.name}（id=${ctx.workflowId}）：${Object.keys(wfBody.nodes).length} 个节点；haltOnFailure=${wfBody.haltOnFailure}；review.maxRework=${wfBody.review && wfBody.review.maxRework}；prompt=工作流契约 ${wfBody.prompt.length} 字符；请求体 ${wfBodyBytes} 字节`);
+  emit(`  · 工作流 ${wfBody.name}（id=${ctx.workflowId}）：${Object.keys(wfBody.nodes).length} 个节点；haltOnFailure=${wfBody.haltOnFailure}；inheritContext=${JSON.stringify(wfBody.inheritContext === undefined ? null : wfBody.inheritContext)}；review.maxRework=${wfBody.review && wfBody.review.maxRework}；prompt=工作流契约 ${wfBody.prompt.length} 字符；请求体 ${wfBodyBytes} 字节`);
   let wfAction = 'skipped';
   if (workflowMatches(wfExisting, wfBody) && !opts.force) {
     emit(`  [跳过] 已存在，跳过：工作流 ${ctx.workflowId}`);
@@ -800,6 +826,18 @@ async function main() {
         emit('  [校验] haltOnFailure = true（存住了：任一步骤失败、或其阻塞项在返工上限内未解决时，运行停止且未开始的节点记为 skipped）');
       } else {
         const w = '读回校验失败：工作流记录里没有 haltOnFailure=true。本 team-flowise 版本会丢弃该字段，本次流水线不会硬停，只靠产物级阻断（每个节点自检上游产物，缺失/为空/blocked/FAIL/return_to_intake/stop_for_human 时写阻断产物并停止，不产出风险结论）。这是能力降级，不是安装失败（退出码仍为 0）。';
+        emit(`  [告警] ${w}`); warnings.push(w);
+      }
+      // P16：上下文继承策略的读回。注意这里的告警语义与 haltOnFailure **不同**：
+      // 丢的是「显式策略声明」，不是「行为」——不声明时的默认就是不继承，所以
+      // 这条降级不改变流水线跑出来的任何东西（详见 inheritEffect 的注释）。
+      const recInherit = rec.inheritContext === undefined ? null : rec.inheritContext;
+      if (ctx.desiredInherit === null) {
+        emit('  [校验] 本包未声明 inheritContext：安装器不写该字段，也不对它做读回校验');
+      } else if (recInherit === ctx.desiredInherit) {
+        emit(`  [校验] inheritContext = ${JSON.stringify(recInherit)}（钉住了：本流水线不继承会话上下文，产物总线是 case_dir 文件系统）`);
+      } else {
+        const w = `读回校验：工作流记录里 inheritContext 没存住（声明的是 ${JSON.stringify(ctx.desiredInherit)}，读回是 ${JSON.stringify(recInherit)}）。本 team-flowise 版本会丢弃该字段——行为不变（不声明时的默认就是不继承，与本包钉的 none 生效值相同），丢掉的只是这条显式策略声明，以及它在有人给某个 node/role 单点开 session 时压住并留痕（overridden）的能力。这是能力降级，不是安装失败（退出码仍为 0）。`;
         emit(`  [告警] ${w}`); warnings.push(w);
       }
       const mr = rec.review && rec.review.maxRework;
@@ -888,9 +926,11 @@ async function main() {
     const rec = workflows.find((w) => w && w.id === ctx.workflowId) || null;
     if (!rec) { const s = `工作流 ${ctx.workflowId} 未安装`; emit(`  [缺失] ${s}`); issues.push(s); }
     else if (workflowMatches(rec, wfBody)) {
-      emit(`  [校验] 工作流 ${ctx.workflowId}：已就位且一致（haltOnFailure=${rec.haltOnFailure === true}, review.maxRework=${num(rec.review && rec.review.maxRework)}）`);
+      emit(`  [校验] 工作流 ${ctx.workflowId}：已就位且一致（haltOnFailure=${rec.haltOnFailure === true}, review.maxRework=${num(rec.review && rec.review.maxRework)}, inheritContext=${JSON.stringify(inheritEffect(rec.inheritContext))}）`);
     } else {
       if (rec.haltOnFailure !== true) { const s = `工作流 ${ctx.workflowId} 的 haltOnFailure 不是 true（该版本不会硬停）`; emit(`  [不一致] ${s}`); issues.push(s); }
+      // 按生效值比：目标上缺这个字段 = 默认 none = 与本包声明一致，不算不一致。
+      if (inheritEffect(rec.inheritContext) !== inheritEffect(ctx.desiredInherit)) { const s = `工作流 ${ctx.workflowId} 的 inheritContext 生效值是 ${JSON.stringify(inheritEffect(rec.inheritContext))}，声明的是 ${JSON.stringify(inheritEffect(ctx.desiredInherit))}`; emit(`  [不一致] ${s}`); issues.push(s); }
       if (num(rec.review && rec.review.maxRework) !== num(ctx.desiredMaxRework)) { const s = `工作流 ${ctx.workflowId} 的 review.maxRework 是 ${JSON.stringify(num(rec.review && rec.review.maxRework))}，声明的是 ${JSON.stringify(num(ctx.desiredMaxRework))}`; emit(`  [不一致] ${s}`); issues.push(s); }
       if (!deepEqual(rec.nodes, wfBody.nodes)) { const s = `工作流 ${ctx.workflowId} 的 nodes 与 workflow.json 不一致（逐字段结构比较，忽略键序）`; emit(`  [不一致] ${s}`); issues.push(s); }
       if ((rec.prompt || '') !== wfBody.prompt) { const s = `工作流 ${ctx.workflowId} 的 prompt（契约正文）与 adapters/00-workflow-contract.md 不一致`; emit(`  [不一致] ${s}`); issues.push(s); }
@@ -910,7 +950,7 @@ async function main() {
   emit('');
   emit('是否需要重启 dsh：不需要。技能由技能目录在读取时发现（热加载）；角色与工作流是通过 HTTP 写进运行中进程的注册表，已经立即生效。');
   if (warnings.length > 0) {
-    emit(`本次共有 ${warnings.length} 条告警（逐条见上；其中「haltOnFailure 没存住」意味着流水线不会硬停，只靠产物级阻断）：`);
+    emit(`本次共有 ${warnings.length} 条告警（逐条见上；其中「haltOnFailure 没存住」意味着流水线不会硬停，只靠产物级阻断；「inheritContext 没存住」只是策略声明没落库（生效值仍是不继承），不是行为缺口）：`);
     for (const w of warnings) emit(`  [告警] ${w}`);
   }
   if (opts.check) {

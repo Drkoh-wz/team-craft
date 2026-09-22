@@ -11,13 +11,16 @@
 //   B  安装幂等（临时 DSH_HOME + 临时 profile 副本 + 自己写的桩 HTTP 端点）
 //      连续两次 install：第二次全部跳过、角色按固定 id upsert（不产生重名两份）、
 //      工作流唯一、技能只装一份；再用 --check 验证「已装 -> 0 / 未装 -> 3」。
+//      另外两个"声明了但可能没存住"的字段各有一条端到端路径：
+//      B4 旧版本丢弃 haltOnFailure（行为缺口：只剩产物级阻断，告警 + 退出码 0）；
+//      B5 旧版本丢弃 inheritContext（无害降级：生效值不变，告警 + 退出码 0 + --check 仍 0）。
 //   C  模型意图解析：给定 4 套不同的 provider 集合断言解析结果；
 //      解析不到时不写 model 字段且告警非空；一律不写 reasoningEffort。
 //   D  PROVENANCE：篡改一个 prompt 字节 -> selftest 变红；恢复后变绿。
 //      另外两条离线自检的「非空转」对照：清单漏记文件、workflow 超 65536。
-//   E  变异测试：4 个变异（删 DAG 环检测 / 删 haltOnFailure 往返校验 /
-//      让 install 第二次不跳过 / 删悬空 dependsOn 检查），每个都真的让对应检查由绿变红，
-//      然后恢复。M4 的红只落在断言文案的两条上（原因见 M4 处注释）。
+//   E  变异测试：5 个变异（删 DAG 环检测 / 删 haltOnFailure 往返校验 /
+//      让 install 第二次不跳过 / 删悬空 dependsOn 检查 / 删 inheritContext 往返校验），
+//      每个都真的让对应检查由绿变红，然后恢复。M4 的红只落在断言文案的两条上（原因见 M4 处注释）。
 //   F  守卫：真实 profile 与真实 DSH_HOME 未被触碰、install.mjs 未被修改、
 //      变异体只存在于系统临时目录。
 //
@@ -264,6 +267,12 @@ function makeStubEndpoint(opts) {
   const seedWorkflows = Array.isArray(seed.workflows) ? seed.workflows : [];
   /** true = 模拟"旧版本 upsertWorkflow 会丢弃 haltOnFailure"的缺陷类（declared-but-unstored）。 */
   const dropHaltOnFailure = opts.dropHaltOnFailure === true;
+  /**
+   * true = 模拟"旧版本 upsertWorkflow 会丢弃 inheritContext"（P16 字段：旧 workflowSchema
+   * 不认这个键，zod 的对象默认把不认识的键**丢掉**而不是报错，所以写入成功、字段没存住）。
+   * 与 dropHaltOnFailure 分开是刻意的：这两个字段缺失的含义不同，降级行为也必须不同。
+   */
+  const dropInheritContext = opts.dropInheritContext === true;
   const state = {
     agents: new Map(seedAgents.map((a) => [a.id, a])),
     workflows: new Map(seedWorkflows.map((w) => [w.id, w])),
@@ -318,6 +327,7 @@ function makeStubEndpoint(opts) {
       state.writes += 1;
       const stored = { ...b, updatedAt: state.clock };
       if (dropHaltOnFailure) delete stored.haltOnFailure; // 旧版本：写入成功但字段没存住
+      if (dropInheritContext) delete stored.inheritContext; // 旧版本：同上，但这是无害降级
       // 真宿主会把 workflow 记录过一遍 workflowNodeSchema：键序按 schema，未知键丢弃。
       // stub 必须照做，否则"比真宿主更友好"的 stub 会掩盖真宿主上才出现的问题。
       if (stored.nodes !== null && typeof stored.nodes === 'object') {
@@ -797,6 +807,10 @@ if (wants('B')) {
     check('B1.12 [读回校验] 第一跑对 10 个角色也做了读回校验（systemPrompt / model / tools.preset 逐项一致）',
       bothText(run1).split('\n').filter((l) => l.includes('读回一致')).length >= 10,
       String(bothText(run1).split('\n').filter((l) => l.includes('读回一致')).length) + ' 条「读回一致」');
+    // P16：工作流的第二个"声明了但可能没存住"的字段。第一跑必须对它单独读回并报告钉住了。
+    check('B1.13 [读回校验] 第一跑对工作流的 inheritContext 也做了读回，并明确报告钉住了 none',
+      bothText(run1).split('\n').some((l) => l.includes('inheritContext = "none"')),
+      '相关行=' + JSON.stringify(bothText(run1).split('\n').filter((l) => l.includes('inheritContext')).map((l) => l.trim()).slice(0, 3)).slice(0, 320));
 
     // ---- B4：目标版本会丢弃 haltOnFailure —— 安装器必须告警（能力降级），但退出码仍是 0
     try {
@@ -824,6 +838,43 @@ if (wants('B')) {
         JSON.stringify(reportOf(res4) && reportOf(res4).warnings));
       await noHaltStub.close();
     } catch (e) { blockFailure('B4 旧版本丢弃 haltOnFailure', e); }
+
+    // ---- B5：目标版本会丢弃 inheritContext（P16）—— 这是**无害降级**，与 B4 的语义刻意不同。
+    // 三条必须同时成立：(1) 安装器告警并说清丢的是什么；(2) 退出码仍是 0；
+    // (3) `--check` **不得**因此报不一致（字段缺失按生效值 none 计，与声明的 none 等价）。
+    // 第 (3) 条是这组的关键：如果安装器按"字段在不在"比较，旧部署上 `--check` 会永久 exit 3，
+    // 而那个"不一致"根本无法修复——能力永远不回来。变红方式见第 E 组 M5。
+    try {
+      const noInheritStub = await makeStubEndpoint({ catalog: CATALOGS.live, dropInheritContext: true });
+      const packCopy5 = copyPack('B5-pack');
+      const scratch5 = join(TEMP_ROOT, 'B5-scratch');
+      const dshHome5 = join(scratch5, 'dsh-home');
+      const profile5 = join(scratch5, 'profile');
+      mkdirSync(dshHome5, { recursive: true });
+      mkdirSync(profile5, { recursive: true });
+      writeFileSync(join(profile5, 'package.json'), JSON.stringify({ name: 'p13e-B5', private: true, dsh: { profile: { bundles: [] } } }, null, 2) + '\n', 'utf8');
+      writeFileSync(join(profile5, 'cordis.patch.yml'), '# p13e\n[]\n', 'utf8');
+      const args5 = ['--profile', profile5, '--endpoint', noInheritStub.endpoint];
+      const res5 = await runNode(join(packCopy5, 'install.mjs'), [...args5, '--json'], { env: { DSH_HOME: dshHome5 } });
+      const said5 = bothText(res5);
+      const rec5 = noInheritStub.state.workflows.get(workflowId);
+      check('B5.1 [旧版本丢弃 inheritContext] 端点上的记录里确实没有 inheritContext（夹具真的丢掉了它，且没有连 haltOnFailure 一起丢）',
+        rec5 !== undefined && rec5.inheritContext === undefined && rec5.haltOnFailure === true,
+        JSON.stringify({ inheritContext: rec5 && rec5.inheritContext, haltOnFailure: rec5 && rec5.haltOnFailure }));
+      check('B5.2 [旧版本丢弃 inheritContext] 安装器读回后告警非空，且点名"没存住"与"行为不变"（无害降级，不是行为缺口）',
+        said5.includes('工作流记录里 inheritContext 没存住') && said5.includes('行为不变'),
+        said5.split('\n').filter((l) => l.includes('inheritContext')).slice(-1)[0]?.trim().slice(0, 260) || '(没有相关行)');
+      check('B5.3 [旧版本丢弃 inheritContext] 退出码仍是 0（无害降级不是安装失败）',
+        res5.code === 0, 'exit=' + String(res5.code));
+      check('B5.4 [旧版本丢弃 inheritContext] --json 报告里这条告警也在（机器可读的告警清单里有它）',
+        (() => { const r = reportOf(res5); return r !== null && Array.isArray(r.warnings) && r.warnings.some((w) => String(w).includes('inheritContext')); })(),
+        JSON.stringify(reportOf(res5) && reportOf(res5).warnings));
+      const check5 = await runNode(join(packCopy5, 'install.mjs'), [...args5, '--check', '--json'], { env: { DSH_HOME: dshHome5 } });
+      check('B5.5 [旧版本丢弃 inheritContext] --check 仍然 exit 0：字段丢失按**生效值**比较（缺失 = 默认 none = 与声明的 none 等价），不算状态不一致',
+        check5.code === 0,
+        'exit=' + String(check5.code) + ' | ' + bothText(check5).trim().split('\n').slice(-2).join(' | ').slice(0, 240));
+      await noInheritStub.close();
+    } catch (e) { blockFailure('B5 旧版本丢弃 inheritContext', e); }
 
     // ---- --check：已装 -> 0；未装 -> 3（两条口径互补）
     const checkInstalled = await runNode(INSTALL_SRC, ['--profile', profile, '--endpoint', stub.endpoint, '--check', '--json'], { env });
@@ -1187,7 +1238,10 @@ if (wants('E')) {
         id: 'M3',
         what: '让安装器第二次不再"已存在即跳过"（agentMatches 永远判不一致）',
         env: { P13_PACK_TEST_PACK_SRC: dir, P13_PACK_TEST_INSTALL_SRC: join(dir, 'install.mjs'), P13_PACK_SKIP_MUTATIONS: '1' },
-        expectLabels: ['B2.1', 'B2.2', 'B2.3', 'B2.6', 'B3.1', 'B3.2'],
+        expectLabels: ['B2.1', 'B2.2', 'B2.3', 'B2.6', 'B3.1', 'B3.2', 'B5.5'],
+        // B5.5 也在影响面里，且理由与 B3.1 完全相同：`--check` 的退出码是**整体**的，
+        // 角色层被判不一致时它同样会 exit 3。这条不是"顺手加进去凑数"——
+        // E.M3.4 要求影响面之外一条都不能红，所以漏掉它这条反证点会直接报红（实测发生过一次）。
         only: 'B',
       });
     } catch (e) { check('E0.3 [夹具] M3 变异体构造失败', false, String(e && e.message ? e.message : e)); }
@@ -1212,6 +1266,26 @@ if (wants('E')) {
         only: 'A',
       });
     } catch (e) { check('E0.4 [夹具] M4 变异体构造失败（夹具问题，不是被测代码问题）', false, String(e && e.message ? e.message : e)); }
+
+    // ---- M5：短路 inheritContext 的读回校验（P16 的第二个 declared-but-unstored 字段）
+    // 靶点是"没存住"那条分支，所以红的是 B5（用 dropInheritContext=true 的桩端点模拟旧版本）。
+    // 注意 M2 与 M5 的**预期影响面必须互不重叠**：各自只让自己那一组变红，
+    // 这正是"两个字段的降级语义是分开实现的"这一点的机械证据。
+    try {
+      const text = readText(INSTALL_SRC);
+      const needle = '      } else if (recInherit === ctx.desiredInherit) {';
+      const mutated = replaceOnce(text, needle, '      } else if (recInherit === ctx.desiredInherit || true) { // MUTATED: 往返校验被短路', 'M5');
+      const dir = copyPack('E-m5-pack', (d) => {
+        writeFileSync(join(d, 'install.mjs'), mutated, 'utf8');
+      });
+      mutations.push({
+        id: 'M5',
+        what: '短路工作流的 inheritContext 往返校验（"读回发现没存住"这条路彻底不见了）',
+        env: { P13_PACK_TEST_PACK_SRC: dir, P13_PACK_TEST_INSTALL_SRC: join(dir, 'install.mjs'), P13_PACK_SKIP_MUTATIONS: '1' },
+        expectLabels: ['B5.2', 'B5.4'],
+        only: 'B',
+      });
+    } catch (e) { check('E0.5 [夹具] M5 变异体构造失败', false, String(e && e.message ? e.message : e)); }
 
     // ---- 先记录绿基线
     const baseline = await runNode(fileURLToPath(import.meta.url), ['--only=A'], { cwd: HERE });
@@ -1278,7 +1352,7 @@ if (wants('F')) {
     hashOfFile(REPO_SELFTEST) === selftestHashBefore, hashOfFile(REPO_SELFTEST).slice(0, 16) + ' vs ' + selftestHashBefore.slice(0, 16));
   check('F3.1 临时工作区建在系统临时目录里（不是仓库、也不是用户 profile 目录）',
     TEMP_ROOT.indexOf(tmpdir()) === 0 && TEMP_ROOT.indexOf(REAL_PROFILE) === -1, TEMP_ROOT);
-  check('F3.2 仓库的包目录与 validation/ 目录里没有留下任何变异副本（E-m1/E-m2/E-m3/E-m4 只在系统临时目录）',
+  check('F3.2 仓库的包目录与 validation/ 目录里没有留下任何变异副本（E-m1..E-m5 只在系统临时目录）',
     !existsSync(join(PACK_SRC, 'E-m1-pack')) && !existsSync(join(HERE, 'E-m1-pack')) && !existsSync(join(PACK_SRC, 'install.mjs.bak')),
     'checked ' + PACK_SRC + ' and ' + HERE);
 }

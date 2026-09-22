@@ -21,7 +21,9 @@
  *   K workflow.json 字节数 < 65536（宿主 readJsonBody 的请求体上限）
  *   L models.map.json：prefer 结构合法、无重复项、reasoningEffort 策略可识别；
  *     角色声明的 modelIntent 都在表里（有意的降级只告警，结构错误才失败）
- *   M pack.json 声明的入口脚本存在（install.mjs / uninstall.mjs / selftest.mjs）
+ *   M pack.json 声明的入口脚本存在（install.mjs / uninstall.mjs / selftest.mjs）、
+ *     能力声明与数据不许各说各话（capabilities 里的 haltOnFailure / inheritContext，
+ *     以及 contextPolicy.declared 必须与 workflow.json 的实际声明逐字对应）
  *   N SKILL.md 的 YAML frontmatter 合规且 name == pack.targets.skillName
  *     （宿主对不合规 frontmatter 是**静默忽略**，装上去等于没装）
  *   Z 可选：端点可达时校验已装载状态（不可达 -> 跳过并标注，不影响退出码）
@@ -244,6 +246,18 @@ check('B6 workflow.json 的 review.maxRework 是 0..2 的整数（宿主 schema 
   const mr = wfDoc.review && wfDoc.review.maxRework;
   if (!Number.isInteger(mr) || mr < 0 || mr > 2) return `review.maxRework=${JSON.stringify(mr)}`;
   return true;
+});
+check('B8 workflow.json 在 workflow 层钉住 inheritContext: "none"（改成 session/true 即红——这条流水线的产物总线是 case_dir 文件系统，继承会话上下文只会变慢并污染案情）',
+  () => (wfDoc.inheritContext === 'none' ? true : `inheritContext=${JSON.stringify(wfDoc.inheritContext)}`));
+check('B9 工作流里没有任何节点/角色单点开继承（workflow 层的 none 是这条流水线唯一的继承策略来源）', () => {
+  const bad = [];
+  for (const [key, n] of Object.entries(wfDoc.nodes || {})) {
+    if (n && (n.inheritContext === 'session' || n.inheritContext === true)) bad.push(`节点 ${key}`);
+  }
+  for (const r of (rolesDoc.roles || [])) {
+    if (r && (r.inheritContext === 'session' || r.inheritContext === true)) bad.push(`角色 ${r.id}`);
+  }
+  return bad.length === 0 ? true : bad.join('、');
 });
 check('B7 workflow.json 的 id 与 pack.targets.workflowId 一致（否则安装器写出的 id 会与声明不符）',
   () => (wfDoc.id === pack.targets.workflowId ? true : `workflow.json.id=${JSON.stringify(wfDoc.id)} pack=${JSON.stringify(pack.targets.workflowId)}`));
@@ -651,7 +665,7 @@ check(`K1 workflow.json = ${wfBytes} 字节，必须 > 0 且 < ${MAX_BODY_BYTES}
 check('K2 组装出的工作流请求体（workflow.json + 契约 prompt）也小于上限', () => {
   let promptLen = 0;
   if (typeof wfDoc.prompt === 'string' && existsSync(resolve(PACK_DIR, wfDoc.prompt))) promptLen = readText(resolve(PACK_DIR, wfDoc.prompt)).length;
-  const body = { id: wfDoc.id, name: wfDoc.name, description: wfDoc.description, nodes: wfDoc.nodes, haltOnFailure: wfDoc.haltOnFailure === true, prompt: 'x'.repeat(promptLen) };
+  const body = { id: wfDoc.id, name: wfDoc.name, description: wfDoc.description, nodes: wfDoc.nodes, haltOnFailure: wfDoc.haltOnFailure === true, inheritContext: wfDoc.inheritContext, prompt: 'x'.repeat(promptLen) };
   const bytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
   return bytes < MAX_BODY_BYTES ? true : `约 ${bytes} 字节（prompt ${promptLen} 字符）`;
 });
@@ -781,6 +795,31 @@ check('M5 包内文本文件里没有盘符绝对路径（分发到别人机器�
   return hits.length === 0 ? true : hits.slice(0, 6).join(', ') + (hits.length > 6 ? ` 等 ${hits.length} 处` : '');
 });
 
+check('M6 pack.json.requires.capabilities 声明了 inheritContext，且 why 写清「缺失该字段 = 无害降级」（这是它与 haltOnFailure 的关键区别：那个缺了是真的不会硬停）', () => {
+  const caps = pack.requires && Array.isArray(pack.requires.capabilities) ? pack.requires.capabilities : [];
+  const hit = caps.find((c) => c && c.id === 'inheritContext');
+  if (!hit) return 'capabilities 里没有 inheritContext';
+  if (!(typeof hit.why === 'string' && hit.why.length > 10)) return 'inheritContext 的 why 太短';
+  if (!hit.why.includes('无害降级')) return 'inheritContext 的 why 没有点明「缺失 = 无害降级」';
+  return true;
+});
+check('M7 pack.json.contextPolicy.declared 与 workflow.json 的实际声明逐字对应（能力声明与数据不许各说各话）', () => {
+  const cp = pack.contextPolicy;
+  if (!cp || typeof cp !== 'object') return '缺少 contextPolicy';
+  const want = `workflow.json 的 inheritContext = ${JSON.stringify(wfDoc.inheritContext)}（workflow 层）`;
+  if (cp.declared !== want) return `contextPolicy.declared=${JSON.stringify(cp.declared)}，期望 ${JSON.stringify(want)}`;
+  if (typeof cp.observationalEquivalence !== 'string' || cp.observationalEquivalence.length < 20) return 'contextPolicy.observationalEquivalence 缺失或太短（必须写清"不产生 context 记录"这一条）';
+  return true;
+});
+check('M8 contextPolicy 如实写了 run 层仍然优先，以及本包不声明 inheritMaxEvents 的理由（不许把"钉住默认"写成"否决调用方"）', () => {
+  const cp = pack.contextPolicy;
+  if (!cp || typeof cp !== 'object') return '缺少 contextPolicy';
+  const bad = [];
+  if (!/run|运行级|运行层/i.test(String(cp.runLevelOutranks)) || !/优先/.test(String(cp.runLevelOutranks))) bad.push('runLevelOutranks 未写清 run 层仍然优先');
+  if (!/inheritMaxEvents/.test(String(cp.budget))) bad.push('budget 未说明本包不声明 inheritMaxEvents');
+  return bad.length === 0 ? true : bad.join('、');
+});
+
 // ===========================================================================
 console.log('\n--- N SKILL.md frontmatter ---');
 // ===========================================================================
@@ -842,6 +881,15 @@ check('N7 技能正文没有把 return_to_intake 写成"自动回退"（本包�
     if (!NEG.test(before)) bad.push(`第 ${skillText.slice(0, m.index).split('\n').length} 行把「${m[0]}」写成了肯定句`);
   }
   if (!/再次发起|发起新的一次运行|再发起|由人/.test(skillText)) bad.push('未写清"由人（或调用方）发起新的一次运行"');
+  return bad.length === 0 ? true : bad.join('、');
+});
+
+check('N8 技能正文如实写了上下文继承策略（钉住 none、为什么不继承、旧版本丢弃该字段属于什么性质的降级）', () => {
+  if (skillText === '') return 'SKILL.md 缺失';
+  const bad = [];
+  if (!skillText.includes('inheritContext')) bad.push('未提 inheritContext');
+  if (!/不继承/.test(skillText)) bad.push('未写清"不继承会话上下文"');
+  if (!/无害降级|行为不变/.test(skillText)) bad.push('未写清"旧版本丢弃该字段 = 无害降级/行为不变"');
   return bad.length === 0 ? true : bad.join('、');
 });
 
@@ -949,6 +997,11 @@ if (!RUNTIME) {
         });
         check('Z10 装载记录的 review.maxRework 与本包声明一致（存不住时会退回插件默认 2）',
           () => (rec.review && rec.review.maxRework === (wfDoc.review && wfDoc.review.maxRework)) ? true : `装载=${JSON.stringify(rec.review && rec.review.maxRework)} 包内=${JSON.stringify(wfDoc.review && wfDoc.review.maxRework)}`);
+        check('Z14 装载记录的 inheritContext 生效值是不继承（字段缺失按默认 none 计——旧版本丢弃它属无害降级，本项不判红）', () => {
+          const v = rec.inheritContext;
+          if (v === undefined || v === null) return true;
+          return (v === 'none' || v === false) ? true : `inheritContext=${JSON.stringify(v)}（生效值是继承，与本包声明不符）`;
+        });
       }
       const dupWf = workflows.filter((w) => w && w.id === pack.targets.workflowId);
       check('Z11 工作流 id 在目标上唯一（两条同 id 记录 = upsert 失效）', () => (dupWf.length <= 1 ? true : `出现 ${dupWf.length} 条`));

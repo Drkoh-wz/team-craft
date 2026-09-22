@@ -1,6 +1,6 @@
 {
   "packId": "leasing-risk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "note": "本文件只声明角色元数据；人设正文在 prompts/ 下逐字保存，评审附加职责在 adapters/ 下。安装器把 systemPrompt 组装为 [prompt 正文] + 空行 + [adapter]（若有）。",
   "roles": [
     {

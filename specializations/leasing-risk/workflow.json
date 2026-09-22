@@ -3,6 +3,7 @@
   "name": "融资租赁客户还款风险评估",
   "description": "面向融资租赁承租人的还款风险评估流水线：调度就绪检查 -> 数据标准化 ∥ 公开渠道收集 -> 三个专业分析师并行 -> 数据复核师独立核验 -> 调度协调员冲突仲裁 -> 风控评审员综合定级 -> 报告撰写 -> 反馈优化。节点顺序来自 dependsOn（不来自键序），同一波内并行。haltOnFailure=true：任一步骤失败、或其阻塞项在返工上限内未解决时，本次运行停止且未开始的步骤记为 skipped——下游必须在数据可信的前提下才允许产出风险结论。",
   "haltOnFailure": true,
+  "inheritContext": "none",
   "review": {
     "maxRework": 1,
     "enabled": true

@@ -206,7 +206,11 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 
 ---
 
-## 六、能力探测：这个 team-flowise 支不支持 `haltOnFailure`
+## 六、能力探测：这个 team-flowise 支不支持 `haltOnFailure` 与 `inheritContext`
+
+这两个字段的**缺失含义完全不同**，所以探测之后要做的事也不同。
+
+### 6.1 `haltOnFailure`：缺了是真缺口
 
 流水线的「失败即停」有**两层**（见 `SKILL.md` 第五节）：引擎级 `haltOnFailure` 与产物级阻断。产物级阻断在任何版本上都有效；**引擎级只在支持该字段的 team-flowise 版本上有效**。
 
@@ -225,6 +229,19 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 
 字段被丢弃时怎么办：把 team-flowise 升到带该能力的版本、**重启 DSH**（宿主半在启动时加载），再重跑一次 `node install.mjs` 把工作流重写一遍，然后再探测一次。
 
+### 6.2 `inheritContext`：缺了是无害降级
+
+本包在 workflow 层声明了 `"inheritContext": "none"`（见 `SKILL.md` 第六节）：这条流水线的节点**不继承主会话的对话历史**，案情材料只走 `case_dir` 下的文件。
+
+同一个探测命令，看输出里有没有 `"inheritContext": "none"`：
+
+- **有** → 声明落库了。此后若有人给某个节点/角色单点开 `session`，会被这条 workflow 层声明压住并在节点记录的 `overridden` 里留痕。
+- **没有这个键** → 你的插件版本丢弃了该字段。**这不需要补救，也不会改变任何运行结果**：不声明该字段时的默认就是不继承，与本包钉的 `none` 生效值相同；在没有任何下层声明 `session` 时，两者连运行记录都逐键相同（不产生 `context` 记录）。真正丢掉的只有那条显式声明和上面的压制留痕。
+
+安装器对这个字段的读回校验**只会告警、退出码仍是 0**，`--check` 也不会因此报不一致——因为它是按**生效值**比较的（缺失按默认 `none` 计），不是按"字段在不在"。这与 `haltOnFailure` 的处理刻意不同：那个缺了是真的没有硬停能力，这里缺了行为一字不差。
+
+自己确认继承有没有被介入（比看字段更直接）：跑一次案子，看每个节点记录里有没有 `context` 键。**没有 `context` 键 = 继承没有被介入**，这正是本包想要的状态。
+
 ---
 
 ## 七、如实的能力边界
@@ -234,7 +251,7 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 1. **模型意图解析不到 → 继承会话模型。** `models.map.json` 的 `prefer` 在本机（P13 开发机）解析为 `deepseek-official/deepseek-flash`（日常角色）与 `deepseek-official/deepseek-v4-pro`（财务分析师、风控评审员、报告撰写、反馈优化）；换一个部署可能**一个都解析不到**。届时安装器不写该角色的 `model` 字段，角色直接**继承发起这次运行的会话模型**，并如实告警。这是降级，不是失败；想让意图生效就往 `models.map.json` 里加你这个部署真实存在的 provider/model。
    （v2 备注：三个意图的首选原先指向 `amd`、`hub16`；实测 `amd` 极慢——一个节点跑了 1000 秒才以 `stopReason=error` 收场——因此改为首选 DeepSeek 官方，用户原本指定的模型保留为后续选择。想恢复按角色分模型，只要把 `prefer` 顺序调回去。）
 
-2. **`haltOnFailure` 需要新版 team-flowise。** 旧版本会把这个字段丢掉（写入时不报错、存不住），此时**只有产物级阻断**，没有引擎级停止：上游失败后下游仍可能被派发，靠下游自己读到空/阻断的上游产物才停下来。用第六节的方法探测。
+2. **`haltOnFailure` 需要新版 team-flowise。** 旧版本会把这个字段丢掉（写入时不报错、存不住），此时**只有产物级阻断**，没有引擎级停止：上游失败后下游仍可能被派发，靠下游自己读到空/阻断的上游产物才停下来。用第六节 6.1 的方法探测。
 
 3. **`return_to_intake` 不会自动回环。** 调度协调员在 `07-arbitration.json` 判 `decision = return_to_intake`（口径差异）时，只会给出逐项可执行的 `intake_recheck_items` 清单；当前插件**没有 loop / 回退原语**，DAG 不会自动退回数据整理员重跑。必须由人（或调用方）据此**发起新的一次运行**；同时下游节点被要求在该 decision 下写阻断产物、不定级。**不要把它当成自动回退。**
 
@@ -247,3 +264,7 @@ Invoke-RestMethod -Method Delete 'http://127.0.0.1:3080/api/team-flowise/workflo
 7. **节点的 `reviewer` 才有评审。** 只有节点级 `reviewer`（或工作流级 `review.reviewer` 默认值）会派发评审者；本工作流里 `feedback` 节点没有评审。`team_delegate_agent` 的 `reviewer` 只登记在台账上，不派发评审者。
 
 8. **命令与参数以包内脚本的 `--help` 为准。** 本文列出的 `install.mjs` / `uninstall.mjs` 参数与退出码来自本包的接口约定（`pack.json.entrypoints`）；在你自己机器上先跑 `node install.mjs --help` 再看一遍，`node install.mjs --dry-run` 与 `--check` 都不会写任何东西，可以放心先跑。**本包不声称任何未在你环境里验证过的运行结果**——包括「模型意图一定能解析到」「硬停一定生效」「技能一定被宿主加载」。
+
+9. **`inheritContext: "none"` 是钉住默认值，不是否决权。** 本包在 workflow 层声明不继承会话上下文（理由与实测成本见 `SKILL.md` 第六节）。但解析顺序是 `run > node > workflow > role`，所以调用方在**运行级**显式传 `inheritContext: "session"` 时仍然优先——那时节点会继承，本包压不住，这是设计如此而不是缺陷。它防的是"后来有人给某个节点单点开继承"这类静默漂移。旧版本丢弃该字段属**无害降级**（生效值不变），探测方法见第六节 6.2。
+
+10. **`SKILL.md` 的工具参数表目前没有机械校验钉住。** 它曾经过期过一次：P16 给 `team_create_workflow` 与 `team_run_workflow` 各加了一个 `inheritContext`，表里没跟上，而宿主的文档校验只查「文档里写的参数名是否真实存在」这一个方向，所以不会红。1.1.0 已补齐并与运行时注册的工具 schema 逐字核对过；但改动这张表时仍需自己对着 schema 复核。

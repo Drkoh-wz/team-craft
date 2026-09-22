@@ -81,7 +81,7 @@ team_run_workflow({
 })
 ```
 
-`team_run_workflow` 的注册参数（实测抽取自宿主源码，见第七节）是 `workflowId`（必填）、`input`、`route`。它**阻塞到整次运行结束**才返回，每个节点还有自己的单步超时，真实案子可能阻塞很久；返回只有摘要 `{ ok, runId, status }`，细粒度进度去进度面板或 `/progress` 看。不要在一次调用里连着起好几个。
+`team_run_workflow` 的注册参数（实测抽取自宿主源码，见第八节）是 `workflowId`（必填）、`input`、`route`、`inheritContext`。它**阻塞到整次运行结束**才返回，每个节点还有自己的单步超时，真实案子可能阻塞很久；返回只有摘要 `{ ok, runId, status }`，细粒度进度去进度面板或 `/progress` 看。不要在一次调用里连着起好几个。
 
 **方式 B：HTTP 启动（后台跑，立刻拿到 runId）**
 
@@ -189,7 +189,42 @@ hub16/gpt-6-astra         -> {"reasoning":{"efforts":[],"defaultEffort":null}}
 
 **两层叠加的意义**：支持 `haltOnFailure` 的版本立刻停、不浪费后续模型调用；不支持的版本下游也不会凭着空产物编出风险结论。
 
-## 六、常见故障
+## 六、上下文继承：本包在 workflow 层钉住 `inheritContext: "none"`
+
+本工作流声明了 `"inheritContext": "none"`（workflow 层）。含义是：**这条流水线的节点不继承主会话的对话历史**，worker 从一个干净的上下文开始，案情材料全部通过 `case_dir` 下的文件传递。
+
+### 6.1 为什么不继承
+
+产物总线是文件系统：调用方在运行 input 里给 `case_dir`，每个节点按固定文件名读写。节点需要的是案情材料，不是"我们刚才聊了什么"。而继承的代价是**实测**出来的（同一条工作流、两个只回一个词的节点，三臂对照）：
+
+| 臂 | input | cacheRead | 两节点墙钟 |
+|---|---|---|---|
+| 开继承 | 326 | 1,297,664 | 16.5 s |
+| 关继承 | 324 | 15,104 | 4.4 s |
+
+即使前缀缓存命中率 100%，每节点仍要把 60 万 token 量级的前缀过一遍，墙钟约 4~9 倍。对一条逐个案子跑的流水线，这是纯成本；而且主会话里与本承租人无关的内容会进入案情分析。**收益为零，成本与污染都是真的。**
+
+### 6.2 它防什么、不防什么
+
+解析顺序是 `run > node > workflow > role`（整层胜出）。本包只声明 workflow 层，所以它是这条流水线所有节点的默认值。
+
+- **防的是**：后来有人给某个 `node` 或 `role` 单点开了 `session`。那种情况下会被 workflow 层的 `none` 压住，并在该节点的 `context` 记录里留下 `overridden`（点名是哪一层开的）。
+- **不防的是**：调用方在**运行级**显式传 `inheritContext: "session"`。run 层优先——那是调用方的显式指令，本包不打算也无法否决它。
+- **评审者任何时候都不继承**，没有开关。
+
+### 6.3 旧版本丢弃这个字段：无害降级
+
+**这条能力需要支持 `inheritContext` 的 team-flowise 版本。** 装到旧版本上，字段可能在写入时被丢弃。与 `haltOnFailure` 不同的是，**这里的降级不改变任何行为**：不声明该字段时的默认就是不继承，与本包钉的 `none` 生效值相同。实际丢掉的只有两样东西——这条显式策略声明，以及 6.2 里"压住单点继承并留痕"的能力。安装器会在读回校验里如实告警，退出码仍是 0；`--check` 也不会因此报不一致（它按生效值比，缺失按默认 `none` 计）。
+
+还有一条**可观察的等价性**：在没有任何下层声明 `session` 时，workflow 层的 `none` **不产生任何 `context` 记录**——节点记录与完全不声明该字段时逐键相同。所以"旧版本丢弃它"和"新版本存住它"在运行记录上观察不出差别。
+
+自己验证（只读）：读回工作流记录 `GET /api/team-flowise/workflows`，看该工作流有没有 `"inheritContext": "none"`；再跑一次案子，看节点的 `context` 键——**没有这个键就说明继承没有被介入**，这正是本包想要的状态。
+
+### 6.4 为什么本包不声明 `inheritMaxEvents`
+
+`inheritMaxEvents` 是继承的**预算**（父级日志已完成事件数的上限）。它只在继承开启时才有意义——超出上限时插件**拒绝继承、退回干净派发**，不是截断前缀（它做不到截断：种子长度由驱动层决定，插件只能预测与拒绝）。本包的继承已关，声明预算没有意义。
+
+## 七、常见故障
 
 | 症状 | 最可能的原因 | 怎么查 / 怎么办 |
 |---|---|---|
@@ -199,19 +234,22 @@ hub16/gpt-6-astra         -> {"reasoning":{"efforts":[],"defaultEffort":null}}
 | **评审 JSON 解析失败** | 评审者没按契约输出那一个 JSON 对象（夹了散文、或分了多段） | 机械规则 R1：无法解析 → `verdict = error`、零 findings、**该节点仍然完成**——这是评审者的问题，不是节点的错，节点不会因此失败。查该节点的 `review.notes` / `review.verdict`；确认评审者收到的是插件自己构造的评审提示词，且约束在输出契约那一段 |
 | **角色建了却没有评审** | 节点没写 `reviewer`，工作流级 `review` 也没写 `reviewer`（或写了 `review.enabled: false`）；或者用的是 `team_delegate_agent`，那里的 `reviewer` **只登记在台账上、不派发评审者** | 只有节点级 `reviewer`（或工作流级默认值）才会跑评审。本工作流里 `feedback` 节点就是「无评审」的示例；`team_list_agents()` / `GET /api/team-flowise/agents` 核对角色名，评审者名解析不到不会报错，只会悄悄没有评审 |
 | **模型没生效** | 只声明了 `provider` 或只声明了 `model`（成对规则作废该半）；provider 未注册 / model 不存在 / `reasoningEffort` 不被接受 → 整层回退继承父级；或 `models.map.json` 的意图在目标部署上一个都解析不到 | 看节点的 `route.warning` 与 `route.source`（`inherited` 就是回退了）、`team_create_agent` 返回值里的 `warning`；用 `GET /api/team-flowise/models` 核对真实可选值；本包的默认策略是**不声明** `reasoningEffort` |
+| **不确定流水线有没有把主会话上下文拖进案情分析** | 本包在 workflow 层钉了 `inheritContext: "none"`，节点不该继承 | 看节点记录里的 `context` 键：**没有这个键 = 继承没有被介入**（这是本包的正常状态，见第六节）。出现 `context.effective === "session"` 说明有人在下层单点开了继承、或调用方在 **run 层**显式传了 `session`（run 层优先级最高，本包压不住，这是设计如此）；出现 `context.effective === "none"` 且 `reason` 里提到"杀开关"说明它被 workflow 层的声明压住了，同一节点的 `overridden` 会点名是哪一层开的 |
 
 其他两条常见现象：节点一直 `pending` → 十有八九是 `dependsOn` 写了一个不存在的节点 id（悬空依赖永远不会完成）；API 返回 401 → 多半是宿主半没加载或 dsh 还没重启（先 `GET /api/team-flowise/ping`）。
 
-## 七、这条流水线用到的 team_* 工具（实测抽取的参数清单）
+## 八、这条流水线用到的 team_* 工具（实测抽取的参数清单）
 
 下面 7 个工具名与参数名是**从宿主源码 `packages/team-flowise/src/index.js` 的 `defineTool` 注册处逐字抽取**出来的（抽取用的是一次性只读脚本，没有凭记忆写）；这也是宿主当前真正注册的工具面——不多不少 7 个。带 `*` 的是必填：
+
+> **这张表过期过一次，如实说明**：P16 给 `team_create_workflow` 与 `team_run_workflow` 各加了一个 `inheritContext`，这张表当时没跟上，而且**当时没有任何检查会发现它**——宿主的文档校验只查「文档里写的参数名是不是真的存在」，不查「真的参数是不是都写进文档了」。本包 1.1.0 已把这两个补上；核对的权威来源是运行时注册的工具 schema（读回 `parameters.properties` 的键），不是这段文字。这张表目前仍**没有**机械校验钉住，改动它时请自己对着 schema 核一遍。
 
 | 工具 | 参数 |
 |---|---|
 | `team_list_agents` | （不接受任何参数） |
 | `team_create_agent` | `id`、`name`、`role`、`systemPrompt`、`provider`、`model`、`reasoningEffort`、`maxTokens`、`timeoutMs`、`toolsPreset`（schema 未标任何必填；但 `name` 缺省取 `role`，两个都不给会建出一条没有可引用名字的角色） |
-| `team_create_workflow` | `name*`、`description`、`nodes`、`route`、`prompt`、`haltOnFailure` |
-| `team_run_workflow` | `workflowId*`、`input`、`route` |
+| `team_create_workflow` | `name*`、`description`、`nodes`、`route`、`prompt`、`haltOnFailure`、`inheritContext` |
+| `team_run_workflow` | `workflowId*`、`input`、`route`、`inheritContext` |
 | `team_delegate_agent` | `agent*`、`task*`、`acceptanceCriteria`、`reviewer` |
 | `team_create_task` | `requirement*`、`acceptanceCriteria*`、`assignee*`、`reviewer` |
 | `team_task_status` | （不接受任何参数） |
@@ -220,12 +258,13 @@ hub16/gpt-6-astra         -> {"reasoning":{"efforts":[],"defaultEffort":null}}
 
 与使用相关的两条边界：
 
-- **工作流级 `review` 块不在 `team_create_workflow` 的注册参数里**（实测参数清单如上，只有 `name`、`description`、`nodes`、`route`、`prompt`、`haltOnFailure`）。本包的 `review: {maxRework: 1, enabled: true}` 由安装器通过 `POST /api/team-flowise/workflow` 写入；要自己改这个默认评审者/返工上限，也走同一个接口。
+- **工作流级 `review` 块不在 `team_create_workflow` 的注册参数里**（实测参数清单如上，只有 `name`、`description`、`nodes`、`route`、`prompt`、`haltOnFailure`、`inheritContext`）。本包的 `review: {maxRework: 1, enabled: true}` 与 `inheritContext: "none"` 由安装器通过 `POST /api/team-flowise/workflow` 写入；要自己改这个默认评审者/返工上限/继承策略，也走同一个接口。
 - **worker（节点执行者）看不到任何 `team_*` 工具**，也看不到 `subagent` / `workflow` / `ask_user_question` 等：任务书必须自包含，节点之间只能通过 `case_dir` 的文件交换信息。
 
-## 八、本包的已知限制（不要读成能力）
+## 九、本包的已知限制（不要读成能力）
 
 - 引擎级硬停需要支持 `haltOnFailure` 的 team-flowise；旧版本上只有产物级阻断。
+- **上下文继承策略需要支持 `inheritContext` 的 team-flowise**；旧版本丢弃该字段是**无害降级**（生效值仍是不继承、运行记录观察不出差别），丢的只是那条显式声明与"压住单点继承并留痕"的能力。**这条声明钉的是默认值，不是否决权**：调用方在 run 层传 `session` 仍然优先（见第六节）。
 - `arbitrate` 判 `return_to_intake` **不会自动回环**（插件没有 loop 原语），只能由人据此发起新的一次运行。
 - 模型意图解析不到就继承会话模型，这是如实降级；目标部署上可能一个意图都解析不到。
 - `route.measured` **已被真实观测到为 `true`，但它仍是尽力而为，不要当保证**：P13 期间 run `9x2tro7rmubbgzqs` 的 `design-audit` 节点记录为 `measured: true`，其 `effective`（amd/DeepSeek-V4.1-Flash）与 `requested`（amd/DeepSeek-V4-Flash，一个不可解析的名字）不同，即 `effective` 取自子代理自身的 request header —— 这正是它的定义。读不到时记 `false`，绝不拿请求值冒充实测值；判断路由是否真的生效仍应结合 `route.source` 与 `route.warning`。
