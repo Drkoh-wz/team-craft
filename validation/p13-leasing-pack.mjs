@@ -18,9 +18,10 @@
 //      解析不到时不写 model 字段且告警非空；一律不写 reasoningEffort。
 //   D  PROVENANCE：篡改一个 prompt 字节 -> selftest 变红；恢复后变绿。
 //      另外两条离线自检的「非空转」对照：清单漏记文件、workflow 超 65536。
-//   E  变异测试：5 个变异（删 DAG 环检测 / 删 haltOnFailure 往返校验 /
-//      让 install 第二次不跳过 / 删悬空 dependsOn 检查 / 删 inheritContext 往返校验），
-//      每个都真的让对应检查由绿变红，然后恢复。M4 的红只落在断言文案的两条上（原因见 M4 处注释）。
+//   E  变异测试：6 个变异（删 DAG 环检测 / 删 haltOnFailure 往返校验 /
+//      让 install 第二次不跳过 / 删悬空 dependsOn 检查 / 删 inheritContext 往返校验 /
+//      技能根目录候选行退回无脑判断），每个都真的让对应检查由绿变红，然后恢复。
+//      M4 的红只落在断言文案的两条上（原因见 M4 处注释）。
 //   F  守卫：真实 profile 与真实 DSH_HOME 未被触碰、install.mjs 未被修改、
 //      变异体只存在于系统临时目录。
 //
@@ -811,6 +812,16 @@ if (wants('B')) {
     check('B1.13 [读回校验] 第一跑对工作流的 inheritContext 也做了读回，并明确报告钉住了 none',
       bothText(run1).split('\n').some((l) => l.includes('inheritContext = "none"')),
       '相关行=' + JSON.stringify(bothText(run1).split('\n').filter((l) => l.includes('inheritContext')).map((l) => l.trim()).slice(0, 3)).slice(0, 320));
+    // 安装器打印的「技能根目录候选 … 存在/不存在」必须是真实判断。它曾经无脑打印"不存在"
+    // （遍历了只有 {path,why} 的原始候选对象，`r.exists` 恒为 undefined），在同一段输出里
+    // 与它自己刚读到的技能文件当场矛盾。两跑一起看才能钉住：第一跑夹具的根还不存在，
+    // 第二跑（技能已装好）必须说存在。只查一跑的话，"恒为不存在"和"恒为存在"都能蒙过去。
+    const rootLines1 = bothText(run1).split('\n').filter((l) => l.includes('技能根目录候选'));
+    const rootLines2 = bothText(run2).split('\n').filter((l) => l.includes('技能根目录候选'));
+    check('B1.14 [技能根目录] 候选行的"存在/不存在"是真实判断：第一跑（根尚未创建）说不存在，第二跑（根已建好）说存在',
+      rootLines1.length > 0 && rootLines1.every((l) => l.includes('不存在'))
+      && rootLines2.length > 0 && rootLines2.every((l) => l.includes('存在') && !l.includes('不存在')),
+      '第一跑=' + JSON.stringify(rootLines1.map((l) => l.trim().slice(-46))) + ' 第二跑=' + JSON.stringify(rootLines2.map((l) => l.trim().slice(-46))));
 
     // ---- B4：目标版本会丢弃 haltOnFailure —— 安装器必须告警（能力降级），但退出码仍是 0
     try {
@@ -1287,6 +1298,26 @@ if (wants('E')) {
       });
     } catch (e) { check('E0.5 [夹具] M5 变异体构造失败', false, String(e && e.message ? e.message : e)); }
 
+    // ---- M6：技能根目录候选行的 exists 判断改回"遍历没有 exists 字段的原始候选"
+    // 这是一个**纯输出**缺陷（没有任何逻辑依赖它），所以只有断言文案的 B1.14 会红。
+    // 它值得一个变异，因为它和"工具参数表漏了 inheritContext"是同一类：
+    // 没人核对的输出/文档会安静地说假话。
+    try {
+      const text = readText(INSTALL_SRC);
+      const needle = 'for (const r of skillState.roots) emit(`  [提示] 技能根目录候选：';
+      const mutated = replaceOnce(text, needle, 'for (const r of roots) emit(`  [提示] 技能根目录候选：', 'M6');
+      const dir = copyPack('E-m6-pack', (d) => {
+        writeFileSync(join(d, 'install.mjs'), mutated, 'utf8');
+      });
+      mutations.push({
+        id: 'M6',
+        what: '技能根目录候选行退回"无脑打印不存在"（遍历没有 exists 字段的原始候选对象）',
+        env: { P13_PACK_TEST_PACK_SRC: dir, P13_PACK_TEST_INSTALL_SRC: join(dir, 'install.mjs'), P13_PACK_SKIP_MUTATIONS: '1' },
+        expectLabels: ['B1.14'],
+        only: 'B',
+      });
+    } catch (e) { check('E0.6 [夹具] M6 变异体构造失败', false, String(e && e.message ? e.message : e)); }
+
     // ---- 先记录绿基线
     const baseline = await runNode(fileURLToPath(import.meta.url), ['--only=A'], { cwd: HERE });
     const baseStats = statsOf(baseline.stdout);
@@ -1352,7 +1383,7 @@ if (wants('F')) {
     hashOfFile(REPO_SELFTEST) === selftestHashBefore, hashOfFile(REPO_SELFTEST).slice(0, 16) + ' vs ' + selftestHashBefore.slice(0, 16));
   check('F3.1 临时工作区建在系统临时目录里（不是仓库、也不是用户 profile 目录）',
     TEMP_ROOT.indexOf(tmpdir()) === 0 && TEMP_ROOT.indexOf(REAL_PROFILE) === -1, TEMP_ROOT);
-  check('F3.2 仓库的包目录与 validation/ 目录里没有留下任何变异副本（E-m1..E-m5 只在系统临时目录）',
+  check('F3.2 仓库的包目录与 validation/ 目录里没有留下任何变异副本（E-m1..E-m6 只在系统临时目录）',
     !existsSync(join(PACK_SRC, 'E-m1-pack')) && !existsSync(join(HERE, 'E-m1-pack')) && !existsSync(join(PACK_SRC, 'install.mjs.bak')),
     'checked ' + PACK_SRC + ' and ' + HERE);
 }

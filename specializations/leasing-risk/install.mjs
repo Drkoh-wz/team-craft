@@ -864,7 +864,14 @@ async function main() {
   const skillTarget = join(skillDir, 'SKILL.md');
   const skillStep = { step: 6, name: 'install-skill', status: 'ok', state: skillState, detail: null };
   summary.steps.push(skillStep);
-  for (const r of roots) emit(`  [提示] 技能根目录候选：${r.path}（${r.why}；${r.exists ? '存在' : '不存在'}）`);
+  // 这里遍历的必须是 skillState.roots（带 exists 字段），不是原始的 roots ——
+  // 原始候选对象只有 { path, why }，所以 `r.exists` 永远是 undefined、这一行会**无脑**
+  // 打印"不存在"，与紧接着它自己找到的技能文件（"已存在但内容不同"）当场自相矛盾。
+  // 实测就发生在本机活体部署上：同一个技能根先被报"不存在"，下一行又从它下面读出了旧技能。
+  // （真实路径只出现在运行输出里，不写进包：包内任何文本都不许含盘符绝对路径，
+  //  随包自检的 M5 就是在守这一条 —— 写这条注释时已经被它拦下过一次。）
+  // B1.14 用两跑钉住它：第一跑该根还不存在（说不存在）、第二跑已建好（说存在）。
+  for (const r of skillState.roots) emit(`  [提示] 技能根目录候选：${r.path}（${r.why}；${r.exists ? '存在' : '不存在'}）`);
   if (opts.skipSkill) {
     emit(`  [跳过] 已指定 --skip-skill，跳过技能安装与校验（目标本应是 ${skillTarget}）`);
     skillState.action = 'skipped-by-flag';
