@@ -198,14 +198,17 @@ Invoke-RestMethod -Method Post http://127.0.0.1:3080/api/team-flowise/task/rewor
 |---|---|---|---|---|---|
 | 1 | `team_list_agents` | 列出角色定义 | 无（不接受任何参数） | — | `{ ok, agents:[{id,name,role}] }` |
 | 2 | `team_create_agent` | 新建/修改一个角色定义 | 无（但至少给 `name` 或 `role`） | `id`、`name`、`role`、`systemPrompt`、`provider`、`model`、`reasoningEffort`、`maxTokens`、`timeoutMs`、`toolsPreset` | `{ ok, id, name, provider, model, reasoningEffort, maxTokens, timeoutMs, toolsPreset, warning }` |
-| 3 | `team_create_workflow` | 声明一条多角色工作流（节点图） | `name` | `description`、`nodes`、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`）、`prompt` | `{ ok, id, name, nodeCount }` |
-| 4 | `team_run_workflow` | 启动工作流，阻塞到整次运行结束 | `workflowId` | `input`、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`） | `{ ok, runId, status }` |
+| 3 | `team_create_workflow` | 声明一条多角色工作流（节点图） | `name` | `description`、`nodes`、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`）、`prompt`、`haltOnFailure`、`inheritContext` | `{ ok, id, name, nodeCount }` |
+| 4 | `team_run_workflow` | 启动工作流，阻塞到整次运行结束 | `workflowId` | `input`、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`）、`inheritContext` | `{ ok, runId, status }` |
 | 5 | `team_delegate_agent` | 把一件事交给一个角色，阻塞到该子代理结束 | `agent`、`task` | `acceptanceCriteria`、`reviewer` | `{ ok, taskId, status, output }` |
 | 6 | `team_create_task` | **只登记**一条台账任务 | `requirement`、`acceptanceCriteria`、`assignee` | `reviewer` | `{ ok, id, status }`（`status` 恒为 `queued`） |
 | 7 | `team_task_status` | 读台账（任务级） | 无（不接受任何参数） | — | `{ ok, taskCount, tasks:[{id,status,iteration,assignee}] }` |
 
-节点（`nodes` 的值）字段：`title`、`agent`、`dependsOn`、`reviewer`、`taskTemplate`（`requirement` / `acceptanceCriteria`）、`promptAddon`、`route`、`maxRework`、`mode`、`gate`。
+节点（`nodes` 的值）字段：`title`、`agent`、`dependsOn`、`reviewer`、`taskTemplate`（`requirement` / `acceptanceCriteria`）、`promptAddon`、`route`、`maxRework`、`mode`、`gate`、`timeoutMs`、`inheritContext`、`inheritMaxEvents`。
 工作流级 `review` 字段：`reviewer`、`maxRework`、`enabled`。
+工作流级其余字段：`name`、`description`、`nodes`、`route`、`prompt`、`haltOnFailure`、`inheritContext`、`inheritMaxEvents`；运行级另有 `route`、`input`（`inheritContext` / `inheritMaxEvents` 也可在运行级声明）。
+
+上表「可选」列是**工具参数**；schema 字段比工具参数多：`inheritMaxEvents`（节点 / 工作流 / 运行级）与 `timeoutMs`（节点级）**不在任何工具的注册参数里**，只能通过 `POST /api/team-flowise/workflow`、`POST /api/team-flowise/run/start` 或界面写入。二者的区别值得记一句：**工具面**就是上表那 7 个（宿主工具注册处注册的），**schema** 是记录真正能存下的字段；只写工具面就会漏掉一半旋钮。这张表确实漏过一次——`haltOnFailure`（P13 加的）与 `inheritContext`（P16 加的）都没跟上，而当时没有任何检查会发现（宿主侧的文档校验只查「文档写的参数名是不是真的」，不查「真的参数有没有都写进文档」）。现在补上了反方向：对着**编译后的工具 schema** 逐工具核对该表，漏一个即红。
 
 ### 3.1 坑（按踩到概率排序）
 

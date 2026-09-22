@@ -19,10 +19,15 @@
 //   E  documentation         -- skills/team-flowise/SKILL.md: frontmatter, and
 //      the tool-name set cross-checked against group A's captured registrations
 //      (ONE source of truth, so a host rename reddens this instead of letting
-//      two hand-written lists drift apart).
-//   F  mutation proof        -- runs THIS file against three deliberately broken
-//      copies of the real code (built in the temp dir, deleted immediately) and
-//      asserts each one really turns the matching checks red.
+//      two hand-written lists drift apart). E4 adds the parameter-coverage
+//      direction: every parameter the COMPILED schemas expose must be named in
+//      that tool's §3 table row. E3 only ever asked the other way round, which is
+//      how `haltOnFailure` and `inheritContext` went missing from that table.
+//   F  mutation proof        -- runs THIS file against four deliberately broken
+//      copies of the real code or skill (built in the temp dir, deleted
+//      immediately) and asserts each one really turns the matching checks red.
+//      M4 additionally asserts E3.1 stayed GREEN -- the omission was invisible to
+//      that direction by construction, and the suite now measures it.
 //
 // Usage:
 //   node validation/p12-usability.mjs                 # the real repository code
@@ -60,7 +65,7 @@ const INSTALL_SRC = process.env.P12_INSTALL_SRC && process.env.P12_INSTALL_SRC.t
   : join(REPO, 'scripts/install.mjs')
 const UNINSTALL_SRC = join(REPO, 'scripts/uninstall.mjs')
 const PKG_DIR = join(REPO, 'packages/team-flowise')
-const SKILL = join(REPO, 'skills/team-flowise/SKILL.md')
+const SKILL = process.env.P12_SKILL ? resolve(process.env.P12_SKILL) : join(REPO, 'skills/team-flowise/SKILL.md')
 
 let checks = 0
 let failures = 0
@@ -1412,6 +1417,66 @@ let skillFront = null
     tableParams.every((k) => accepted.has(k)), tableParams.filter((k) => !accepted.has(k)).join(',') || 'all accepted')
 }
 
+// ---------------------------------------------------------------------------
+// E4. THE OTHER DIRECTION of E3 -- and the reason the §3 table was allowed to be
+//     wrong for two releases.
+//
+//     E3 asks "does the doc invent a parameter the host does not have?". The
+//     opposite question -- "does the doc name every parameter the tool really
+//     has?" -- had no assertion anywhere. So the §3 table silently lost
+//     `haltOnFailure` (P13) and `inheritContext` (P16) on `team_create_workflow`,
+//     and `inheritContext` on `team_run_workflow`, while E3.1 stayed green the
+//     whole time: every name the table did list was real. A table missing half a
+//     tool's knobs is wrong in the direction a reader notices last -- they declare
+//     a workflow with no fail-fast and no context policy and never learn those
+//     knobs exist.
+//
+//     Rows are compared against the COMPILED schemas captured in group A (the real
+//     `defineTool` output), so a host-side parameter addition reddens this instead
+//     of drifting. Mutation M4 restores the table exactly as 0.1.0 shipped it and
+//     asserts E4.2 red while E3.1 stays GREEN -- that pair is the mechanical proof
+//     that the old check could not have caught the omission.
+// ---------------------------------------------------------------------------
+{
+  // Recursive: `route`'s sub-keys are documented inline in the same row, so a new
+  // nested key has to be listed there too.
+  const collectParams = (schema, out) => {
+    if (schema === null || typeof schema !== 'object') return out
+    for (const [k, v] of Object.entries(schema.properties || {})) {
+      out.add(k)
+      if (v !== null && typeof v === 'object' && v.properties) collectParams(v, out)
+    }
+    return out
+  }
+  const rowNames = (toolName) => {
+    const row = new RegExp('^\\|\\s*\\d+\\s*\\|\\s*`' + toolName + '`\\s*\\|.*$', 'm').exec(skillBody)
+    if (row === null) return null
+    return new Set([...row[0].matchAll(/`([A-Za-z][A-Za-z0-9_]*)`/g)].map((m) => m[1]))
+  }
+  // Kept EXPLICIT and NARROW, exactly like DOC_ONLY above: a parameter deliberately
+  // left out of the compact table has to be named here one by one, so this escape
+  // hatch cannot quietly grow into "the table is allowed to be wrong".
+  const ROW_OMIT_OK = new Set([])
+  const noRow = []
+  const uncovered = []
+  for (const d of defs) {
+    const names = rowNames(d.name)
+    if (names === null) { noRow.push(d.name); continue }
+    for (const p of collectParams(d.parameters, new Set())) {
+      if (!names.has(p) && !ROW_OMIT_OK.has(d.name + '.' + p)) uncovered.push(d.name + '.' + p)
+    }
+  }
+  check('E4.1 §3 工具表给每个注册工具都有一行（缺一行 = 该工具的整张参数表都不在文档里）',
+    noRow.length === 0, noRow.join(',') || 'all ' + defs.length + ' tools have a row')
+  check('E4.2 [E3 的另一半·反方向] §3 工具表列出了每个工具编译后 schema 里的**全部**参数名（含 route 子键）—— 漏一个即红：本项就是 haltOnFailure / inheritContext 当年能漏掉而 E3 全绿的原因',
+    uncovered.length === 0, uncovered.join(', ') || 'all parameters covered')
+  const union = new Set()
+  for (const d of defs) collectParams(d.parameters, union)
+  check('E4.3 反向自检：参数真值确实取自编译后的 schema，且并集里含那三个曾经漏掉的参数名（否则本组是空转）',
+    union.size >= 20 && ['haltOnFailure', 'inheritContext', 'timeoutMs'].every((p) => union.has(p)),
+    'union=' + union.size + ' haltOnFailure=' + union.has('haltOnFailure') + ' inheritContext=' + union.has('inheritContext') + ' timeoutMs=' + union.has('timeoutMs'))
+}
+
 // ===========================================================================
 console.log('\n--- GROUP F: 变异测试（真的让检查变红，然后再恢复） ---')
 // ---------------------------------------------------------------------------
@@ -1534,6 +1599,33 @@ if (process.env.P12_SKIP_MUTATIONS === '1') {
       }
     } catch (e) { check('F0.3 [夹具] M3 变异体构造失败', false, String(e && e.message ? e.message : e)) }
   }
+  // M4: restore the §3 tool table EXACTLY as 0.1.0 shipped it -- the two rows lose
+  // the parameters P13 and P16 added. This is the only mutation here that also
+  // asserts a check stayed GREEN, because that is the whole point: E3.1 must not
+  // move. "The doc names a parameter that does not exist" and "the doc omits a
+  // parameter that does" are different questions, and only the first one was ever
+  // asked -- which is why the omission survived two releases.
+  {
+    const M4 = join(MUT_TMP, 'skill-m4-tooltable.md')
+    try {
+      let t = readFileSync(SKILL, 'utf8')
+      const n1 = '、`prompt`、`haltOnFailure`、`inheritContext` |'
+      const n2 = '、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`）、`inheritContext` |'
+      if (t.indexOf(n1) === -1) check('F0.4 [夹具] 变异靶点 M4 的 team_create_workflow 行替换串存在（找不到 = 测试自己过期，必须红）', false, 'needle1 not found')
+      else if (t.indexOf(n2) === -1) check('F0.4 [夹具] 变异靶点 M4 的 team_run_workflow 行替换串存在（找不到 = 测试自己过期，必须红）', false, 'needle2 not found')
+      else {
+        t = t.split(n1).join('、`prompt` |')
+        t = t.split(n2).join('、`route`（`provider`/`model`/`reasoningEffort`/`maxTokens`） |')
+        writeFileSync(M4, t, 'utf8')
+        mutations.push({
+          id: 'M4', what: '把 §3 工具表退回 0.1.0 出厂状态（team_create_workflow 少 haltOnFailure+inheritContext、team_run_workflow 少 inheritContext）',
+          expectLabels: ['E4.2'],
+          expectStillGreen: ['E3.1'],
+          env: { P12_SKILL: M4, P12_SKIP_MUTATIONS: '1' },
+        })
+      }
+    } catch (e) { check('F0.4 [夹具] M4 变异体构造失败（夹具问题，不是被测代码问题）', false, String(e && e.message ? e.message : e)) }
+  }
   for (const m of mutations) {
     try {
       const run = runThisSuite(m.env)
@@ -1548,12 +1640,21 @@ if (process.env.P12_SKIP_MUTATIONS === '1') {
       check('F.' + m.id + '.3 [' + m.what + '] 红在"检查"上而不是套件崩溃：SUMMARY 打印了，且没有 FATAL / 未捕获异常',
         run.stdout.indexOf('FATAL') === -1 && run.stdout.indexOf('未捕获异常') === -1 && run.stdout.indexOf('=== SUMMARY ===') !== -1 && run.stdout.indexOf('RESULT: FAIL') !== -1,
         'fatal=' + String(run.stdout.indexOf('FATAL') !== -1) + ' summary=' + String(run.stdout.indexOf('=== SUMMARY ===') !== -1))
+      // Optional: labels that must NOT move. M4 uses it because "this mutation is
+      // invisible to the one-directional check" IS the finding being asserted --
+      // proving it here is what turns "the old check could not have caught it" from
+      // a claim into a measurement.
+      if (Array.isArray(m.expectStillGreen)) {
+        const moved = m.expectStillGreen.filter((want) => labels.some((l) => l.indexOf(want) === 0))
+        check('F.' + m.id + '.4 [' + m.what + '] 这次变异对 E3 那个方向的检查是**隐形**的（' + m.expectStillGreen.join(' / ') + ' 仍然绿）—— 这正是它能活下来的原因，不是套件漏跑',
+          moved.length === 0, moved.length === 0 ? 'still green: ' + m.expectStillGreen.join(',') : 'unexpectedly red: ' + moved.join(','))
+      }
       console.log('       [变异 ' + m.id + ' 原始输出] exit=' + String(run.code) + ' ' + String(stats && ('checks=' + stats.checks + ' failures=' + stats.failures)))
       for (const l of labels.slice(0, 8)) console.log('         FAILED>> ' + l)
     } catch (e) { blockFailure('F.' + m.id + ' 变异运行', e) }
   }
   const copiedBack = []
-  for (const f of ['host-m1-description.js', 'host-m2-selectrun.js', 'install-m3-nodedup.mjs']) {
+  for (const f of ['host-m1-description.js', 'host-m2-selectrun.js', 'install-m3-nodedup.mjs', 'skill-m4-tooltable.md']) {
     const inRepo = join(PKG_DIR, 'src', f)
     if (existsSync(inRepo)) copiedBack.push(inRepo)
     const inScripts = join(REPO, 'scripts', f)
