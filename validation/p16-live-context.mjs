@@ -149,6 +149,11 @@ const totals = (rows) => rows.reduce((acc, r) => {
   acc.measured += 1
   return acc
 }, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, requests: 0, measured: 0 })
+// Defined HERE, not down in the reporting block: the budget arm reports its own
+// totals, and a `const` declared later is a temporal-dead-zone error. That is
+// exactly what happened on the first three-arm run -- the arm's own checks passed,
+// the summary then crashed, and the numbers it existed to print were lost.
+const fmt = (t) => 'requests=' + t.requests + ' input=' + t.inputTokens + ' cacheRead=' + t.cacheReadTokens + ' cacheWrite=' + t.cacheWriteTokens + ' output=' + t.outputTokens + ' (measured nodes=' + t.measured + '/2)'
 
 let created = false
 try {
@@ -252,7 +257,6 @@ try {
   }
 
   console.log('\n--- measured usage (this is the answer, not an estimate) ---')
-  const fmt = (t) => 'requests=' + t.requests + ' input=' + t.inputTokens + ' cacheRead=' + t.cacheReadTokens + ' cacheWrite=' + t.cacheWriteTokens + ' output=' + t.outputTokens + ' (measured nodes=' + t.measured + '/2)'
   console.log('  ON  ' + fmt(tOn))
   console.log('  OFF ' + fmt(tOff))
   console.log('  per node:')
