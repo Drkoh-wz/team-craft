@@ -678,6 +678,38 @@ export function seededEventCount(events) {
   return n;
 }
 
+/**
+ * The token usage of a child's OWN work, EXCLUDING the conversation it inherited.
+ *
+ * This distinction is not cosmetic -- it was a real measurement defect, caught by
+ * the live A/B on P16's first run. A forked child's session log REPLAYS the seeded
+ * parent events, and those inherited `assistant/message` events carry the PARENT's
+ * usage. Summing the whole log therefore reported the parent's history as the
+ * child's cost: the probe node measured 1634 requests / 3.37M input / 389M cache
+ * reads / 1.53M output for a task whose answer is one word, while the fresh arm
+ * measured 1 request / 1314 input / 2 output. The number was not slightly wrong;
+ * it was the parent's bill.
+ *
+ * The boundary is the child's own `session/end-seed` marker (everything up to and
+ * including it is inherited). When the marker is present but carries no usable seq,
+ * the honest answer is UNKNOWN (null) -- summing everything would repeat the
+ * defect, and summing nothing would understate it.
+ */
+export function childOwnUsage(events) {
+  if (!Array.isArray(events)) return null;
+  let hasMarker = false;
+  let boundary = null;
+  for (const e of events) {
+    if (e === null || e === undefined || e.type !== 'session/end-seed') continue;
+    hasMarker = true;
+    const seq = e.seq;
+    boundary = typeof seq === 'number' && isFinite(seq) && seq >= 0 ? seq + 1 : null;
+  }
+  if (hasMarker && boundary === null) return null;
+  const since = boundary === null ? 0 : boundary;
+  return sumUsage(events.filter((e) => !(e !== null && e !== undefined && typeof e.seq === 'number') || e.seq >= since));
+}
+
 // The persona is built from three text layers, in this fixed order:
 //   role     -> agentDef.systemPrompt        (the role definition)
 //   workflow -> workflowSchema.prompt        (this flow)
@@ -1616,7 +1648,9 @@ export function apply(ctx) {
   // P16: read the child's OWN measured usage (and how much it actually inherited)
   // back out of its session. This is the only honest source for "did the inherited
   // prefix really get cache reuse": the request header cannot answer it and
-  // neither can the design document. Unreadable returns null -- never a zero.
+  // neither can the design document. `childOwnUsage` excludes the replayed parent
+  // events -- counting them reported the PARENT's bill as the child's cost, which
+  // the live A/B caught on the first run. Unreadable returns null -- never a zero.
   const measureChildStats = (started) => {
     try {
       const child = started && started.run ? started.run.localAgent : undefined;
@@ -1624,7 +1658,7 @@ export function apply(ctx) {
       const session = child.session;
       if (session === undefined || session === null || typeof session.snapshotEvents !== 'function') return null;
       const events = session.snapshotEvents();
-      return { usage: sumUsage(events), seeded: seededEventCount(events) };
+      return { usage: childOwnUsage(events), seeded: seededEventCount(events) };
     } catch (e) { return null; }
   };
   // P16: one node's inheritance decision: which layer asked, which provider will

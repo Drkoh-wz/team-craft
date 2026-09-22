@@ -152,6 +152,29 @@ try {
     seeded([{ type: 'turn/start', seq: 0 }]) === null && seeded([]) === null && seeded(null) === null)
   check('A4.3 标记没有可用 seq -> null（宁可不知道，也不编一个数）',
     seeded([{ type: 'session/end-seed', data: {} }]) === null)
+
+  // A5 locks the defect the LIVE A/B found on P16's first run: a forked child's log
+  // REPLAYS the seeded parent events, and those carry the PARENT's usage. Summing
+  // the whole log reported the parent's bill as the child's cost -- 1634 requests,
+  // 3.37M input and 389M cache reads for a task whose answer is one word.
+  const own = mod.childOwnUsage
+  const FORKED = [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'assistant/message', seq: 1, data: { turn: 1, step: 1, usage: { inputTokens: 5000000, outputTokens: 1000000, cacheReadTokens: 999999 } } },
+    { type: 'session/end-seed', seq: 2, data: { inherited: true } },
+    { type: 'assistant/message', seq: 3, data: { turn: 1, step: 1, usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 } } },
+  ]
+  const ownForked = own(FORKED)
+  check('[A5.1 活体 A/B 抓到的缺陷] 继承来的历史不计入子代理自己的用量：只算 end-seed 之后的消息',
+    ownForked !== null && ownForked.inputTokens === 100 && ownForked.cacheReadTokens === 900 && ownForked.requests === 1,
+    JSON.stringify(ownForked))
+  check('A5.2 没有 end-seed 标记 = 全新子代理，整份日志都算它自己的',
+    JSON.stringify(own([{ type: 'assistant/message', seq: 1, data: { usage: { inputTokens: 7, outputTokens: 3 } } }]))
+    === JSON.stringify({ requests: 1, inputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, cacheHitRate: 0 }),
+    JSON.stringify(own([{ type: 'assistant/message', seq: 1, data: { usage: { inputTokens: 7, outputTokens: 3 } } }])))
+  check('A5.3 有标记但没有可用 seq -> null（不知道新工作从哪开始；把整份算进去就是重犯这个缺陷）',
+    own([{ type: 'assistant/message', seq: 1, data: { usage: { inputTokens: 7 } } }, { type: 'session/end-seed', data: {} }]) === null)
+  check('A5.4 非数组 / 空日志不抛异常 -> null', own(null) === null && own([]) === null)
 } catch (e) { blockFailure('A 纯函数', e) }
 
 /* ------------------------------------------------------------------ harness */
@@ -251,6 +274,10 @@ async function mount(providers, usageEvents) {
 
 const USAGE = [
   { type: 'turn/start', seq: 0, data: { turn: 1 } },
+  // An INHERITED assistant message: the parent's own usage, replayed into the
+  // child's log. It is deliberately enormous so that counting it (the live defect)
+  // is impossible to miss in the assertions below.
+  { type: 'assistant/message', seq: 1, data: { turn: 1, step: 1, usage: { inputTokens: 5000000, outputTokens: 1000000, cacheReadTokens: 999999 } } },
   // The fork's seed boundary marker: everything up to and including seq 2 was
   // inherited from the parent log.
   { type: 'session/end-seed', seq: 2, data: { inherited: true } },
@@ -368,8 +395,8 @@ try {
 
   // B8/B9: the measured evidence.
   const u = (run1.nodeStates.n1.context || {}).usage
-  check('B8.1 [核心] 实测用量被读回并记在节点上：cacheReadTokens / inputTokens / outputTokens',
-    u !== null && u !== undefined && u.cacheReadTokens === 900 && u.inputTokens === 100 && u.outputTokens === 20,
+  check('B8.1 [核心] 实测用量被读回并记在节点上，且只算子代理自己的请求（继承来的父级历史不算）',
+    u !== null && u !== undefined && u.cacheReadTokens === 900 && u.inputTokens === 100 && u.outputTokens === 20 && u.requests === 1,
     JSON.stringify(u))
   check('B8.2 命中率按 cacheRead/(input+cacheRead) 算出来，不是一个形容词',
     u !== null && u !== undefined && u.cacheHitRate === 0.9, u ? 'cacheHitRate=' + u.cacheHitRate : 'null')
@@ -418,60 +445,80 @@ try {
 /* ------------------------------------------------------------------ group D */
 // Falsification: take the repository source, break exactly one thing, and require
 // this suite to go red on it. A behavioural suite that has never been seen to fail
-// is a suite that proves nothing.
-console.log('\n--- GROUP D: 本套件真的会红（把 fork 派发改回 spawn 的变异） ---')
+// is a suite that proves nothing. Two mutations, because the live A/B proved that
+// the second defect class is real and invisible to the first.
+console.log('\n--- GROUP D: 本套件真的会红（两个变异：派发 / 用量口径） ---')
+const MUTATIONS = [
+  {
+    tag: 'M1',
+    what: '把 fork 派发改回写死 spawn（功能变成谎言）',
+    from: 'subagentsSvc.start(provider, merged)',
+    to: "subagentsSvc.start('spawn', merged)",
+    expect: /^B1\.1|^B1\.3|^B6\.2/,
+    min: 2,
+    label: '真的走了 fork',
+  },
+  {
+    tag: 'M2',
+    what: '用量统计改回"整份日志求和"（把父级历史算成子代理成本 —— 活体 A/B 抓到的那个缺陷）',
+    // The call site, not the declaration: replacing `childOwnUsage(events)`
+    // everywhere also rewrites `export function childOwnUsage(events)`, which is a
+    // syntax error rather than a mutation (the child then reports "cannot import"
+    // instead of going red on the usage checks -- a mutation that mutates nothing).
+    from: 'usage: childOwnUsage(events)',
+    to: 'usage: sumUsage(events)',
+    expect: /^B8\.1/,
+    min: 1,
+    label: '只算子代理自己的用量',
+  },
+]
 if (MUTATION_MODE) {
   console.log('  ...  变异模式（P16_SRC 已设置）-> 不再递归跑反证')
 } else if (CHILD) {
   console.log('  ...  子进程模式（P16_CHILD=1）-> 不再递归跑反证')
 } else {
-  const mutDir = mkdtempSync(join(tmpdir(), 'tf-p16-mut-'))
-  try {
-    const mutFile = join(mutDir, 'index.mjs')
-    const text = readFileSync(SRC, 'utf8')
-    // The mutation: keep every declaration and every record, but never actually
-    // dispatch to the discovering provider -- i.e. the feature is silently a lie.
-    const mutated = text.replace(
-      'subagentsSvc.start(provider, merged)',
-      "subagentsSvc.start('spawn', merged)")
-    check('D1.0 变异确实施加在源码上（否则本组是空转）', mutated !== text, 'changed=' + String(mutated !== text))
-    copyFileSync(SRC, join(mutDir, 'index.mjs.orig'))
-    // The copy needs the same module resolution as the original, so it is placed
-    // NEXT TO it rather than in the temp dir.
-    const sideFile = join(dirname(SRC), '.p16-mutated-index.mjs')
-    writeFileSync(sideFile, mutated, 'utf8')
+  for (const mut of MUTATIONS) {
+    const sideFile = join(dirname(SRC), '.p16-mutated-index-' + mut.tag + '.mjs')
     try {
-      const out = execFileSync(process.execPath, [fileURLToPath(import.meta.url)], {
-        cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, P16_SRC: sideFile, P16_CHILD: '1' },
-      })
-      check('D1.1 把 fork 派发改回 spawn，本套件必须变红', false, 'exit=0 (it stayed green) :: ' + out.slice(0, 160))
-    } catch (e) {
-      const stdout = String(e.stdout || '')
-      const status = e.status === undefined || e.status === null ? -1 : e.status
-      const labels = (() => {
-        const at = stdout.indexOf('failed checks:')
-        if (at === -1) return []
-        return stdout.slice(at).split('\n').slice(1).map((l) => l.replace(/^\s*-\s*/, '').trim()).filter((l) => l !== '')
-      })()
-      check('D1.1 把 fork 派发改回 spawn，本套件必须变红', status === 1, 'exit=' + status)
-      check('D1.2 变红的正是"真的走了 fork"那几条（B1.1 / B1.3 / B6.2）',
-        labels.filter((l) => /^B1\.1|^B1\.3|^B6\.2/.test(l)).length >= 2,
-        'hit=' + labels.filter((l) => /^B/.test(l)).map((l) => l.slice(0, 4)).join(',') || 'none')
-      check('D1.3 红在"检查"上而不是套件崩溃：SUMMARY 打印了，且没有未捕获异常',
-        stdout.includes('=== SUMMARY ===') && !/未捕获异常/.test(stdout), 'summary=' + stdout.includes('=== SUMMARY ==='))
-      const m = /checks=(\d+)\s+failures=(\d+)/.exec(stdout)
-      if (m) console.log('       [变异原始输出] exit=' + status + ' checks=' + m[1] + ' failures=' + m[2])
-    } finally {
+      const text = readFileSync(SRC, 'utf8')
+      const mutated = text.split(mut.from).join(mut.to)
+      check('D' + mut.tag + '.0 ' + mut.what + '：变异确实施加在源码上（否则本组是空转）',
+        mutated !== text, 'changed=' + String(mutated !== text))
+      if (mutated === text) continue
+      writeFileSync(sideFile, mutated, 'utf8')
+      try {
+        const out = execFileSync(process.execPath, [fileURLToPath(import.meta.url)], {
+          cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, P16_SRC: sideFile, P16_CHILD: '1' },
+        })
+        check('D' + mut.tag + '.1 ' + mut.what + ' -> 本套件必须变红', false, 'exit=0 (it stayed green) :: ' + out.slice(0, 160))
+      } catch (e) {
+        const stdout = String(e.stdout || '')
+        const status = e.status === undefined || e.status === null ? -1 : e.status
+        const labels = (() => {
+          const at = stdout.indexOf('failed checks:')
+          if (at === -1) return []
+          return stdout.slice(at).split('\n').slice(1).map((l) => l.replace(/^\s*-\s*/, '').trim()).filter((l) => l !== '')
+        })()
+        check('D' + mut.tag + '.1 ' + mut.what + ' -> 本套件必须变红', status === 1, 'exit=' + status)
+        check('D' + mut.tag + '.2 变红的正是"' + mut.label + '"那几条',
+          labels.filter((l) => mut.expect.test(l)).length >= mut.min,
+          'hit=' + labels.filter((l) => /^B/.test(l)).map((l) => l.slice(0, 4)).join(',') || 'none')
+        check('D' + mut.tag + '.3 红在"检查"上而不是套件崩溃：SUMMARY 打印了，且没有未捕获异常',
+          stdout.includes('=== SUMMARY ===') && !/未捕获异常/.test(stdout), 'summary=' + stdout.includes('=== SUMMARY ==='))
+        const m = /checks=(\d+)\s+failures=(\d+)/.exec(stdout)
+        if (m) console.log('       [' + mut.tag + ' 原始输出] exit=' + status + ' checks=' + m[1] + ' failures=' + m[2])
+      }
+    } catch (e) { blockFailure('D' + mut.tag + ' 变异反证', e) } finally {
       try { rmSync(sideFile, { force: true }) } catch { /* ignore */ }
     }
-  } catch (e) { blockFailure('D 变异反证', e) } finally {
-    try { rmSync(mutDir, { recursive: true, force: true }) } catch { /* ignore */ }
   }
-  check('D2.1 变异副本没有留在仓库里（仓库源码零改动）',
-    !existsSync(join(dirname(SRC), '.p16-mutated-index.mjs')), dirname(SRC))
-  check('D2.2 仓库源码仍等于被测源码（变异只存在于临时副本）',
-    readFileSync(SRC, 'utf8').indexOf("subagentsSvc.start(provider, merged)") !== -1)
+  const leftovers = MUTATIONS.filter((m) => existsSync(join(dirname(SRC), '.p16-mutated-index-' + m.tag + '.mjs')))
+  check('D3.1 变异副本没有留在仓库里（仓库源码零改动）', leftovers.length === 0,
+    leftovers.map((m) => m.tag).join(',') || dirname(SRC))
+  check('D3.2 仓库源码仍然带着两个变异点（变异只存在于临时副本）',
+    MUTATIONS.every((m) => readFileSync(SRC, 'utf8').indexOf(m.from) !== -1),
+    MUTATIONS.filter((m) => readFileSync(SRC, 'utf8').indexOf(m.from) === -1).map((m) => m.tag).join(',') || 'both present')
 }
 
 process.exit(summary() === 0 ? 0 : 1)
