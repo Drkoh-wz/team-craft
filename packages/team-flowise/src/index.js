@@ -155,7 +155,10 @@ const taskSchema = z.object({
   updatedAt: z.number().int().nonnegative(),
 });
 
-const runSchema = z.object({
+// Exported (like the other schemas) so the documentation's claim is CHECKABLE:
+// validation/p12-usability.mjs accepts a schema identifier named in SKILL.md only
+// when this module really exports it, which keeps "the doc invented a name" red.
+export const runSchema = z.object({
   id: z.string().min(1),
   workflowId: z.string().optional(),
   // P13 adds `halted`. It is NOT a synonym for `failed`: `failed` means every
@@ -875,6 +878,98 @@ function canonCriterion(v) {
     .replace(/[，。、；：！？“”‘’（）《》【】·…—～,.;:!?"'()<>[\]{}\-_/\\|`~@#$%^&*+=]/g, '');
 }
 
+/* ------------------------------------------------------- R9: READ the verdict */
+
+// R9 -- the reviewer's conclusion must be READ, never assumed.
+//
+// Before this rule the verdict came from exactly ONE key (`verdict`) compared
+// against exactly ONE token (`'rework'`), and everything else fell through to
+// `pass` with an empty notes array. Measured on the pre-fix build:
+//
+//   {overall_verdict:'FAIL', required_corrections:[...]}        -> pass, notes=[]
+//   {findings:[{severity:'blocking',criterion,evidence}]}        -> pass, notes=[]   blockingCount:1 !
+//   {verdict:'FAIL'} / {verdict:'lgtm'} / {verdict:'通过'}       -> pass, notes=[]
+//
+// So a reviewer that concluded FAIL was recorded as a clean pass, and the ledger
+// could contradict itself (verdict `pass` next to `blockingCount: 1`). The first
+// shape is what a specialization pack naturally emits -- the leasing pack's
+// native contract is `overall_verdict` / `required_corrections` -- so this was
+// reachable in practice, not hypothetically.
+//
+// R9 keeps the existing one-way invariants intact:
+//   * R2/R3/R4 still only DOWNGRADE. Nothing here can promote a non-blocking
+//     finding, so a reviewer using the wrong enum names still cannot cause rework.
+//   * R6 still refuses a bare `verdict:'rework'` with nothing blocking; those
+//     payloads are pinned by p10-review and are deliberately unchanged.
+// What it adds:
+//   * the conclusion is read from a set of keys and a normalized vocabulary, so
+//     "FAIL"/"fail"/"Failed"/"通过"/"驳回" are all understood;
+//   * a surviving blocking finding OUTRANKS the verdict string: a payload that
+//     says `pass` while carrying an R2/R3/R4-validated blocker is a rework, and
+//     the contradiction is recorded as a note;
+//   * a conclusion that cannot be read is reported as `error` with a note naming
+//     the key and the value -- never as a silent pass. `error` deliberately does
+//     not block the node (R1's principle: a reviewer's deficiency is the
+//     reviewer's problem), but it does stop the run from claiming a review
+//     happened.
+export const REVIEW_VERDICT_KEYS = ['verdict', 'overall_verdict', 'final_verdict', 'review_verdict', 'conclusion', 'decision'];
+const VERDICT_POSITIVE = ['pass', 'passed', 'ok', 'okay', 'approve', 'approved', 'accept', 'accepted', 'lgtm', 'good', '通过', '合格', '批准', '同意'];
+const VERDICT_NEGATIVE = ['rework', 'fail', 'failed', 'failure', 'reject', 'rejected', 'block', 'blocked', 'changesrequested', 'requestchanges', 'needsrework', 'needswork', 'revise', '返工', '不通过', '未通过', '拒绝', '不合格', '驳回'];
+const VERDICT_CONDITIONAL = ['conditionalpass', 'conditionallyapproved', 'passwithcomments', 'passwithminorissues', '有条件通过'];
+
+/** Fold a verdict token to a comparable form: trim, lowercase, drop separators. */
+export function canonReviewVerdict(value) {
+  return String(value === undefined || value === null ? '' : value).trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+/** 'positive' | 'negative' | 'conditional' | 'unreadable' | 'absent' for one token. */
+export function classifyReviewVerdict(value) {
+  const token = canonReviewVerdict(value);
+  if (token === '') return 'absent';
+  if (VERDICT_POSITIVE.indexOf(token) !== -1) return 'positive';
+  if (VERDICT_NEGATIVE.indexOf(token) !== -1) return 'negative';
+  if (VERDICT_CONDITIONAL.indexOf(token) !== -1) return 'conditional';
+  return 'unreadable';
+}
+
+/**
+ * Resolve the reviewer's conclusion out of REVIEW_VERDICT_KEYS.
+ *
+ * The FIRST key carrying a recognized class decides; an unreadable token only
+ * decides when no key carried a recognized one. `conflicts` lists the other
+ * present keys whose class disagrees -- evidence for the notes, never control
+ * flow (a payload that says two things must not become unpredictable).
+ */
+export function resolveReviewVerdict(raw) {
+  const src = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const seen = [];
+  let decided = null;
+  let unreadable = null;
+  for (const key of REVIEW_VERDICT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+    const value = src[key];
+    // A nested object under a verdict key is not a verdict token. (Reading it as
+    // one would mean `verdict: {...}` classified as an unreadable token and
+    // turned every such payload into an error.)
+    if (value !== null && typeof value === 'object') continue;
+    const kind = classifyReviewVerdict(value);
+    if (kind === 'absent') continue;
+    const entry = { key, kind, value: String(value), native: key === 'verdict' };
+    seen.push(entry);
+    if (kind !== 'unreadable' && decided === null) decided = entry;
+    if (kind === 'unreadable' && unreadable === null) unreadable = entry;
+  }
+  const chosen = decided !== null ? decided : unreadable;
+  return {
+    kind: chosen === null ? 'absent' : chosen.kind,
+    key: chosen === null ? null : chosen.key,
+    value: chosen === null ? null : chosen.value,
+    native: chosen === null ? false : chosen.native,
+    conflicts: chosen === null ? [] : seen.filter((e) => e !== chosen && e.kind !== chosen.kind && e.kind !== 'unreadable'),
+    seen,
+  };
+}
+
 // The mechanical fallback layer. Every rule below is a pure function of the
 // raw payload, so the same reviewer output always normalises to the same
 // verdict -- no "judgement calls" anywhere. Each intervention appends one
@@ -999,18 +1094,70 @@ export function normalizeReview(raw, opts) {
   const rawScore = typeof raw.score === 'number' && isFinite(raw.score) ? Math.round(raw.score) : null;
   result.score = rawScore === null ? null : Math.max(0, Math.min(100, rawScore));
   const rawSummary = typeof raw.summary === 'string' ? raw.summary.trim() : '';
-  const wantsRework = raw.verdict === 'rework';
+  // R9 -- read the conclusion instead of assuming one (see REVIEW_VERDICT_KEYS).
+  const conclusion = resolveReviewVerdict(raw);
+  const token = conclusion.key === null ? null : canonReviewVerdict(conclusion.value);
+  // R6's contract is OURS, so its self-contradiction reasoning applies only when
+  // the reviewer used our key AND our word for it. `verdict:'rework'` therefore
+  // keeps the pass-rounding p10-review pins; every other refusal spelling
+  // (a foreign key, or an alias token like FAIL / 驳回) is handled below instead.
+  const contractRework = conclusion.native && conclusion.kind === 'negative' && token === 'rework';
+  const aliasNegative = conclusion.kind === 'negative' && !contractRework;
+  if (conclusion.key === null) {
+    notes.push('R9：评审对象里没有可识别的结论字段（' + REVIEW_VERDICT_KEYS.join(' / ') + '），按"评审者未给出结论"处理；没有阻塞项时不影响结论');
+  } else {
+    if (conclusion.conflicts.length > 0) {
+      notes.push('R9：结论字段互相矛盾（' + conclusion.seen.map((e) => e.key + '=' + JSON.stringify(e.value)).join(' vs ') + '），以 ' + conclusion.key + ' 为准');
+    }
+    if (conclusion.kind === 'conditional') {
+      notes.push('R9：评审者的结论是有条件通过（' + conclusion.key + '=' + JSON.stringify(conclusion.value) + '），按通过处理；附加条件本身以 findings / resolved 记录为准');
+    } else if (conclusion.kind === 'positive' && !(conclusion.native && token === 'pass')) {
+      notes.push('R9：结论 ' + conclusion.key + '=' + JSON.stringify(conclusion.value) + (conclusion.native ? ' 不是契约词汇（契约是 pass | rework）' : ' 写在非契约字段上（契约字段是 verdict）') + '，按其本意按通过处理');
+    }
+  }
   // R6 -- "rework" with nothing blocking is self-contradictory; without this the
   // verdict string alone could stretch a task with no stated reason. A carried
   // (R7) entry is a blocking reason the reviewer itself stated, so an explicit
   // "not resolved" forces rework even when the verdict string says otherwise.
-  let verdict = (wantsRework || carried.length > 0) ? 'rework' : 'pass';
+  let verdict;
+  if (result.blockingCount > 0) {
+    // A validated blocking finding is itself the reason: it survived R2 (literal
+    // severity), R3 (criterion + evidence) and R4 (not a new blocker on a
+    // re-review). Letting a string field veto it would ship an acknowledged
+    // blocker as a pass -- measured before R9: `blockingCount: 1` next to
+    // `verdict: 'pass'`, with no note at all.
+    verdict = 'rework';
+    if (conclusion.kind === 'positive') {
+      notes.push('R9：结论字符串说通过（' + conclusion.key + '=' + JSON.stringify(conclusion.value) + '），但有 ' + String(result.blockingCount) + ' 条通过 R2/R3/R4 的阻塞项，按 rework 处理（可验证的阻塞项优先于结论字符串）');
+    }
+  } else if (conclusion.kind === 'unreadable') {
+    verdict = 'error';
+    notes.push('R9：结论字段 ' + conclusion.key + '=' + JSON.stringify(conclusion.value) + ' 不是契约词汇（pass | rework），无法解读；本节点未经实质评审，verdict=error（不阻塞）');
+  } else if (aliasNegative) {
+    // A refusal we cannot act on: stated in someone else's vocabulary (or in an
+    // alias token), with no R2/R3/R4-validated blocking item to rework. Neither
+    // outcome of R6 is available -- rounding it to `pass` would record a clean
+    // pass for a reviewer that said FAIL, and forcing `rework` would dispatch a
+    // repair round with nothing to repair. The honest record is "not
+    // substantively reviewed", which does not block the node (R1's principle)
+    // and does not claim a review happened either.
+    verdict = 'error';
+    notes.push('R9：否定结论 ' + conclusion.key + '=' + JSON.stringify(conclusion.value) + ' 不在本契约的词汇/字段里，且没有通过 R2/R3/R4 的阻塞项可据以返工；本节点未经实质评审，verdict=error（不阻塞，也不许静默通过）');
+  } else if (contractRework) {
+    verdict = 'rework';
+  } else {
+    verdict = 'pass';
+  }
   if (verdict === 'rework' && result.blockingCount === 0) {
     verdict = 'pass';
     notes.push('R6：结论自相矛盾：rework 但无阻塞项，按不阻塞处理，verdict 改为 pass');
   }
   result.verdict = verdict;
-  result.summary = rawSummary !== '' ? rawSummary : (verdict === 'pass' ? '评审通过（评审者未提供摘要）' : '评审要求返工（评审者未提供摘要）');
+  result.summary = rawSummary !== '' ? rawSummary : (verdict === 'pass'
+    ? '评审通过（评审者未提供摘要）'
+    : (verdict === 'error'
+      ? '评审未生效：评审者的结论无法按契约解读，本节点未经实质评审。'
+      : '评审要求返工（评审者未提供摘要）'));
   result.resolved = rawResolvedList.map((r) => {
     const src = (r !== null && typeof r === 'object' && !Array.isArray(r)) ? r : {};
     return {

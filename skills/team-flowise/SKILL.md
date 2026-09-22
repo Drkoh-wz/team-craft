@@ -298,9 +298,11 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 
 因为 verdict 与阻塞项是**绑定**的：`rework` 至少要有一条合格阻塞项，没有阻塞项就必须是 `pass`（哪怕有一堆 advisory）。这条纪律的理由是：多角色流水线的成本是「每节点一次模型调用 + 评审 + 返工」，如果主观偏好也能卡住节点，任务会永远「差一条」，收敛不了；而且返工成本会超过节点本身。
 
-### 5.3 「避免吹毛求疵」的机械兜底（R1–R6）
+这条纪律说的是**契约内**的结论。如果评审者用的是别人的词汇（例如专用团队包的 `overall_verdict: "FAIL"`），或者结论根本读不出来，那既不是 `pass` 也不是 `rework`，而是 §5.4 的 `error`：不阻塞节点，但也不假装评审发生过。
 
-提示词纪律之外，宿主还做了六条**机械**降级，任何人（包括评审模型）都绕不过去：
+### 5.3 机械兜底（R1–R9）
+
+提示词纪律之外，宿主还有九条**机械**规则，任何人（包括评审模型）都绕不过去。它们不全都是「降级」：R7/R9 可以**改判为返工**，R9 也可以把一份读不出结论的评审如实记为 `error`。
 
 | 规则 | 触发条件 | 结果 |
 |---|---|---|
@@ -310,10 +312,35 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 | **R4** | `round >= 2` 的复审里提出**新的** blocking（`criterion` 不在上一轮阻塞项集合内） | 降级为 `advisory`——**复审不得新增阻塞项**，防止「永远差一条」 |
 | **R5** | findings 超过 20 条 | 截断为前 20 条（并记一条 note），防止评审把进度接口撑爆 |
 | **R6** | `verdict = "rework"` 但 `blockingCount = 0` | 结论自相矛盾，按不阻塞处理：`verdict` 改为 `pass` |
+| **R7** | 复审（`round >= 2`）里评审者自己把上一轮某条阻塞项标为 `resolved: false` | 该条按阻塞处理并排到最前（R5 截断不许把它挤掉）——复审不得靠改写措辞绕过已判定的阻塞项 |
+| **R8** | 评审者的 JSON 第一次没解析出来 | 发起**一次**修复调用（提示里带上原始解析失败原因）；再次失败**不阻塞**节点：`verdict = error`，并在 `review.repair` 里记下 `{attempted, ok, parseError}` |
+| **R9** | 结论字段/词汇不在契约里（见 §5.4） | 读得懂就按本意处理并留 note；读不懂（否定结论但无可返工的阻塞项、非法 token）→ `verdict = error` + note，**绝不静默按通过** |
 
-降级不是静默的：每次降级都会写进该节点的 `review.notes`，所以「为什么这条没阻塞」是可查的。
+降级与改判都不是静默的：每次都会写进该节点的 `review.notes`，所以「为什么这条没阻塞 / 为什么这次没有通过」是可查的。
 
-### 5.4 返工上限
+### 5.4 结论必须被「读出来」，不能靠猜（R9，P15 起）
+
+R9 之前，结论只从**一个字段**（`verdict`）里、只认**一个词**（`rework`）读取，其余一律落到 `pass` 且**不写任何 note**。实测（修复前）：
+
+| 评审者实际返回 | 修复前的记录 |
+|---|---|
+| `{"overall_verdict": "FAIL", "required_corrections": [...]}` | `pass`，`notes=[]` |
+| `{"findings": [{"severity": "blocking", "criterion": ..., "evidence": ...}]}`（没写 verdict） | `pass` 且 `blockingCount: 1` —— 账本自相矛盾，且无任何 note |
+| `{"verdict": "FAIL"}` / `{"verdict": "驳回"}` / `{"verdict": "maybe"}` | `pass`，`notes=[]` |
+
+`overall_verdict` 正是**专用团队移植包**的原生词汇（融资租赁包就写 `overall_verdict` / `required_corrections`），所以这是一条真实可达的静默通过路径，不是理论问题。
+
+R9 的做法：
+
+- **从这些字段里找结论**（按序取第一个可识别的）：`verdict`、`overall_verdict`、`final_verdict`、`review_verdict`、`conclusion`、`decision`。
+- **词汇归一化**后判定：`pass/passed/ok/approved/lgtm/通过/合格/批准` 算通过；`rework/fail/failed/rejected/驳回/不通过/返工` 算否定；`conditional_pass/有条件通过` 算通过并留 note；其它非空 token 视为**读不懂**。
+- **通过 R2/R3/R4 的阻塞项优先于结论字符串**：一份写着 `pass`、却带着一条合格 blocking 的评审，按 `rework` 处理，并把矛盾写进 note。R6 的理由是「结论字符串**单独**不许拉长任务」，而这里有一份可验证的理由，所以不适用。
+- **读不懂的结论 = 没评审，不是通过**：`verdict = error` + 指名道姓的 note。`error` 按 R1 的原则**不阻塞**节点，但它也不会让运行假装评审发生过。注意 `error` 与「可解析」是两件事：`parseError: null` 只说明 JSON 合法。
+- **契约 token 的例外保持不变**：只有 `verdict: "rework"` 这个**契约组合**仍走 R6（`rework` + 无阻塞项 → `pass`）。别人的 `FAIL` 不是我们的 `rework`——R6 的前提是「评审者在说我们的语言但自相矛盾」。
+- **嵌套对象不算结论**：`{"verdict": {"a": 1}}` 按「没有结论字段」处理，而不是「读不懂」，否则这种载荷会全部变成 `error`。
+- 一个 payload 里两个结论字段互相矛盾时，以第一个可识别字段为准，并把两边都记进 note。
+
+### 5.5 返工上限
 
 - 单节点上限 `maxReworkPerNode = 2` 轮；节点级 `maxRework` / 工作流 `review.maxRework` 只能把它**收紧**到 0–2。
 - 整次运行总上限 `maxReworkPerRun = 3` 轮（总闸）：即使每个节点都要求返工，一次运行最多再多派发 3 次 worker。
@@ -349,6 +376,7 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 |---|---|---|
 | 面板显示「**本会话暂无运行**」 | 这不是错误，是本会话名下确实没有运行。可能是别的会话发起的，也可能是旧记录（没有 `sessionId`，归属未知） | 看 `scope`：`mode: "session"` + `runCountInScope: 0`，`hasAnyGlobal` 说明进程里别处有运行；点「看全部运行」 |
 | **角色建了，却没有评审** | 节点没写 `reviewer`，工作流级 `review` 也没写 reviewer（或写了 `enabled: false`） | 只有节点级 `reviewer`（或工作流级默认值）才会派发评审者；检查定义，`team_create_workflow` 重新声明后重跑 |
+| **评审者明明写了 FAIL/驳回，节点却显示通过** | P15/R9 之前：结论只从 `verdict` 一个字段、只认 `rework` 一个词读，其它一律**静默**落到 `pass`（`notes=[]`）。`parseError: null` 只说明 JSON 合法，不说明结论被读懂了 | R9 起读 6 个字段 + 词汇表；读不出来 → `review.verdict = error` 并在 `review.notes` 写明原因（见 §5.4）。看节点的 `review.notes` 与 `review.verdict` |
 | **节点一直 pending** | `dependsOn` 里的前置节点没完成，或写了**不存在的节点 id**（悬空依赖永远不会完成） | `/progress` 里看该节点的 `dependsOn` 与各前置节点 `status`；核对节点 id 拼写 |
 | **模型没生效** | 只声明了 `provider` 或只声明了 `model`（成对规则作废该半），或 provider 未注册 / model 不存在 / effort 不被接受 → **回退继承父级** | 看节点的 `route.warning` 与 `route.source`（`inherited` 就是回退了）、`route.effective` / `route.measured`；`GET /api/team-flowise/models` 或设置页看真实可选值；`team_create_agent` 返回的 `warning` |
 | **API 返回 401** | 本部署的网关把**未注册**的 `/api` 路径伪装成 401：宿主半没加载，或 **dsh 还没重启** | 先 `GET /api/team-flowise/ping`；确认插件行已插入并在 profile 里、然后重启 dsh（宿主代码与客户端 bundle 在启动时加载/快照） |

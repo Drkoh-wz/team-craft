@@ -1355,6 +1355,13 @@ let skillFront = null
     for (const k of Object.keys(n.taskTemplate || {})) accepted.add(k)
     for (const k of Object.keys(n.gate || {})) accepted.add(k)
   }
+  // Schema identifiers the skill names as MECHANISM (which layer enforces what),
+  // not as tool parameters. Accepted only when this module really exports them, so
+  // an invented name is still red: this widens the CONTRACT the doc may name, it
+  // does not widen the excuse list.
+  for (const name of ['runSchema', 'workflowSchema', 'workflowNodeSchema', 'agentDefSchema', 'modelSchema', 'modelRouteSchema']) {
+    if (mod[name] !== undefined) accepted.add(name)
+  }
   // Non-parameter vocabulary the skill legitimately names: the response fields of
   // /progress, /role and the task ledger, the two rework limits the plan states
   // as constants, and the UI tab label. Kept EXPLICIT and NARROW so the assertion

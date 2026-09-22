@@ -661,19 +661,31 @@ try {
 } catch (e) { blockFailure('E5 场景（R7 改写措辞）', e) }
 
 // ---------------------------------------------------------------------------
-// E6. A boundary the P13 implementation deliberately leaves alone, pinned here
-//     because it is invisible otherwise: a reviewer whose JSON says
+// E6. A boundary that used to be left alone and is now DECIDED the other way, on
+//     purpose (P15/R9). The payload is a reviewer whose JSON says
 //     `verdict: "pass"` while ALSO listing a fully qualified blocking finding.
-//     normalizeReview's R6 only rewrites the contradictory direction
-//     ("rework" with nothing blocking -> pass); it does not turn "pass with
-//     blocking findings" into a rework. The scheduler therefore honours the
-//     verdict string and the node completes -- so the unresolved-blocking halt
-//     is NOT reached, and the run is `completed`, not `halted`.
-//     This is recorded as an OBSERVATION (O1), not as a defect: no plan clause
-//     says a pass verdict with blocking findings must halt, and every assertion in
-//     group E (the ones the plan DOES require) uses the honest
-//     `verdict: "rework"` shape. The check exists so that if someone later makes
-//     this halt, the change is deliberate and this line is updated with it.
+//
+//     P13 recorded the old behaviour as an OBSERVATION (O1), not a defect, and
+//     left this note: "the check exists so that if someone later makes this halt,
+//     the change is deliberate and this line is updated with it". That is what
+//     happened. R9 reads the conclusion instead of assuming it, and a blocking
+//     finding that survives R2 (literal severity), R3 (criterion + evidence) and
+//     R4 (not a new blocker on a re-review) is itself a stated reason -- R6's
+//     rationale ("the verdict string ALONE must not stretch a task") does not
+//     apply to a payload that carries a validated reason. So the validated
+//     blocker now outranks the token, and the node ends with an unresolved
+//     blocking finding.
+//
+//     The run-level consequence changed with it: with maxRework: 0 there is no
+//     repair round to spend, so this is the second halt trigger
+//     (`unresolved-blocking`) and the downstream node is skipped. Before, the
+//     contradiction shipped as a pass with `blockingCount: 1` recorded next to
+//     `verdict: "pass"` -- a ledger that disagreed with itself, and exactly the
+//     silent-pass class P13 exists to prevent.
+//
+//     The point of keeping this scenario is unchanged: it exercises a
+//     self-contradictory reviewer and records, assertively, what the engine does
+//     with it. The node itself is still not punished (it stays `completed`).
 // ---------------------------------------------------------------------------
 try {
   const s = await scenario('pass-verdict-with-blocking',
@@ -683,12 +695,17 @@ try {
       ? { text: verdictJson({ verdict: 'pass', score: 70, findings: [blockingFinding(BLOCK_CRIT, BLOCK_EVID)] }) }
       : { text: 'WORKER-E6' }))
   const rv = s.run.nodeStates.n1.review || {}
-  check('E6.1 [观察 O1/边界] 评审者写 verdict:"pass" 但列了一条合规 blocking 时：R6 不反向改判，节点 completed、运行 completed（不会停机）',
-    rv.verdict === 'pass' && rv.blockingCount === 1 && s.run.nodeStates.n1.status === 'completed' && s.status === 'completed',
-    JSON.stringify({ verdict: rv.verdict, blocking: rv.blockingCount, node: s.run.nodeStates.n1.status, run: s.status }))
-  check('E6.2 [观察 O1/边界] 该运行因此没有 haltedBy/skipped 键，下游照跑（这条边界的后果被如实记录下来）',
-    !('haltedBy' in s.run.result) && !('skipped' in s.run.result) && s.run.nodeStates.n2.status === 'completed',
-    JSON.stringify({ keys: Object.keys(s.run.result), n2: s.run.nodeStates.n2.status }))
+  check('E6.1 [P15/R9 起改判] 评审者写 verdict:"pass" 但列了一条合规 blocking 时：可验证的阻塞项优先，review.verdict 变为 rework、blockingCount 仍为 1，节点自身仍是 completed（不惩罚节点）',
+    rv.verdict === 'rework' && rv.blockingCount === 1 && s.run.nodeStates.n1.status === 'completed',
+    JSON.stringify({ verdict: rv.verdict, blocking: rv.blockingCount, node: s.run.nodeStates.n1.status }))
+  check('E6.2 [P15/R9 起改判] 该矛盾以 unresolved-blocking 收场：运行 halted、haltedBy=n1、下游 n2 记为 skipped 且 blockedBy=n1（不把被评审者标了阻塞的产物当作可交付）',
+    s.status === 'halted' && s.run.result.haltReason === 'unresolved-blocking' && s.run.result.haltedBy === 'n1'
+    && Array.isArray(s.run.result.skipped) && s.run.result.skipped.join(',') === 'n2'
+    && s.run.nodeStates.n2.status === 'skipped' && s.run.nodeStates.n2.blockedBy === 'n1',
+    JSON.stringify({ run: s.status, reason: s.run.result.haltReason, haltedBy: s.run.result.haltedBy, skipped: s.run.result.skipped, n2: s.run.nodeStates.n2.status }))
+  check('E6.3 [改判必须可审计] 评审记录里留下 R9 的说明：为什么结论字符串没有被采信',
+    Array.isArray(rv.notes) && rv.notes.join(' ').indexOf('R9') !== -1 && rv.notes.join(' ').indexOf('优先于结论字符串') !== -1,
+    JSON.stringify(rv.notes).slice(0, 200))
 } catch (e) { blockFailure('E6 场景（pass 携带 blocking 的边界）', e) }
 
 // ===========================================================================
