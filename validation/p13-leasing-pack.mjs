@@ -245,7 +245,7 @@ const failedLabelsOf = (stdout) => {
  * zod 的默认行为还会**丢掉 schema 不认识的键**，所以这里也只保留这些键。
  * 下面的 F0 组会拿真 schema 校验这份清单，防止它悄悄过期。
  */
-const HOST_NODE_KEY_ORDER = ['id', 'title', 'agent', 'taskTemplate', 'dependsOn', 'reviewer', 'mode', 'gate', 'maxRework', 'route', 'promptAddon', 'timeoutMs'];
+const HOST_NODE_KEY_ORDER = ['id', 'title', 'agent', 'taskTemplate', 'dependsOn', 'reviewer', 'mode', 'gate', 'maxRework', 'route', 'promptAddon', 'timeoutMs', 'inheritContext'];
 
 /** 把一个节点对象改写成真宿主会返回的形状：键序按 schema，未知键丢弃。 */
 function hostShapeNode(n) {

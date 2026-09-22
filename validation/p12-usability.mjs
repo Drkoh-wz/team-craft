@@ -383,7 +383,10 @@ const EXPECTED_PARAMS = {
   },
   team_task_status: { props: {}, required: [] },
   team_run_workflow: {
-    props: { workflowId: 'string', input: 'object', route: 'object' },
+    // P16 added `inheritContext` on purpose: a NEW optional parameter, not a rename
+    // and not a type change. The frozen set is widened deliberately here, which is
+    // exactly what this check exists to force.
+    props: { workflowId: 'string', input: 'object', route: 'object', inheritContext: 'string' },
     required: ['workflowId'],
     nested: { route: { provider: 'string', model: 'string', reasoningEffort: 'string', maxTokens: 'number' } },
   },
@@ -399,7 +402,8 @@ const EXPECTED_PARAMS = {
   // P13 suite (validation/p13-halt.mjs) is what asserts the new parameter's
   // semantics; this entry only keeps "the declared shape is exactly this" true.
   team_create_workflow: {
-    props: { name: 'string', description: 'string', nodes: 'object', route: 'object', prompt: 'string', haltOnFailure: 'boolean' },
+    // P16: `inheritContext` added deliberately (new optional parameter).
+    props: { name: 'string', description: 'string', nodes: 'object', route: 'object', prompt: 'string', haltOnFailure: 'boolean', inheritContext: 'string' },
     required: ['name'],
     nested: { route: { provider: 'string', model: 'string', reasoningEffort: 'string', maxTokens: 'number' } },
   },
@@ -1362,6 +1366,13 @@ let skillFront = null
   for (const name of ['runSchema', 'workflowSchema', 'workflowNodeSchema', 'agentDefSchema', 'modelSchema', 'modelRouteSchema']) {
     if (mod[name] !== undefined) accepted.add(name)
   }
+  // P16: the measured-usage field names the skill documents are taken from the
+  // REAL summariser rather than excused by name, so an invented token field would
+  // still be red.
+  try {
+    const probe = mod.sumUsage([{ type: 'assistant/message', data: { usage: { inputTokens: 1 } } }])
+    for (const k of Object.keys(probe || {})) accepted.add(k)
+  } catch { /* the module predates P16; nothing to add */ }
   // Non-parameter vocabulary the skill legitimately names: the response fields of
   // /progress, /role and the task ledger, the two rework limits the plan states
   // as constants, and the UI tab label. Kept EXPLICIT and NARROW so the assertion

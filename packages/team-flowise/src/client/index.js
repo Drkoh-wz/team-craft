@@ -332,6 +332,10 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       };
       var t = parseInt(String(d.timeoutMs === undefined ? '' : d.timeoutMs).trim(), 10);
       if (isFinite(t) && t > 0) body.timeoutMs = t; else delete body.timeoutMs;
+      // P16: an empty selection means "follow the upper layers", which is the
+      // recorded state "the role declares nothing" -- so the key is omitted and
+      // the server drops it, rather than writing a value that says something else.
+      if (d.inheritContext === 'session' || d.inheritContext === 'none') body.inheritContext = d.inheritContext;
       post('/agent', body)
         .then(function () {
           // The save itself SUCCEEDED, so report that first and only then refresh.
@@ -401,6 +405,12 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         reasoningEffort: (typeof m.reasoningEffort === 'string') ? m.reasoningEffort : '',
         maxTokens: (typeof m.maxTokens === 'number' && isFinite(m.maxTokens)) ? String(m.maxTokens) : '',
         timeoutMs: (typeof a.timeoutMs === 'number' && isFinite(a.timeoutMs)) ? String(a.timeoutMs) : '',
+        // P16: pre-fill from the RECORD, because the save below sends a fixed
+        // field set -- the server treats an omitted field as "clear it", so a
+        // dialog that forgot to carry this one would silently erase the role's
+        // inheritance the first time someone edited its persona.
+        inheritContext: (a && (a.inheritContext === 'session' || a.inheritContext === 'none')) ? a.inheritContext
+          : ((a && a.inheritContext === true) ? 'session' : ((a && a.inheritContext === false) ? 'none' : '')),
         preset: (typeof t.preset === 'string') ? t.preset : '',
         allow: listToText(t.allow),
         deny: listToText(t.deny),
@@ -592,6 +602,15 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
           React.createElement('label', { className: 'tf-field-label' }, 'timeoutMs（可空，宿主会夹紧到上限）'),
           React.createElement('input', { className: 'tf-input', inputMode: 'numeric', placeholder: '留空 = 用宿主上限', value: d.timeoutMs || '', onChange: function (e) { patchAgent({ timeoutMs: e.target.value }); } }),
           React.createElement('div', { className: 'tf-help' }, '角色只能收紧自己的超时：宿主把它夹进 [1000ms, 上限]，永远无法把上限抬高。')
+        ),
+        React.createElement('div', { className: 'tf-form-col tf-field' },
+          React.createElement('label', { className: 'tf-field-label' }, '上下文继承（inheritContext）'),
+          React.createElement('select', { className: 'tf-select tf-select-full', value: d.inheritContext || '', onChange: function (e) { patchAgent({ inheritContext: e.target.value }); } },
+            React.createElement('option', { value: '' }, '（跟随上层 / 不声明）'),
+            React.createElement('option', { value: 'session' }, '继承会话已完成上下文（fork）'),
+            React.createElement('option', { value: 'none' }, '明确不继承')
+          ),
+          React.createElement('div', { className: 'tf-help' }, '选「继承」时，这个角色的 worker 从当前会话已完成的轮次开始，而不是从零开始。评审者永远不继承。继承的代价是这段前缀的 token —— 只有当 provider 的 KV 缓存复用了它才划算，所以每个节点会把**实测**的 cacheReadTokens / cacheHitRate 记在节点的 context.usage 里，不靠假设。')
         )
       );
       var presetField = React.createElement('div', { className: 'tf-field' },

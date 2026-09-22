@@ -34,6 +34,11 @@ function check(label, ok, detail) {
 /** One failing check for a whole scenario block that threw (timeout / crash). */
 function blockFailure(label, e) {
   check(label + ' -- 整块检查（该场景抛出或超时则整块判负）', false, String(e && e.stack ? e.stack.split('\n')[0] : e))
+  // The first stack line is frequently an assertion INSIDE this suite (e.g. reading
+  // `s.workers[1].prompt` when the second dispatch never happened) rather than the
+  // plugin's own error -- and in that case the real cause is recorded in the node's
+  // `error` field, not here. P10_STACK=1 prints the full stack for that hunt.
+  if (process.env.P10_STACK === '1' && e && e.stack) console.error('STACK>> ' + e.stack)
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /**

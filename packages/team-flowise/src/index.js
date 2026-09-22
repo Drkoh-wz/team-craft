@@ -65,6 +65,12 @@ export const agentDefSchema = z.object({
   // P11: per-role timeout. Only ever TIGHTENS a bound: timeoutFor() clamps it
   // against the worker / reviewer ceiling, so it can never raise one.
   timeoutMs: z.number().int().positive().optional(),
+  // P16: may this role's WORKER inherit the delegating session's completed
+  // conversation? A union rather than a bare enum so the boolean spelling is not
+  // silently STRIPPED by the schema (the declared-but-unstored trap): a record
+  // that says `true` must survive parsing and be read, not vanish and read as
+  // "undeclared". Reviewers ignore this on purpose -- see the P16 block above.
+  inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -92,6 +98,9 @@ export const workflowNodeSchema = z.object({
   // node re-declare the timeout would give "which layer wins" a second answer.
   // (Same explicit gap as P11-PLAN section 2.4.)
   timeoutMs: z.number().int().positive().optional(),
+  // P16: node-level context inheritance ('session' | 'none' | boolean). Same
+  // union-with-boolean reasoning as the role field.
+  inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
 });
 
 export const workflowSchema = z.object({
@@ -124,6 +133,9 @@ export const workflowSchema = z.object({
   // flow" has to mean the flow stopped, not "that one branch stopped".
   // Optional like every other workflow field, so old records still validate.
   haltOnFailure: z.boolean().optional(),
+  // P16: workflow-level context inheritance default for its nodes. Optional end
+  // to end, and resolved run > node > workflow > role.
+  inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -481,6 +493,189 @@ export function routeSignature(route) {
   const maxTokens = routeFieldValue('maxTokens', r.maxTokens);
   if (maxTokens !== undefined) parts.push('maxTokens=' + String(maxTokens));
   return parts.join(';');
+}
+
+/* ------------------------------------------------ P16: inherited conversation */
+
+// P16 -- a node (or a role, or a whole run) may ask to INHERIT the delegating
+// session's completed conversation instead of starting the child from nothing.
+//
+// The mechanism is the runtime's own fork backend: a provider registered on
+// `ctx.subagents` whose `inheritsParentContext` is true seeds the child with the
+// parent log's balanced completed-turn prefix -- everything up to and including
+// the parent's last `turn/end`. The in-flight turn (the very call that started
+// this run) is excluded by design, because an unbalanced turn cannot be replayed
+// as a valid child session.
+//
+// Three facts decide how this is wired here:
+//
+//   1. The provider is DISCOVERED, never assumed. `start(name, request)` takes the
+//      provider name, and a deployment may compose no fork backend at all. A
+//      provider qualifies only when it advertises `inheritsParentContext === true`
+//      -- the CAPABILITY FLAG, not the name -- so a backend that merely happens to
+//      be called "fork" is not trusted, and one that advertises the capability
+//      under another name is. When nothing qualifies the request is recorded with
+//      its reason and the dispatch falls back to `spawn`: a capability that is not
+//      there is reported, never silently pretended.
+//
+//   2. The REQUEST SHAPE is identical. fork advertises the same capabilities as
+//      spawn (agentOptions / outputSchema / depthLimit / toolFilter / persona), so
+//      the very same spec object is used and only the provider name changes. That
+//      is what keeps this from becoming a second, divergent dispatch path.
+//
+//   3. Inheriting costs tokens unless the KV cache takes it. The backend documents
+//      that the inherited prefix stays cache-eligible only while provider, model,
+//      persona, tool filter and tool schema are unchanged BEFORE the inherited
+//      history. This plugin sets a persona and a tool filter on every worker, so
+//      whether reuse really happens is an empirical question, not a design claim.
+//      The child's own measured usage (`usage.cacheReadTokens` on its assistant
+//      messages) is therefore recorded next to the decision, and the node record
+//      says what actually happened -- never "we asked for it, so it must be cheap".
+//
+// Reviewers NEVER inherit, deliberately and with no opt-in. A reviewer's contract
+// here is "judge the artifact, not the author's intent"; seeding it with the
+// conversation that produced the artifact is exactly the bias that rule exists to
+// prevent. So these declarations are read for WORKER dispatches only: node work,
+// its rework round, and team_delegate_agent's role default.
+export const INHERIT_SOURCES = ['none', 'session'];
+
+/**
+ * Normalise ONE layer's declaration to 'session' | 'none' | undefined.
+ * `true`/`false` are accepted alongside the strings (a hand-written record or a
+ * REST body may well use a boolean), and an unrecognised value returns undefined
+ * -- a typo must never turn an expensive mode ON, and it is reported instead.
+ */
+export function inheritValue(v) {
+  if (v === true) return 'session';
+  if (v === false) return 'none';
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim().toLowerCase();
+  if (s === 'session' || s === 'inherit' || s === 'fork') return 'session';
+  if (s === 'none' || s === 'off' || s === 'fresh' || s === 'spawn' || s === '') return 'none';
+  return undefined;
+}
+
+// run > node > workflow > role, whole-layer wins -- the same shape as pickRoute,
+// so "which layer decided" keeps exactly one answer in this plugin.
+//
+// `overridden` names the LOWER layers that asked for inheritance and lost to a
+// higher layer's 'none'. That exists so the run-level kill switch is auditable:
+// "this role wanted the conversation and the run turned it off" is precisely the
+// question someone asks later, and re-deriving it from four records is not an
+// answer.
+export function pickInheritContext(layers) {
+  const l = layers || {};
+  const seen = [];
+  let winner = null;
+  for (const name of ['run', 'node', 'workflow', 'role']) {
+    if (!Object.prototype.hasOwnProperty.call(l, name)) continue;
+    const raw = l[name];
+    if (raw === undefined || raw === null) continue;
+    const entry = { source: name, declared: String(raw), value: inheritValue(raw) };
+    seen.push(entry);
+    if (winner === null) winner = entry;
+  }
+  if (winner === null) return { requested: 'none', source: 'default', declared: null, overridden: [] };
+  const invalid = winner.value === undefined;
+  const requested = invalid ? 'none' : winner.value;
+  const overridden = requested === 'none'
+    ? seen.filter((e) => e !== winner && e.value === 'session').map((e) => ({ source: e.source, declared: e.declared }))
+    : [];
+  return {
+    requested,
+    source: invalid ? winner.source + ':invalid' : winner.source,
+    declared: winner.declared,
+    overridden,
+  };
+}
+
+/**
+ * Choose the provider that can inherit the parent's conversation.
+ *
+ * `names` is the registry's order and `getProvider(name)` the lookup -- both come
+ * straight from `ctx.subagents`. Qualification is by CAPABILITY only; the literal
+ * name `fork` merely breaks ties, so renaming the backend cannot silently disable
+ * (or silently enable) the feature.
+ */
+export function chooseInheritProvider(names, getProvider) {
+  const list = Array.isArray(names) ? names : [];
+  const qualified = [];
+  for (const name of list) {
+    let p = null;
+    try { p = getProvider(name); } catch (e) { p = null; }
+    if (p !== null && p !== undefined && p.inheritsParentContext === true) qualified.push(name);
+  }
+  if (qualified.length === 0) {
+    return {
+      name: null,
+      qualified,
+      reason: list.length === 0
+        ? 'subagents 服务没有注册任何 provider'
+        : '没有任何 provider 声明 inheritsParentContext=true（本部署未装配 fork 类后端）',
+    };
+  }
+  const preferred = qualified.indexOf('fork') !== -1 ? 'fork' : qualified[0];
+  return { name: preferred, qualified, reason: 'provider "' + preferred + '" 声明了 inheritsParentContext=true' };
+}
+
+/**
+ * Sum the token usage of a child's own assistant messages.
+ *
+ * This is the EVIDENCE for the whole feature: `cacheReadTokens` is what says
+ * whether the inherited prefix was really reused. Unreadable never fabricates a
+ * zero -- it returns null, so the node records "unknown" rather than "no cache".
+ */
+export function sumUsage(events) {
+  if (!Array.isArray(events)) return null;
+  const out = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  let saw = false;
+  for (const e of events) {
+    if (e === null || e === undefined || e.type !== 'assistant/message') continue;
+    const u = e.data ? e.data.usage : undefined;
+    if (u === null || u === undefined || typeof u !== 'object') continue;
+    saw = true;
+    out.requests += 1;
+    for (const k of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
+      const n = u[k];
+      if (typeof n === 'number' && isFinite(n) && n >= 0) out[k] += n;
+    }
+  }
+  if (!saw) return null;
+  const denom = out.inputTokens + out.cacheReadTokens;
+  out.cacheHitRate = denom > 0 ? Math.round((out.cacheReadTokens / denom) * 1000) / 1000 : null;
+  return out;
+}
+
+/** Merge two usage summaries -- one node may dispatch twice (work + rework). */
+export function sumUsageMerge(a, b) {
+  if (a === null || a === undefined) return b === undefined ? null : b;
+  if (b === null || b === undefined) return a;
+  const out = {};
+  for (const k of ['requests', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']) {
+    out[k] = (typeof a[k] === 'number' ? a[k] : 0) + (typeof b[k] === 'number' ? b[k] : 0);
+  }
+  const denom = out.inputTokens + out.cacheReadTokens;
+  out.cacheHitRate = denom > 0 ? Math.round((out.cacheReadTokens / denom) * 1000) / 1000 : null;
+  return out;
+}
+
+/**
+ * How many log events the child inherited, from its own `session/end-seed` marker.
+ *
+ * This is what separates "the fork was cheaper" from "the fork was never seeded":
+ * a fork taken before the parent's first completed turn seeds NOTHING, and without
+ * this number a 0-token difference would look like a verdict on the feature
+ * instead of a statement about the fixture. Unknown returns null, never 0.
+ */
+export function seededEventCount(events) {
+  if (!Array.isArray(events)) return null;
+  let n = null;
+  for (const e of events) {
+    if (e === null || e === undefined || e.type !== 'session/end-seed') continue;
+    const seq = e.seq;
+    n = typeof seq === 'number' && isFinite(seq) && seq >= 0 ? seq + 1 : null;
+  }
+  return n;
 }
 
 // The persona is built from three text layers, in this fixed order:
@@ -1396,6 +1591,81 @@ export function apply(ctx) {
       ? { blocked: true, provider: decision.health.provider, failCount: decision.health.failCount }
       : undefined,
   });
+  // P16: which provider can seed a child with the delegating session's completed
+  // turns. Resolved from the live registry (capability flag, never the name) and
+  // MEMOISED per run, because the registry is process-wide and a run must not see
+  // it change halfway; the cached answer is also what makes the recorded reason
+  // reproducible after the fact. Never throws: an unreadable registry degrades to
+  // "no provider", which is recorded rather than guessed.
+  let inheritPlanCache = null;
+  const resolveInheritProviderOnce = () => {
+    if (inheritPlanCache !== null) return inheritPlanCache;
+    const svc = ctx.get('subagents');
+    if (svc === undefined || svc === null) {
+      inheritPlanCache = { name: null, qualified: [], reason: 'subagents 服务不可用' };
+      return inheritPlanCache;
+    }
+    try {
+      const names = typeof svc.list === 'function' ? svc.list() : [];
+      inheritPlanCache = chooseInheritProvider(names, (n) => (typeof svc.getProvider === 'function' ? svc.getProvider(n) : undefined));
+    } catch (e) {
+      inheritPlanCache = { name: null, qualified: [], reason: 'provider 列表读取失败：' + String(e && e.message ? e.message : e) };
+    }
+    return inheritPlanCache;
+  };
+  // P16: read the child's OWN measured usage (and how much it actually inherited)
+  // back out of its session. This is the only honest source for "did the inherited
+  // prefix really get cache reuse": the request header cannot answer it and
+  // neither can the design document. Unreadable returns null -- never a zero.
+  const measureChildStats = (started) => {
+    try {
+      const child = started && started.run ? started.run.localAgent : undefined;
+      if (child === undefined || child === null) return null;
+      const session = child.session;
+      if (session === undefined || session === null || typeof session.snapshotEvents !== 'function') return null;
+      const events = session.snapshotEvents();
+      return { usage: sumUsage(events), seeded: seededEventCount(events) };
+    } catch (e) { return null; }
+  };
+  // P16: one node's inheritance decision: which layer asked, which provider will
+  // really be used, and why not when it will not be. A record is written when the
+  // winning layer asked for 'session' OR when a lower layer asked and a higher
+  // layer turned it off -- so both "it happened / it could not happen" and "it was
+  // switched off on purpose" are auditable. When nobody asked, nothing is written
+  // and the record keeps its pre-P16 key set.
+  const inheritRecordFor = (pick) => {
+    const asked = pick.requested === 'session';
+    const suppressed = Array.isArray(pick.overridden) ? pick.overridden : [];
+    if (!asked && suppressed.length === 0) return null;
+    if (!asked) {
+      return {
+        requested: 'none',
+        source: pick.source,
+        declared: pick.declared,
+        overridden: suppressed,
+        provider: 'spawn',
+        effective: 'none',
+        reason: pick.source + ' 层显式声明 none：这是杀开关，压过 ' + suppressed.map((s) => s.source).join(' / ') + ' 层的 session',
+        qualified: [],
+        usage: null,
+        dispatches: 0,
+      };
+    }
+    const plan = resolveInheritProviderOnce();
+    const provider = plan.name === null ? 'spawn' : plan.name;
+    return {
+      requested: 'session',
+      source: pick.source,
+      declared: pick.declared,
+      provider,
+      effective: plan.name === null ? 'none' : 'session',
+      reason: plan.reason,
+      qualified: plan.qualified,
+      usage: null,
+      dispatches: 0,
+    };
+  };
+
   const spawnSpecFor = (def, parent, opts) => {
     const o = opts || {};
     const defTools = (def && def.tools) || {};
@@ -1488,9 +1758,15 @@ export function apply(ctx) {
   // actually took effect. A filter the runtime rejects is narrowed to exactly the
   // names it reported and retried; dropping the filter outright -- the previous
   // fallback -- is what left workers fully unrestricted.
-  const startWorker = async (subagentsSvc, base, spec, note0, spawnCeilingMs) => {
+  const startWorker = async (subagentsSvc, base, spec, note0, spawnCeilingMs, providerName) => {
     let filter = spec.toolFilter;
-    let note = (note0 ? note0 + ' ' : '') + (filter === undefined ? 'no tool filter' : 'filter=' + JSON.stringify(filter));
+    // P16: the provider name is the ONLY thing that differs between a fresh child
+    // and one seeded with the parent's completed turns (the two backends advertise
+    // the same capabilities, so they take the same request). Recorded in the tool
+    // note whenever it is not the default, so "this dispatch inherited context" is
+    // visible in the node record and not just in the code.
+    const provider = typeof providerName === 'string' && providerName !== '' ? providerName : 'spawn';
+    let note = (note0 ? note0 + ' ' : '') + (filter === undefined ? 'no tool filter' : 'filter=' + JSON.stringify(filter)) + (provider === 'spawn' ? '' : ' provider=' + provider);
     // P14: the spawn gets its own bound (see SPAWN_TIMEOUT_MS). It never exceeds
     // the caller's own budget for this dispatch, so a role that declares a short
     // timeout cannot end up waiting longer for the spawn than for the work.
@@ -1500,7 +1776,7 @@ export function apply(ctx) {
       const merged = Object.assign({}, base, spec);
       if (filter === undefined) delete merged.toolFilter; else merged.toolFilter = filter;
       try {
-        return { run: await withTimeout(subagentsSvc.start('spawn', merged), spawnMs, 'spawn of ' + String(base && base.label !== undefined ? base.label : 'worker')), note };
+        return { run: await withTimeout(subagentsSvc.start(provider, merged), spawnMs, 'spawn of ' + String(base && base.label !== undefined ? base.label : 'worker')), note };
       } catch (e) {
         const msg = String(e && e.message ? e.message : e);
         if (filter === undefined || attempt >= 8 || !/unknown global tool/i.test(msg)) throw e;
@@ -1594,7 +1870,11 @@ export function apply(ctx) {
 
   // ---- catalog ----
   const upsertAgent = async (def) => {
-    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, timeoutMs: def && def.timeoutMs, updatedAt: now() }));
+    // P16: `inheritContext` goes on the write path for the same reason P11 added
+    // `route` and P13 added `haltOnFailure` -- a field the schema accepts but this
+    // builder forgets is accepted and then silently dropped, so the caller's
+    // declaration is lost on the very next write.
+    const rec = agentDefSchema.parse(clean({ id: (def && def.id) || makeId(), name: def && def.name, role: def && def.role, systemPrompt: def && def.systemPrompt, model: (def && def.model) || {}, skills: (def && def.skills) || [], tools: (def && def.tools) || {}, permissionPolicy: def && def.permissionPolicy, timeoutMs: def && def.timeoutMs, inheritContext: def && def.inheritContext, updatedAt: now() }));
     await withTable('team_agent_defs', 'defs', (t) => t.put(rec.id, rec)); return rec;
   };
   const listAgents = async () => withTable('team_agent_defs', 'defs', (t) => [...t.entries()].map(([, v]) => v));
@@ -1611,7 +1891,8 @@ export function apply(ctx) {
     // P13 adds `haltOnFailure` to the same write path for exactly the same
     // reason: a workflow that declares "stop when a step fails" and then stores
     // nothing would report a halt setting that can never take effect.
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, updatedAt: now() }));
+    // P16 adds `inheritContext` for the identical reason.
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, inheritContext: wf && wf.inheritContext, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
@@ -2149,6 +2430,10 @@ export function apply(ctx) {
   // written WITHOUT the attribution keys, i.e. byte-identical to pre-P12.
   const runWorkflow = async (workflowId, input, onCreated, opts) => {
     const runRoute = opts ? opts.route : undefined;
+  // P16: the run-level inheritance layer -- the operator's explicit override, and
+  // the only layer an HTTP or tool caller can set. `'none'` here is a real
+  // kill-switch: it outranks a node/role/workflow that asked to inherit.
+  const runInherit = opts ? opts.inheritContext : undefined;
     const wf = await withTable('team_workflows', 'flows', (t) => t.get(workflowId));
     if (!wf) throw new Error('team-flowise: workflow not found ' + workflowId);
     const nodes = (wf.nodes || {});
@@ -2407,6 +2692,13 @@ export function apply(ctx) {
           // verdict. The /role review entry projects it.
           let reviewRouteState = null;
           let reviewerPersonaState = null;
+          // P16: this node's inheritance decision + measured usage. Stays null when
+          // the node never asked for it, so every existing record keeps its exact
+          // key set (the key set is a contract).
+          let contextState = null;
+          // The most recent dispatch of this node, kept for the failure path: the
+          // child that died is exactly the one whose usage must be read.
+          let lastStarted = null;
           // Tools the WORKER could not use. Collected only to describe the
           // WORKER in a rework prompt; it is never applied to the reviewer.
           let deny = [];
@@ -2436,6 +2728,7 @@ export function apply(ctx) {
               ...(personaState ? { persona: personaState } : {}),
               ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}),
               ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}),
+              ...(contextState ? { context: contextState } : {}),
             } } });
           };
           try {
@@ -2456,6 +2749,25 @@ export function apply(ctx) {
               const workerDecision = await decideRoute(def, parent, { runRoute, node, workflow: wf, parentRoute, providerFails });
               const built = spawnSpecFor(def, parent, { node, workflow: wf, decision: workerDecision });
               const workerTimeoutMs = timeoutFor(def, NODE_TIMEOUT_MS);
+              // P16: run > node > workflow > role decides whether this WORKER
+              // inherits the delegating session's completed turns. The decision and
+              // its outcome are recorded on the node only when it was asked for, so
+              // a run that does not use the feature keeps exactly the key set it had
+              // before P16 (the key set is a contract, tested elsewhere).
+              contextState = inheritRecordFor(pickInheritContext({
+                run: runInherit,
+                node: node.inheritContext,
+                workflow: wf.inheritContext,
+                role: def ? def.inheritContext : undefined,
+              }));
+              const workerProvider = contextState === null ? 'spawn' : contextState.provider;
+              // Cache-risk evidence, not control flow: the inherited prefix is only
+              // reusable while the route matches the parent's, and this plugin lets a
+              // node declare its own route.
+              if (contextState !== null) {
+                contextState.routeChanged = routeSignature(workerDecision.effective) !== routeSignature(parentRoute);
+                if (contextState.effective === 'none') console.warn('team-flowise: node ' + nid + ' asked to inherit the session context but cannot: ' + contextState.reason);
+              }
               personaState = built.persona;
               routeState = routeRecordOf(workerDecision, null, workerTimeoutMs);
               if (routeState.warning) console.warn('team-flowise: node ' + nid + ' route: ' + routeState.warning);
@@ -2471,7 +2783,8 @@ export function apply(ctx) {
               if (effFails >= PROVIDER_HEALTH.maxConsecutiveFailures) {
                 throw new Error('provider "' + effProvider + '" 已在本轮连续失败 ' + effFails + ' 次，且该角色没有其他可用路由；为避免再消耗一个完整超时，本次不再派发');
               }
-              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent), workerTimeoutMs);
+              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent), workerTimeoutMs, workerProvider);
+              lastStarted = started;
               toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
               if (built.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + built.presetNote);
               // The ONLY authoritative answer to "what did it run on": the child's
@@ -2485,6 +2798,17 @@ export function apply(ctx) {
               // (the header only exists from then on); the last real read wins.
               workerMeasured = refreshMeasured(started, workerMeasured);
               routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
+              // P16: the child has settled, so its own usage is now readable. This
+              // is the number the whole feature is judged by -- recorded as-is, and
+              // left null (unknown) rather than zeroed when the session is silent.
+              if (contextState !== null) {
+                const stats = measureChildStats(started);
+                contextState.dispatches += 1;
+                if (stats !== null) {
+                  if (stats.seeded !== null) contextState.seeded = stats.seeded;
+                  if (stats.usage !== null) contextState.usage = contextState.usage === null ? stats.usage : sumUsageMerge(contextState.usage, stats.usage);
+                }
+              }
               const blocks = result.output || [];
               output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
               // Reasoning blocks were already produced by the adapter and simply
@@ -2575,7 +2899,12 @@ export function apply(ctx) {
               const reworkBuilt = spawnSpecFor(reworkDef, parent, { node, workflow: wf, decision: reworkDecision });
               const reworkTimeoutMs = timeoutFor(reworkDef, NODE_TIMEOUT_MS);
               if (reworkBuilt.persona) personaState = reworkBuilt.persona;
-              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, reworkBuilt.spec, parentToolNote(parent), reworkTimeoutMs);
+              // P16: `workerProvider` is scoped to the dispatch block above, and this
+              // rework sits OUTSIDE it -- reading it here threw a ReferenceError that
+              // the node recorded as `failed`, i.e. a scope slip that silently killed
+              // every rework. The node-scoped decision record is the durable source.
+              const restarted = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: reworkPrompt }], parent, signal: nodeCtl.signal }, reworkBuilt.spec, parentToolNote(parent), reworkTimeoutMs, contextState === null ? 'spawn' : contextState.provider);
+              lastStarted = restarted;
               toolNote = restarted.note + (reworkBuilt.presetNote ? ' | ' + reworkBuilt.presetNote : '');
               if (reworkBuilt.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + reworkBuilt.presetNote);
               workerMeasured = measureChildRoute(restarted);
@@ -2583,6 +2912,17 @@ export function apply(ctx) {
               const again = await withTimeout(restarted.run.result, reworkTimeoutMs, 'workflow node ' + nid + ' rework ' + rnd);
               workerMeasured = refreshMeasured(restarted, workerMeasured);
               routeState = routeRecordOf(reworkDecision, workerMeasured, reworkTimeoutMs);
+              // P16: a rework is a SECOND child, so its usage is added to this
+              // node's total instead of replacing it -- the point of recording the
+              // number is to see what the node really cost.
+              if (contextState !== null) {
+                const statsRework = measureChildStats(restarted);
+                contextState.dispatches += 1;
+                if (statsRework !== null) {
+                  if (statsRework.seeded !== null) contextState.seeded = statsRework.seeded;
+                  if (statsRework.usage !== null) contextState.usage = contextState.usage === null ? statsRework.usage : sumUsageMerge(contextState.usage, statsRework.usage);
+                }
+              }
               const blocks2 = again.output || [];
               output = blocks2.filter((b) => b.type === 'text').map((b) => b.text).join('');
               reasoning = blocks2.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
@@ -2601,7 +2941,7 @@ export function apply(ctx) {
             // The single completion write. With no reviewer in effect it carries
             // exactly the keys it always did (`reviewState` stays null, so the
             // spread contributes nothing) -- unchanged field set, unchanged shape.
-            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'completed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), output: String(output).slice(0, 200), summary: firstLine(output, 140) || null, tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}), ...(contextState ? { context: contextState } : {}) } } });
           } catch (e) {
             nodeCtl.abort();
             completed[nid] = true;
@@ -2630,7 +2970,16 @@ export function apply(ctx) {
             if (taskId) await settleTask(taskId).catch(() => undefined);
             // A failed node keeps its route evidence too: "it died on THIS route"
             // is exactly what a diagnoser needs, and dropping it would hide it.
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}) } } });
+            // P16: and its measured usage, so "the fork cost N tokens before it
+            // died" is answerable instead of guessed.
+            if (contextState !== null) {
+              const statsFail = measureChildStats(lastStarted);
+              if (statsFail !== null) {
+                if (statsFail.seeded !== null) contextState.seeded = statsFail.seeded;
+                if (statsFail.usage !== null) contextState.usage = contextState.usage === null ? statsFail.usage : sumUsageMerge(contextState.usage, statsFail.usage);
+              }
+            }
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}), ...(contextState ? { context: contextState } : {}) } } });
           }
         }));
       }
@@ -2700,7 +3049,7 @@ export function apply(ctx) {
     const taskItem = { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, status: { type: 'string' }, iteration: { type: 'number' }, assignee: { type: 'string' } } };
     disposers.push(mk('team_create_task', 'Register ONE unit of team work in the durable task ledger. Use it to plan a batch of work before anything executes it, or to hand a task to a later team_delegate_agent call, or to record work for a human. It returns the new task id and status `queued`. LIMITATION: this tool ONLY registers the task - it DOES NOT execute it and it does not dispatch it to any role: no worker agent is spawned, no model call is made, and the task stays queued until something else moves it. Do not call it expecting output. For one blocking role call use team_delegate_agent; for a reviewed multi-role pipeline use team_create_workflow + team_run_workflow.', { requirement: { type: 'string', required: true, description: 'What must be produced, stated as an outcome: the concrete deliverable plus any constraint the worker must obey (files it may touch, format, language). Name the artifact, not the activity.' }, acceptanceCriteria: { type: 'string', required: true, description: 'Checkable conditions under which this task counts as done. Write them so a reviewer can mark each one pass or fail from the artifact alone (e.g. "the reply contains X and Y"). A violated criterion is treated as blocking.' }, assignee: { type: 'string', required: true, description: 'Role that owns the task, by role name or id as registered via team_create_agent (use team_list_agents for the exact names). An unknown name is accepted but records a task nobody owns.' }, reviewer: { type: 'string', description: 'Optional independent reviewer role name or id, recorded on the ledger entry as supervision intent. Omit it when no independent check is wanted.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'created task ' + v.id + ' [' + v.status + ']' }], async (args) => { const t = await createTask(args); return clean({ ok: true, id: t.id, status: t.status }); }));
     disposers.push(mk('team_task_status', 'Read the task ledger: how many tasks exist and, for each, its id, status, iteration and assignee. Use it to check whether registered work has actually progressed, to find a task stuck at queued or working, or to fetch the ids you need for later calls. Read-only, takes no arguments, and it returns the WHOLE ledger shared by every session in this process - not only the work you registered - so filter by the ids or assignees you care about. It reports tasks only, never runs: for run-level progress use the progress panel or GET /api/team-flowise/progress. `iteration` counts rework rounds, so a task with iteration above 1 has been sent back at least once.', {}, { ok: { type: 'boolean', required: true }, taskCount: { type: 'number', required: true }, tasks: { type: 'array', required: true, items: taskItem } }, (_a, v) => [{ type: 'text', text: 'tasks=' + v.taskCount }], async () => { const tasks = await listTasks(); return clean({ ok: true, taskCount: tasks.length, tasks: tasks.map((t) => clean({ id: t.id, status: t.status, iteration: t.iteration, assignee: t.assignee })) }); }));
-    disposers.push(mk('team_run_workflow', 'Start a registered workflow and BLOCK until the entire run settles, then return its runId and final status. Use it after team_create_workflow when you want the full multi-role pipeline executed now - dependency waves, per-node workers, the review gate and bounded rework. IMPORTANT: it BLOCKS, and it may block for many minutes (each node has its own step timeout, default 30 minutes), so do not call it for a pipeline you are not ready to wait for and do not chain several of these in one call. The result is a summary only; per-node progress lives at GET /api/team-flowise/progress?runId=<id> and in the client progress panel. Run `input` seeds workflow variables and a run-level `route` outranks node, workflow and role routes. Build the roles and the workflow FIRST, then start it; for a single role step use team_delegate_agent instead.', { workflowId: { type: 'string', required: true, description: 'Id of the workflow to run, as returned by team_create_workflow. An unknown id fails the call immediately instead of producing a run that never publishes.' }, input: { type: 'object', additionalProperties: false, description: 'Free-form input for the run (a plain JSON object). Nodes read it as workflow variables; tasks that do not reference it are unaffected.' }, route: { type: 'object', additionalProperties: false, description: 'Run-level model route override. This is the highest-priority layer, so it beats node, workflow and role routes; provider and model must still be declared together or that half is ignored.', properties: { provider: { type: 'string', description: 'Provider id of the run-level route; ignored unless `model` is declared in the same call.' }, model: { type: 'string', description: 'Model id of the run-level route; ignored unless `provider` is declared in the same call.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list. An effort the model does not accept makes this whole layer unusable, so it degrades to the next layer.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for the run; must be a positive number and takes effect on its own.' } } } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input, undefined, { route: args.route }); return clean({ ok: true, runId: r.id, status: r.status }); }));
+    disposers.push(mk('team_run_workflow', 'Start a registered workflow and BLOCK until the entire run settles, then return its runId and final status. Use it after team_create_workflow when you want the full multi-role pipeline executed now - dependency waves, per-node workers, the review gate and bounded rework. IMPORTANT: it BLOCKS, and it may block for many minutes (each node has its own step timeout, default 30 minutes), so do not call it for a pipeline you are not ready to wait for and do not chain several of these in one call. The result is a summary only; per-node progress lives at GET /api/team-flowise/progress?runId=<id> and in the client progress panel. Run `input` seeds workflow variables and a run-level `route` outranks node, workflow and role routes. Build the roles and the workflow FIRST, then start it; for a single role step use team_delegate_agent instead.', { workflowId: { type: 'string', required: true, description: 'Id of the workflow to run, as returned by team_create_workflow. An unknown id fails the call immediately instead of producing a run that never publishes.' }, input: { type: 'object', additionalProperties: false, description: 'Free-form input for the run (a plain JSON object). Nodes read it as workflow variables; tasks that do not reference it are unaffected.' }, route: { type: 'object', additionalProperties: false, description: 'Run-level model route override. This is the highest-priority layer, so it beats node, workflow and role routes; provider and model must still be declared together or that half is ignored.', properties: { provider: { type: 'string', description: 'Provider id of the run-level route; ignored unless `model` is declared in the same call.' }, model: { type: 'string', description: 'Model id of the run-level route; ignored unless `provider` is declared in the same call.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list. An effort the model does not accept makes this whole layer unusable, so it degrades to the next layer.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for the run; must be a positive number and takes effect on its own.' } } }, inheritContext: { type: 'string', description: 'Run-level context inheritance (P16): `session` or `none`. `session` lets each worker start from this conversation\'s completed turns (the runtime seeds the child with the parent log\'s last finished turn), so a step does not have to be told what was already discussed; `none` is the kill switch that outranks every node/role/workflow declaration. Omitted = the lower layers decide. Reviewers never inherit. Whether the inherited prefix is CACHED is measured and recorded on each node as `context.usage` - it is not assumed.' } }, { ok: { type: 'boolean', required: true }, runId: { type: 'string', required: true }, status: { type: 'string', required: true } }, (_a, v) => [{ type: 'text', text: 'ran workflow -> ' + v.runId + ' [' + v.status + ']' }], async (args) => { const r = await runWorkflow(args.workflowId, args.input, undefined, { route: args.route, inheritContext: args.inheritContext }); return clean({ ok: true, runId: r.id, status: r.status }); }));
     disposers.push(mk('team_list_agents', 'List the registered team role definitions with their ids, names and roles. Use it FIRST whenever you need an exact role name or id: team_delegate_agent, team_create_task and workflow node `agent` fields all resolve against this registry, and a name that does not exist silently produces an unowned task or a node that cannot be dispatched. Read-only and takes no arguments. It returns only id / name / role; for a role\'s model route, persona and tool preset read the role in the settings UI or GET /api/team-flowise/agents. An empty list means no role exists yet - create one with team_create_agent before delegating.', {}, { ok: { type: 'boolean', required: true }, agents: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, name: { type: 'string' }, role: { type: 'string' } } } } }, (_a, v) => [{ type: 'text', text: 'agents=' + v.agents.length }], async () => { const a = await listAgents(); return clean({ ok: true, agents: a.map((x) => clean({ id: x.id, name: x.name, role: x.role })) }); }));
     // P11: `id` (modify an existing role instead of always creating a new one),
     // the reasoning / token / timeout knobs, and the tool preset. The old
@@ -2735,11 +3084,15 @@ export function apply(ctx) {
           : (existing ? existing.tools : undefined),
         timeoutMs: pick(args.timeoutMs, existing ? existing.timeoutMs : undefined),
         permissionPolicy: existing ? existing.permissionPolicy : undefined,
+        // P16: same modify semantics as every other field -- omitted keeps the
+        // stored value, so editing a role through this tool cannot silently clear
+        // the inheritance it already declared.
+        inheritContext: pick(args.inheritContext, existing ? existing.inheritContext : undefined),
       });
       const am = a.model || {};
       return clean({ ok: true, id: a.id, name: a.name || a.role || a.id, provider: am.provider, model: am.model, reasoningEffort: am.reasoningEffort, maxTokens: am.maxTokens, timeoutMs: a.timeoutMs, toolsPreset: a.tools && a.tools.preset, warning: pairWarn.length ? pairWarn.join(' ') : undefined });
     }));
-    disposers.push(mk('team_create_workflow', 'Create or modify a durable multi-role workflow: a name plus a node map that the scheduler turns into dependency waves. Use it to define a repeatable pipeline ONCE - the nodes, who owns each one, what each must produce and who reviews it - and then start it with team_run_workflow. `nodes` is an object keyed by node id; each node declares at least its owning role (`agent`) and its dependency list (`dependsOn`), and may declare title, reviewer, taskTemplate and promptAddon. Order comes from dependsOn, never from key order, and independent nodes run concurrently. A workflow-level `review` block supplies the default reviewer. Set `haltOnFailure` to true when a step that fails must STOP the run instead of letting later steps build on an empty artifact. LIMITATION: declaring a workflow does NOT run it.', { name: { type: 'string', required: true, description: 'Workflow display name, shown in the run selector. Keep it unique enough that a human can tell two runs apart.' }, description: { type: 'string', description: 'One-paragraph explanation of what the pipeline produces and why the nodes are ordered that way; written for a human reading the run list.' }, nodes: { type: 'object', additionalProperties: true, description: 'Node map keyed by node id. Each value declares the owning role (`agent`, by name or id), its `dependsOn` array of node ids, and optionally title, reviewer, taskTemplate:{requirement,acceptanceCriteria} and promptAddon. An empty or missing map declares a workflow with zero nodes, which can be started but will do nothing.' }, route: { type: 'object', additionalProperties: false, description: 'Workflow-level model route layer, shared by every step unless a node declares its own (node wins) or the run overrides it (run wins).', properties: { provider: { type: 'string', description: 'Provider id of the workflow-level route; must be declared together with `model` or that half is ignored.' }, model: { type: 'string', description: 'Model id of the workflow-level route; must be declared together with `provider` or that half is ignored.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list; an unsupported effort makes this whole layer unusable.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for every step of this workflow; must be a positive number.' } } }, prompt: { type: 'string', description: 'Workflow-level persona text, merged above the role\'s own systemPrompt and below a node\'s promptAddon. Use it for pipeline-wide standards. An empty string counts as not declared.' }, haltOnFailure: { type: 'boolean', description: 'P13 opt-in fail-fast, default false. With false (the pre-P13 behaviour) a failed node still counts as done for its dependents, so the rest of the pipeline runs on an empty artifact. With true, the FIRST node that fails - or that ends with an UNRESOLVED blocking review finding - stops the run: every node that has not started yet is recorded `skipped` and the run ends as `halted`. The halt is whole-run, not just the branch that failed.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt, haltOnFailure: args.haltOnFailure }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
+    disposers.push(mk('team_create_workflow', 'Create or modify a durable multi-role workflow: a name plus a node map that the scheduler turns into dependency waves. Use it to define a repeatable pipeline ONCE - the nodes, who owns each one, what each must produce and who reviews it - and then start it with team_run_workflow. `nodes` is an object keyed by node id; each node declares at least its owning role (`agent`) and its dependency list (`dependsOn`), and may declare title, reviewer, taskTemplate and promptAddon. Order comes from dependsOn, never from key order, and independent nodes run concurrently. A workflow-level `review` block supplies the default reviewer. Set `haltOnFailure` to true when a step that fails must STOP the run instead of letting later steps build on an empty artifact. LIMITATION: declaring a workflow does NOT run it.', { name: { type: 'string', required: true, description: 'Workflow display name, shown in the run selector. Keep it unique enough that a human can tell two runs apart.' }, description: { type: 'string', description: 'One-paragraph explanation of what the pipeline produces and why the nodes are ordered that way; written for a human reading the run list.' }, nodes: { type: 'object', additionalProperties: true, description: 'Node map keyed by node id. Each value declares the owning role (`agent`, by name or id), its `dependsOn` array of node ids, and optionally title, reviewer, taskTemplate:{requirement,acceptanceCriteria} and promptAddon. An empty or missing map declares a workflow with zero nodes, which can be started but will do nothing.' }, route: { type: 'object', additionalProperties: false, description: 'Workflow-level model route layer, shared by every step unless a node declares its own (node wins) or the run overrides it (run wins).', properties: { provider: { type: 'string', description: 'Provider id of the workflow-level route; must be declared together with `model` or that half is ignored.' }, model: { type: 'string', description: 'Model id of the workflow-level route; must be declared together with `provider` or that half is ignored.' }, reasoningEffort: { type: 'string', description: 'Reasoning effort id from that model\'s own efforts list; an unsupported effort makes this whole layer unusable.' }, maxTokens: { type: 'number', description: 'Per-call output token cap for every step of this workflow; must be a positive number.' } } }, prompt: { type: 'string', description: 'Workflow-level persona text, merged above the role\'s own systemPrompt and below a node\'s promptAddon. Use it for pipeline-wide standards. An empty string counts as not declared.' }, haltOnFailure: { type: 'boolean', description: 'P13 opt-in fail-fast, default false. With false (the pre-P13 behaviour) a failed node still counts as done for its dependents, so the rest of the pipeline runs on an empty artifact. With true, the FIRST node that fails - or that ends with an UNRESOLVED blocking review finding - stops the run: every node that has not started yet is recorded `skipped` and the run ends as `halted`. The halt is whole-run, not just the branch that failed.' }, inheritContext: { type: 'string', description: 'P16 workflow-level context inheritance default for its nodes: `session` or `none`. Resolved run > node > workflow > role, so a node can override it and a run can kill it. With `session` the worker starts from this conversation\'s completed turns instead of from nothing - useful for a step that must know what was already discussed or decided. It costs the inherited tokens unless the provider\'s KV cache reuses that prefix, and whether it did is RECORDED per node as `context.usage.cacheReadTokens` / `cacheHitRate` rather than assumed. Reviewers never inherit.' } }, { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, name: { type: 'string', required: true }, nodeCount: { type: 'number', required: true } }, (_a, v) => [{ type: 'text', text: 'created workflow ' + v.name + ' -> ' + v.id + ' (' + v.nodeCount + ' nodes)' }], async (args) => { const w = await upsertWorkflow({ name: args.name, description: args.description, nodes: args.nodes || {}, route: args.route, prompt: args.prompt, haltOnFailure: args.haltOnFailure, inheritContext: args.inheritContext }); return clean({ ok: true, id: w.id, name: w.name, nodeCount: Object.keys(w.nodes || {}).length }); }));
     disposers.push(mk('team_delegate_agent', 'Hand ONE task to ONE role and BLOCK until that worker agent finishes, then return its output. Use it for a single self-contained step whose result you want in this same turn: it creates a ledger task, moves it to working, spawns the worker through the subagent registry and completes the task. IMPORTANT: it BLOCKS, so the call returns only when the worker stops or its step timeout (default 30 minutes) fires - which means a long task holds this turn open, and do not chain several of these to build a pipeline by hand. A worker that fails is reported as the text `delegate failed: ...`. For anything multi-step or supervised prefer the workflow route: create the roles, then team_create_workflow, then team_run_workflow.', { agent: { type: 'string', required: true, description: 'Role to delegate to, by role name or id from team_list_agents. An unmatched name is used verbatim as the assignee: the work still runs, but no role configuration (model route, tool preset, persona, timeout) is applied.' }, task: { type: 'string', required: true, description: 'The complete task brief for the worker: what to produce, where, and under what constraints. The worker sees only this text plus the acceptance criteria, so it cannot infer context you do not state.' }, acceptanceCriteria: { type: 'string', description: 'Checkable conditions for this one delegation, appended to the worker prompt. Omit only when the task is trivially self-verifying.' }, reviewer: { type: 'string', description: 'Reviewer role recorded on the created ledger task. NOTE: this free-delegation path does not run a review pass - the value is recorded for the ledger and the UI only, and no reviewer agent is spawned.' } }, { ok: { type: 'boolean', required: true }, taskId: { type: 'string', required: true }, status: { type: 'string', required: true }, output: { type: 'string' } }, (_a, v) => [{ type: 'text', text: 'delegated -> task ' + v.taskId + ' [' + v.status + ']' }], async (args) => {
       const agentsList = await listAgents();
       const def = agentsList.find((a) => a.id === args.agent || a.name === args.agent);
@@ -2759,7 +3112,11 @@ export function apply(ctx) {
           // used before P11, plus the same verification and the same pair rule.
           const dDecision = await decideRoute(def, dParent, { parentRoute: routeConfigOf(dParent) });
           const dBuilt = spawnSpecFor(def, dParent, { decision: dDecision });
-          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''), NODE_TIMEOUT_MS);
+          // P16: team_delegate_agent has no node/workflow layer, so a role's own
+          // `inheritContext` is the only declaration that can apply here. Same
+          // discovery, same recorded reason, same refusal to guess.
+          const dContext = inheritRecordFor(pickInheritContext({ role: def ? def.inheritContext : undefined }));
+          const started = await startWorker(subagentsSvc, { label: 'team-delegate', prompt: [{ type: 'text', text: prompt }], parent: dParent, signal: dCtl.signal }, dBuilt.spec, parentToolNote(dParent) + (dBuilt.presetNote ? ' | ' + dBuilt.presetNote : ''), NODE_TIMEOUT_MS, dContext === null ? 'spawn' : dContext.provider);
           const result = await withTimeout(started.run.result, NODE_TIMEOUT_MS, 'delegated task ' + t.id);
           output = (result.output || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (result.stopReason !== 'completed') throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + ' [' + started.note + ']');
@@ -2963,7 +3320,10 @@ export function apply(ctx) {
       // `body.session` (P12) is the session this run belongs to, as sent by the
       // client. OPTIONAL and never guessed: an HTTP route has no live initiator,
       // so without it the run is stored with no attribution at all.
-      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
+        // `body.inheritContext` (P16) is the run-level inheritance layer: the
+        // operator's override, and the kill switch ('none') that outranks every
+        // node / role / workflow that asked to inherit the session context.
+      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, inheritContext: body.inheritContext, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
         console.error('team-flowise: run failed', String(e));
         if (!rec) return;
         try {

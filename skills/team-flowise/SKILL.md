@@ -274,6 +274,50 @@ role（角色 systemPrompt） -> workflow（工作流 prompt） -> node（节点
 
 评审者**有自己的**路由、人设与超时（从评审者自己的角色定义解析），**不继承被审节点的** `promptAddon` / 节点级 `route`。这是设计，不是缺陷。
 
+### 4.4 上下文继承（`inheritContext`，P16 起）
+
+让一个 worker **从当前会话已完成的轮次开始**，而不是从零开始——底层用的是宿主的 fork 后端（`@deepseek-ai/dsh-subagent-fork-in-process`）：它把父级日志里**到最后一个 `turn/end` 为止**的完整轮次切片，作为子会话的种子。正在进行的这一轮（也就是发起本次运行的那次调用）**按设计被排除**，因为未闭合的轮次不能重放成一个合法子会话。
+
+**声明位置**（与路由同一套口径：`run > node > workflow > role`，整层胜出）：
+
+| 层 | 位置 | 说明 |
+|---|---|---|
+| run | `team_run_workflow` 的 `inheritContext` / `POST /run/start` 的 `inheritContext` | 最高优先级，也是**杀开关**：写 `none` 就压过下面所有层的 `session` |
+| node | 节点里的 `inheritContext` | 单步覆盖 |
+| workflow | 工作流的 `inheritContext` | 这条流水线的默认值 |
+| role | `team_create_agent` 的 `inheritContext` | 该角色所有 worker 的默认值（`team_delegate_agent` 只有这一层） |
+
+取值：`session`（继承）/ `none`（不继承）/ 布尔 `true`/`false`（等价）。无法识别的取值**不会**打开它，只会记一条 `source: "node:invalid"`。
+
+**两条硬规则**：
+
+1. **评审者永远不继承，没有开关。** 评审契约是「只依据交付物判断」，把产生这份产物的对话喂给评审者，正是这条纪律要防的偏见。所以工作流/角色声明了 `session`，评审派发仍然是 `spawn`。
+2. **能力靠发现，不靠名字。** 插件在 `ctx.subagents` 上找**声明了 inheritsParentContext=true** 的 provider（优先叫 `fork` 的那个），而不是硬写 `fork`。本部署没装配这类后端时，节点**照常派发**（退回 `spawn`），并在记录里写明原因——要了却做不到的事会被如实记下来，不会被假装做到。
+
+**记录在节点上的证据**（只有请求过继承的节点才有这个 `context` 键，键集契约不变）：
+
+```json
+"context": {
+  "requested": "session", "source": "role", "declared": "session",
+  "provider": "fork", "effective": "session", "reason": "provider \"fork\" 声明了 inheritsParentContext=true",
+  "qualified": ["fork"], "dispatches": 1, "seeded": 12, "routeChanged": false,
+  "usage": { "requests": 1, "inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 900, "cacheWriteTokens": 0, "cacheHitRate": 0.9 }
+}
+```
+
+- `effective: "none"` 而 `requested: "session"` = **降级**，`reason` 说明为什么。
+- `seeded` = 子代理真的继承了**多少个日志事件**（来自它自己的 `session/end-seed` 标记）。**这个字段是关键**：`seeded: 0` 意味着父级当时还没有任何已完成轮次，此时"没有缓存收益"说的是夹具，不是这个功能。
+- `usage` 是**实测**的（子代理自己 `assistant/message` 上的 usage），不是估算；读不到时是 `null`（未知），**不是 0**。
+- `routeChanged: true` 表示该节点的路由与父级不同 —— 按 fork 后端的文档，继承的前缀只有在 provider/model/人设/工具过滤**都没变**的前提下才可能命中 KV 缓存，所以这是"缓存可能没命中"的先验提示，不是结论。
+
+**代价与收益（要么实测，要么别说）**：继承会把那段历史复制进子代理的请求。它**只有在 KV 缓存复用该前缀时才便宜**；本插件给每个 worker 都设了人设与工具过滤，而这两者恰好在 fork 的文档里被点名为"可能让前缀在继承历史之前就失配"的因素。所以：
+
+- 默认**不开**（`inheritContext` 缺省 = 不继承），要用就逐层显式声明；
+- 打开后每个节点都会记下 `usage.cacheReadTokens` / `cacheHitRate`，**用数字判断划算与否**，不要因为它叫"继承"就默认它省钱；
+- `validation/p16-live-context.mjs` 就是为此存在的 A/B：同一条工作流跑两次，唯一差别是 run 层 `inheritContext: 'none'`，然后把两臂的实测 token 并排打出来。
+
+**当前不支持**：下游节点继承**上游节点**（或某个角色上一轮）的上下文。那需要把 worker 做成**可续期子代理**（宿主 subagents 服务上的 startContinuable + sendMessage）并管理其生命周期；现在 worker 是一次性的，跑完即释放，它的会话不能再被 fork。这条不是"没做"，是"要做得先把 worker 的生命周期换掉"。
+
 ---
 
 ## 5. 审核纪律：什么才算阻塞项
@@ -377,6 +421,7 @@ R9 的做法：
 | 面板显示「**本会话暂无运行**」 | 这不是错误，是本会话名下确实没有运行。可能是别的会话发起的，也可能是旧记录（没有 `sessionId`，归属未知） | 看 `scope`：`mode: "session"` + `runCountInScope: 0`，`hasAnyGlobal` 说明进程里别处有运行；点「看全部运行」 |
 | **角色建了，却没有评审** | 节点没写 `reviewer`，工作流级 `review` 也没写 reviewer（或写了 `enabled: false`） | 只有节点级 `reviewer`（或工作流级默认值）才会派发评审者；检查定义，`team_create_workflow` 重新声明后重跑 |
 | **评审者明明写了 FAIL/驳回，节点却显示通过** | P15/R9 之前：结论只从 `verdict` 一个字段、只认 `rework` 一个词读，其它一律**静默**落到 `pass`（`notes=[]`）。`parseError: null` 只说明 JSON 合法，不说明结论被读懂了 | R9 起读 6 个字段 + 词汇表；读不出来 → `review.verdict = error` 并在 `review.notes` 写明原因（见 §5.4）。看节点的 `review.notes` 与 `review.verdict` |
+| **声明了 `inheritContext: "session"`，节点却没有继承** | 三种可能：本部署没有声明 inheritsParentContext 的 provider；父级当时还没有**已完成**的轮次（种子为空）；或者更高层写了 `none` | 看节点的 `context`：`effective`（`none` = 没生效）、`reason`、`qualified`（哪些 provider 合格）、`seeded`（0 = 父级还没有已完成轮次，详见 §4.4）、`overridden`（被哪一层压掉了） |
 | **节点一直 pending** | `dependsOn` 里的前置节点没完成，或写了**不存在的节点 id**（悬空依赖永远不会完成） | `/progress` 里看该节点的 `dependsOn` 与各前置节点 `status`；核对节点 id 拼写 |
 | **模型没生效** | 只声明了 `provider` 或只声明了 `model`（成对规则作废该半），或 provider 未注册 / model 不存在 / effort 不被接受 → **回退继承父级** | 看节点的 `route.warning` 与 `route.source`（`inherited` 就是回退了）、`route.effective` / `route.measured`；`GET /api/team-flowise/models` 或设置页看真实可选值；`team_create_agent` 返回的 `warning` |
 | **API 返回 401** | 本部署的网关把**未注册**的 `/api` 路径伪装成 401：宿主半没加载，或 **dsh 还没重启** | 先 `GET /api/team-flowise/ping`；确认插件行已插入并在 profile 里、然后重启 dsh（宿主代码与客户端 bundle 在启动时加载/快照） |
