@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的多角色团队插件。定义角色、连成节点图、跑起来——然后看着它干活。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 用的多角色团队插件。定义角色、连成节点图、跑起来——然后看着它干活。当然，你也可以直接告诉agent用多agent团队去干点儿什么。
 
 一个 agent 能搞定的事就别上团队。可活儿一旦有了分工，你就需要一个出计划的、一个写代码的、一个审的，还得有人核对数字。这个插件把这些交给你：按依赖顺序跑，允许评审把活打回去，并且让你看见卡在哪一步。
 
