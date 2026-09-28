@@ -22,10 +22,12 @@
  *   A2. the registration order inside apply(), which is what lets B2 below speak
  *       for tool registration without a model to call the tools.
  *
- *   B1. the sharp edge, asserted rather than remembered: `dsh plugin add`
- *       initializes a brand-new profile with only `@deepseek-ai/dsh-base`, which
- *       has no webServer, and `inject` is an assembly precondition — so the boot
- *       is refused outright.
+ *   B1. the case that used to brick a profile, now asserted the other way round:
+ *       `dsh plugin add` initializes a brand-new profile with only
+ *       `@deepseek-ai/dsh-base`, which has no webServer. The browser bridge is
+ *       requested dynamically (`ctx.inject`) rather than declared in `inject`, so
+ *       such a profile must boot and stay up — the missing web server costs the
+ *       browser half, not the whole host.
  *
  *   B2. install into a web-shaped profile (what `dsh plugin --profile web add`
  *       is), boot it on a free port, and drive the whole HTTP surface: the four
@@ -202,9 +204,12 @@ console.log('\n### A2. registration order inside apply()')
 }
 
 /* ======================================================================
-   B1. the sharp edge: a profile `dsh plugin add` initializes by itself has
-       only `@deepseek-ai/dsh-base`, so it has no webServer. This asserts what
-       happens then, so the limitation is a measurement and not a memory.
+   B1. the case that used to brick a profile: `dsh plugin add` initializes a
+       profile for an unknown name with only `@deepseek-ai/dsh-base`, which has
+       no webServer. That is now a missing FEATURE (no browser bridge) instead of
+       an assembly precondition, so the profile must boot and stay up. This is
+       the inverse of the failure that motivated the change, asserted rather than
+       remembered.
    ====================================================================== */
 console.log('\n### B1. install into a profile that has no web server (dsh plugin add initializes one)')
 {
@@ -217,24 +222,21 @@ console.log('\n### B1. install into a profile that has no web server (dsh plugin
   console.log('    bundles it initialized with: ' + JSON.stringify(profilePkg.dsh.profile.bundles))
   const port = await freePort()
   let log = ''
-  let exitCode = null
-  try {
-    // No shell here on purpose: `process.execPath` contains a space ("C:\Program
-    // Files\...") and a shell would split it, which looks exactly like a boot
-    // failure until you read the message.
-    log = execFileSync(process.execPath, [DSH_BIN, '--profile', id, '--port', String(port)], {
-      env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000,
-    })
-    exitCode = 0
-  } catch (e) {
-    exitCode = e.status ?? -1
-    log = String(e.stdout || '') + String(e.stderr || '')
-  }
-  const namesCause = /waiting for service: webServer/.test(log)
-  console.log('    exit=' + exitCode)
-  console.log('    full log:\n      ' + log.split('\n').filter(Boolean).slice(0, 12).join('\n      ').slice(0, 900))
-  ok('B1: dsh-base-only profile + this plugin fails to boot, and the message names the missing webServer',
-    exitCode !== 0 && namesCause, 'exit=' + exitCode + ' named=' + namesCause)
+  const bare = spawn(process.execPath, [DSH_BIN, '--profile', id, '--port', String(port)], {
+    env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  })
+  bare.stdout.on('data', (d) => { log += d.toString() })
+  bare.stderr.on('data', (d) => { log += d.toString() })
+  await sleep(20000)
+  const stillRunning = bare.exitCode === null
+  const activationFailure = /did not activate|waiting for service/.test(log)
+  console.log('    after 20s: exitCode=' + String(bare.exitCode) + ' stdout+stderr bytes=' + log.length)
+  if (log.trim() !== '') console.log('    log:\n      ' + log.split('\n').filter(Boolean).slice(0, 10).join('\n      ').slice(0, 700))
+  ok('B1: a profile with no web server boots with this plugin instead of refusing to start',
+    stillRunning, 'exitCode=' + String(bare.exitCode))
+  ok('B1: the old activation failure is gone (no "did not activate", no "waiting for service")',
+    !activationFailure, activationFailure ? log.split('\n').find((l) => /did not activate|waiting for service/.test(l)).trim().slice(0, 200) : 'clean')
+  try { sh('taskkill', ['/F', '/T', '/PID', String(bare.pid)]) } catch { /* already gone */ }
 }
 
 /* ======================================================================

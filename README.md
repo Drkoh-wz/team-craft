@@ -69,21 +69,24 @@ Two details that are load-bearing rather than incidental:
 Restart dsh afterwards; then verify with the table under
 [Verify after the restart](#verify-after-the-restart).
 
-One limit of that command, measured rather than assumed: `dsh plugin add` will
-create a profile for a name that does not exist yet, and a profile it creates from
-scratch holds only `@deepseek-ai/dsh-base`. This bundle lists `webServer` among
-its `inject` preconditions — an assembly requirement, not a runtime lookup — so
-installing it into such a profile leaves the row `pending` and **dsh refuses to
-boot at all**:
+One thing worth knowing about that command: `dsh plugin add` will create a
+profile for a name that does not exist yet, and a profile it creates holds only
+`@deepseek-ai/dsh-base` — no web server. This plugin mounts there and keeps
+working, because its tools, its service and its durable domains do not need one;
+what it does not get is the browser bridge. The routes are requested with
+`ctx.inject(['webServer'], …)` rather than declared in `inject`, and that
+distinction is load-bearing rather than stylistic: declaring it as an assembly
+precondition instead leaves the row `pending` and **dsh refuses to boot at all**
+— observed, not hypothesised:
 
 ```text
 Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate
 @local/team-flowise: pending (waiting for service: webServer)
 ```
 
-Install into a profile that already composes a web app, which `--profile web`
-does. `validation/preflight-install.mjs` asserts both halves of that statement,
-so neither the working route nor the sharp edge is folklore.
+So install into a profile that composes a web app — `--profile web` — to get the
+UI. `validation/preflight-install.mjs` asserts both halves: the web-shaped
+profile boots and serves its whole HTTP surface, and the web-less one still boots.
 
 ### From a clone
 

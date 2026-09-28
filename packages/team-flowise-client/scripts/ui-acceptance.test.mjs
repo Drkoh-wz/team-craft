@@ -778,7 +778,15 @@ check('the client half crosses the boundary with fetch()', clientSource.includes
 check('the host half is a composed bundle that registers WebServer routes', (() => {
   try {
     const hostSource = readFileSync(join(pkgRoot, '..', 'team-flowise', 'src', 'index.js'), 'utf8')
-    return /inject\s*=\s*\[[^\]]*'webServer'/.test(hostSource) && hostSource.includes('web.register({') && hostSource.includes("'/api/team-flowise/ping'")
+    // The bridge is requested dynamically, NOT declared as an assembly
+    // precondition: `webServer` in `inject` made a profile without a web server
+    // unbootable, which is a worse failure than a missing UI. Both halves of that
+    // contract are asserted here, because either one alone is satisfiable the
+    // wrong way (routes present but never registered; or registered but fatal).
+    return hostSource.includes('web.register({')
+      && hostSource.includes("'/api/team-flowise/ping'")
+      && /ctx\.inject\(\['webServer'\]/.test(hostSource)
+      && !/^export const inject = \[[^\]]*'webServer'/m.test(hostSource)
   } catch {
     return false
   }

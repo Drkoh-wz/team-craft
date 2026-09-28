@@ -44,15 +44,15 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 装完重启 dsh；然后按下面「重启后如何确认」那张表逐条核对。
 
-那条命令有一个限制，是量出来的不是猜的：`dsh plugin add` 对不存在的 profile 名会**自动建一个**，而它从零建出来的 profile 只有 `@deepseek-ai/dsh-base`。本 bundle 把 `webServer` 列在 `inject` 前置条件里——那是**装配要求**，不是运行时查找——所以装进这种 profile 会让该行停在 `pending`，**dsh 整个启动被拒**：
+那条命令有一件事值得知道：`dsh plugin add` 对不存在的 profile 名会**自动建一个**，而它从零建出来的 profile 只有 `@deepseek-ai/dsh-base`——**没有 web 服务**。插件装进这种 profile 照样挂载、照样能用，因为它的工具、服务和持久存储都不需要一个 web 服务；它拿不到的是浏览器那一半。路由是用 `ctx.inject(['webServer'], …)` **动态请求**的，而不是声明在 `inject` 里——这个区别是承重的、不是风格问题：若把它当装配前置条件声明，该行会停在 `pending`，**dsh 整个启动被拒**（这是实测过的，不是假设）：
 
 ```text
 Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate
 @local/team-flowise: pending (waiting for service: webServer)
 ```
 
-请装进一个已经组合了 web app 的 profile，`--profile web` 就是。
-`validation/preflight-install.mjs` 把这句话的两半都做成了断言——可行的路和这条锋利边缘都不是口口相传。
+所以要界面就装进一个组合了 web app 的 profile——`--profile web` 就是。
+`validation/preflight-install.mjs` 把两半都做成了断言：web 形状的 profile 能启动并跑通整套 HTTP 面，没有 web 服务的那个也能启动。
 
 ### 从克隆装
 

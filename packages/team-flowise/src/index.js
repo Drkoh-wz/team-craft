@@ -16,7 +16,14 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain';
 
 export const name = 'team-flowise';
 
-export const inject = ['storageDomain', 'agents', 'subagents', 'webServer'];
+// Assembly preconditions. `webServer` is deliberately NOT one of them: it exists
+// only in profiles that compose a web app, while the tools, the service and the
+// durable domains work anywhere. Listing it here made a missing web server a
+// BOOT failure rather than a missing feature -- dsh refuses to start when an entry
+// cannot activate -- so a profile created from scratch by `dsh plugin add` (which
+// holds only `@deepseek-ai/dsh-base`) could not boot at all. The bridge is
+// requested dynamically at the bottom of apply() instead.
+export const inject = ['storageDomain', 'agents', 'subagents'];
 
 // ---- real zod record schemas (file backend validates on open/put) ----
 const now = () => Date.now();
@@ -3287,8 +3294,16 @@ export function apply(ctx) {
 
   // ---- browser HTTP bridge (composed host plane has no `harness`; client
   // reaches the service through WebRoutes, mirroring @linxin666/dsh-usage) ----
-  const web = ctx.get('webServer');
-  if (web !== undefined) {
+  //
+  // Optional, and requested dynamically on purpose. `ctx.inject(services, cb)`
+  // runs `cb` now when the service is already composed, or when it shows up --
+  // the same shape dsh's own client-modules uses for its `/plugins` route. That
+  // keeps activation order without making the web server an assembly
+  // precondition, so a profile without one mounts this plugin (mounting it and
+  // simply not having the browser half) instead of refusing to boot.
+  const registerWebBridge = (webCtx) => {
+    const web = webCtx.webServer;
+    if (web === undefined) return;
     const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' };
     const readJsonBody = async (req, maxBytes = 65536) => {
       const chunks = [];
@@ -3479,5 +3494,9 @@ export function apply(ctx) {
       const created = await published;
       return { ok: true, run: { id: created.id, workflowId: created.workflowId, status: 'running' } };
     }));
-  }
+  };
+
+  // Registered now if the web server is already composed, or whenever it appears.
+  if (ctx.get('webServer') === undefined) ctx.inject(['webServer'], registerWebBridge);
+  else registerWebBridge(ctx);
 }
