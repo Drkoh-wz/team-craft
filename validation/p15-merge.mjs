@@ -296,8 +296,22 @@ try {
   const merges = git(['log', '--oneline', '--merges', '-5']).trim()
   check('C1.2 历史里存在合并提交（本次合并没有退化成 fast-forward 的快照）',
     merges !== '', merges.split('\n')[0] || '')
-  const p13Ancestor = git(['merge-base', '--is-ancestor', '4e1bac0', 'HEAD']) // throws on non-ancestor
-  check('C1.3 P13 分支的尖端确实是当前 HEAD 的祖先（租赁团队与停机能力都在树上）', p13Ancestor === '', 'exit 0')
+  // Resolved through TOPOLOGY, not through a hash. A hash written here turns any
+  // history rewrite into a false alarm about the merge itself -- which is exactly
+  // what happened when P13's documents were stripped from history and 4e1bac0
+  // stopped existing. This form also survives a clone that only carries main,
+  // and it checks more than ancestry did: the merge's second parent must be the
+  // P13 line AND must actually carry the specialization.
+  const mergeSha = git(['log', '--merges', '--format=%H', '-1']).trim()
+  const mergeParents = mergeSha === ''
+    ? []
+    : git(['rev-list', '--parents', '-n', '1', mergeSha]).trim().split(/\s+/).slice(1)
+  const secondSubject = mergeParents.length === 2 ? git(['log', '-1', '--format=%s', mergeParents[1]]).trim() : ''
+  const secondCarriesSpecs = mergeParents.length === 2 &&
+    git(['ls-tree', '--name-only', mergeParents[1]]).split('\n').includes('specializations')
+  check('C1.3 最近一次合并的第二个父提交就是 P13 那条线（租赁团队与停机能力是被合进来的，不只是文件碰巧在树上）',
+    mergeParents.length === 2 && /^P13/.test(secondSubject) && secondCarriesSpecs,
+    `${mergeParents.length} parents, second = ${JSON.stringify(secondSubject)}${secondCarriesSpecs ? ' (carries specializations/)' : ''}`)
 } catch (e) {
   blockFailure('C1 git 拓扑', e)
 }

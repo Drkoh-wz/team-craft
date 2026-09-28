@@ -38,6 +38,8 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 不用构建，也没有需要批准的步骤。
 
+本版本针对 **DeepSeek Harness `0.1.5-rc.1`**、`@deepseek-ai/*` **`0.1.5-rc.2`**、**Node 24** 做过端到端验证，`packages/team-flowise/package.json` 里的 `engines.dsh` 与 peer 范围也是照着这套组合写的。哪天 harness 更新后插件挂不上了——行没激活，或者 `team_*` 工具不再出现——先对照这几个版本号。
+
 请装进有 web app 的 profile，这样界面才会出现。（装进裸 profile 也挂得上，只是没有浏览器那一半。）
 
 然后重启 dsh。宿主代码和客户端 bundle 都是启动时读的，不重启就不生效。

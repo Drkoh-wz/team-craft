@@ -38,6 +38,8 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 There is no build step, and nothing to approve.
 
+Built and verified against **DeepSeek Harness `0.1.5-rc.1`**, with the `@deepseek-ai/*` packages at **`0.1.5-rc.2`**, on **Node 24**. That is the combination this release was tested on end to end, and what `engines.dsh` and the peer ranges in `packages/team-flowise/package.json` are written for. If a harness update ever leaves the plugin unmounted — the row never activates, or the `team_*` tools stop appearing — compare against those numbers before anything else.
+
 Install into a profile that has a web app, so you actually get the UI. (The plugin mounts in a bare profile too; you just get no browser half.)
 
 Now restart dsh. Host code and the client bundle are both read at startup, so nothing is live until you do.
