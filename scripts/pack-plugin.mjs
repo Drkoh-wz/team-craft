@@ -98,11 +98,15 @@ const REQUIRED_FILES = [
 	'scripts/uninstall.mjs',
 ];
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.cache', '.turbo']);
+/** Screenshots are in this list for a different reason than the rest: they are
+ *  not junk, but they are for the storefront and the README, both of which read
+ *  the REPOSITORY, never the installed plugin. Shipping them would add ~400 KB
+ *  to an archive whose whole job is to be unpacked on someone else's machine. */
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.cache', '.turbo', 'screenshots']);
 /** Lockfiles are excluded on purpose: the profile owns dependency resolution,
  *  and a nested lockfile pinning an old tree inside a distributable is the exact
  *  "stale binary that no longer matches the tree" trap P12 cleaned up. */
-const SKIP_FILES = new Set(['package-lock.json', 'pnpm-lock.yaml']);
+const SKIP_FILES = new Set(['package-lock.json', 'pnpm-lock.yaml', 'screenshots.json']);
 const SKIP_FILE_RE = /\.(zip|tar|tgz|tar\.gz|7z)$/i;
 const BACKUP_RE = /\.bak-\d+$/;
 
@@ -372,7 +376,9 @@ by this version, because there is no legacy row to retire.
 
 ## What is NOT in this archive
 
-- \`node_modules\` (dependencies come from the profile) and lockfiles;
+- \`node_modules\` (dependencies come from the profile), lockfiles, and the
+  \`screenshots/\` assets (those serve the README and the plugin storefront, which
+  read the repository rather than the installed plugin);
 - any specialization / team pack -- those are separate archives. The leasing
   risk team ships as \`leasing-risk-team-<version>.tar.gz\` from
   \`scripts/pack-specialization.mjs\`, and its installer targets a plugin
@@ -570,6 +576,9 @@ function main(argv) {
 	check('F1.1 no node_modules / dist / archive / backup entries', forbidden.length === 0, forbidden.slice(0, 3).map((f) => f.name).join(', ') || 'clean');
 	check('F1.2 no specialization files leaked in (this archive is the engine, not a team)',
 		back.every((f) => !f.name.startsWith('specializations/')), 'entries=' + back.length);
+	const imageEntries = back.filter((f) => /(^|\/)screenshots\//.test(f.name) || /screenshots\.json$/.test(f.name));
+	check('F1.5 no screenshot assets in the archive (they serve the README and the storefront, which read the repository — not the installed plugin)',
+		imageEntries.length === 0, imageEntries.slice(0, 3).map((f) => f.name).join(', ') || 'clean');
 	const absoluteHits = [];
 	for (const f of back) {
 		if (!/\.(md|mjs|js|json|yml|yaml|txt)$/i.test(f.name)) continue;

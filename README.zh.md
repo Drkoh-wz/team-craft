@@ -13,15 +13,15 @@
 
 **角色。** Agents 页把每个已存角色连同它将要使用的模型路由、以及人设的一句话摘要列出来。在这里建一个角色只是写一条记录；运行时某个节点点名它，才会读它。
 
-![Agents 页：角色行，附 provider/model 与人设字数](images/角色.png)
+![Agents 页：角色行，附 provider/model 与人设字数](packages/team-flowise/screenshots/roles.png)
 
 **任务看板。** 运行的每个节点都会变成一条台账任务，所以看板就是这次运行自己的状态——列是生命周期，卡片带着负责人与迭代轮次。`it1` 表示第一轮；被退回过的卡片会写出来。
 
-![任务看板：已排队 / 已提交 / 进行中三列，每张卡片有负责人与迭代轮次](images/任务看板.png)
+![任务看板：已排队 / 已提交 / 进行中三列，每张卡片有负责人与迭代轮次](packages/team-flowise/screenshots/task-board.png)
 
 **运行进度。** 右侧栏承载这次运行的实时视图：节点图与它逐波次的派发、每个角色各自的进度，以及你选中的那个节点的实际执行条件——provider 与 model、reasoning effort、输出上限、它拿到的人设，以及评审结论。下面这次运行，是这个插件在**给自己**写界面。
 
-![右侧栏进度页：节点图、各角色进度，以及所选节点的模型路由、人设与评审结论](images/多角色进度.png)
+![右侧栏进度页：节点图、各角色进度，以及所选节点的模型路由、人设与评审结论](packages/team-flowise/screenshots/run-progress.png)
 
 ---
 
@@ -142,7 +142,7 @@ node scripts/uninstall.mjs --remove-skill   # 连技能一起卸（默认保留�
 | `deploy/` | 插件是怎么接进 dsh profile 的，外加一份可移植的 profile 快照 |
 | `validation/` | 验收脚本（`p8`、`p10`、`p11`、`p12`、`p13`、`p15`、`p16`） |
 | `workflows/` | 示例工作流定义 |
-| `images/` | 上面的截图 |
+| `packages/team-flowise/screenshots/` | 上面的截图（同时就是市场声明的那些文件） |
 
 ## 贡献者须知
 
@@ -190,7 +190,9 @@ fresh `dsh plugin add`，stock profile：
 
 ### 市场里的截图
 
-dsh-market 会像 App Store 那样展示截图，仓库通过放在**包的 `package.json` 旁边**的 `screenshots.json` 来声明——monorepo 条目就是放在对应子目录里，且路径里不能有 `..`。本仓库的图放在仓库根的 `images/`，在 `packages/team-flowise/` 之外，所以本仓库不声明，市场会退回到从本 README 里自动抽取图片。若想控制展示顺序，把图片挪进 `packages/team-flowise/`，在那里加这个文件即可。
+dsh-market 会像 App Store 那样展示截图，仓库通过放在**包的 `package.json` 旁边**的 `screenshots.json` 来声明——monorepo 条目就是放在对应子目录里，且路径里不能有 `..`。它们现在就在那里：`packages/team-flowise/screenshots.json` 按展示顺序列出 `packages/team-flowise/screenshots/` 下的三张图。本 README 链的是同一批文件，所以改动文件名不可能只烂掉一边。
+
+这些图**刻意不进任何分发包**：`scripts/pack-plugin.mjs` 跳过 `screenshots/`，`packages/team-flowise/package.json` 的 `files` 列表则让 `npm pack` 不把它们带进包管理器消费的那个 tarball。两者都是**被断言**的而不是被期望的——真有截图混进归档，打包器会红。
 
 ### Release tarball（可选）
 

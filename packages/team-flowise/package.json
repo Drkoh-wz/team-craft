@@ -6,6 +6,12 @@
   "private": true,
   "type": "module",
   "main": "src/index.js",
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -13,6 +19,12 @@
     "multi-agent",
     "orchestration"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Drkoh-wz/team-craft.git",
+    "directory": "packages/team-flowise"
+  },
+  "homepage": "https://github.com/Drkoh-wz/team-craft/tree/main/packages/team-flowise#readme",
   "exports": {
     ".": "./src/index.js",
     "./client": "./src/client/index.js",

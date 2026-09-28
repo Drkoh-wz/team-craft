@@ -21,13 +21,13 @@ bounded rework, a durable run ledger, and a progress panel in the web UI.
 run under and a one-line summary of its persona. A role created here is a plain
 record; the run reads it when a node names it.
 
-![The Agents tab: role rows with their provider/model and persona size](images/角色.png)
+![The Agents tab: role rows with their provider/model and persona size](packages/team-flowise/screenshots/roles.png)
 
 **Task board.** Every node of a run becomes one ledger task, so the board is the
 run's own state — columns are lifecycle, and a card carries its assignee and its
 iteration count. `it1` means first attempt; a card that was sent back says so.
 
-![The task board: queued / submitted / in-progress columns with assignee and iteration per card](images/任务看板.png)
+![The task board: queued / submitted / in-progress columns with assignee and iteration per card](packages/team-flowise/screenshots/task-board.png)
 
 **Run progress.** The right sidebar carries the live run: the node graph with its
 wave-by-wave dispatch, each role's own progress, and — for the node you select —
@@ -35,7 +35,7 @@ what it actually ran with: provider and model, reasoning effort, output cap, the
 persona it got, and the reviewer's verdict. The run below is this plugin
 building its own UI.
 
-![The right-pane progress page: node graph, per-role progress, and the selected node's model route, persona and review verdict](images/多角色进度.png)
+![The right-pane progress page: node graph, per-role progress, and the selected node's model route, persona and review verdict](packages/team-flowise/screenshots/run-progress.png)
 
 ---
 
@@ -228,7 +228,7 @@ Restart dsh afterwards — for the same reason as above.
 | `deploy/` | how the plugin is wired into a dsh profile, plus a portable profile snapshot |
 | `validation/` | the acceptance scripts (`p8`, `p10`, `p11`, `p12`, `p13`, `p15`, `p16`) |
 | `workflows/` | example workflow definitions |
-| `images/` | the screenshots above |
+| `packages/team-flowise/screenshots/` | the screenshots above — also the files the storefront declares |
 
 ## Notes for contributors
 
@@ -307,11 +307,17 @@ unmet peers on every host-plane plugin. That warning is expected.
 
 dsh-market shows AppStore-style screenshots, and a repository declares them with
 a `screenshots.json` **next to the package's `package.json`** — for a monorepo
-entry that means inside the subdirectory, and the paths may not contain `..`. The
-images here live at the repository root (`images/`), which is outside
-`packages/team-flowise/`, so this repository declares nothing and the storefront
-falls back to extracting images from this README. To curate the order instead,
-move the images under `packages/team-flowise/` and add the file there.
+entry that means inside the subdirectory, and the paths may not contain `..`.
+That is exactly where they are: `packages/team-flowise/screenshots.json` lists
+three images under `packages/team-flowise/screenshots/`, in the order they should
+be shown. This README links those same files, so a rename cannot rot one without
+the other.
+
+The assets are deliberately in no distributable. `scripts/pack-plugin.mjs` skips
+`screenshots/`, and the `files` list in `packages/team-flowise/package.json`
+keeps `npm pack` from carrying them into the tarball a package manager consumes.
+Both are asserted rather than intended: the packer fails if a screenshot ever
+reaches the archive.
 
 ### Release tarball (optional)
 
