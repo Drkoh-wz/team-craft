@@ -69,6 +69,22 @@ Two details that are load-bearing rather than incidental:
 Restart dsh afterwards; then verify with the table under
 [Verify after the restart](#verify-after-the-restart).
 
+One limit of that command, measured rather than assumed: `dsh plugin add` will
+create a profile for a name that does not exist yet, and a profile it creates from
+scratch holds only `@deepseek-ai/dsh-base`. This bundle lists `webServer` among
+its `inject` preconditions — an assembly requirement, not a runtime lookup — so
+installing it into such a profile leaves the row `pending` and **dsh refuses to
+boot at all**:
+
+```text
+Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate
+@local/team-flowise: pending (waiting for service: webServer)
+```
+
+Install into a profile that already composes a web app, which `--profile web`
+does. `validation/preflight-install.mjs` asserts both halves of that statement,
+so neither the working route nor the sharp edge is folklore.
+
 ### From a clone
 
 Everything below covers the local-clone path, which additionally installs the
@@ -227,6 +243,7 @@ Restart dsh afterwards — for the same reason as above.
 | `skills/team-flowise/SKILL.md` | the skill installed into a skill root |
 | `deploy/` | how the plugin is wired into a dsh profile, plus a portable profile snapshot |
 | `validation/` | the acceptance scripts (`p8`, `p10`, `p11`, `p12`, `p13`, `p15`, `p16`) |
+| `validation/preflight-install.mjs` | the release gate: installs the published artefact by every route into throwaway profiles, then boots one and drives its whole HTTP surface. Opt-in — it needs network access and starts a temporary dsh host on a free port |
 | `workflows/` | example workflow definitions |
 | `packages/team-flowise/screenshots/` | the screenshots above — also the files the storefront declares |
 
@@ -268,6 +285,7 @@ which the dsh-market plugin reads. What an entry needs:
 | the `dsh-plugin` topic on the repository | repository setting, not a file |
 | a repository at least one day old | waits itself out |
 | a description that is accurate, no marketing | README first paragraph |
+| the published artefact really installs and runs | `node validation/preflight-install.mjs` — 50 checks, each route plus a booted host |
 
 An entry for a monorepo subpackage points at the subdirectory and names the
 subpackage — see the registry's `contributing.md`. This repository also ships the

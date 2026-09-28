@@ -44,6 +44,16 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 装完重启 dsh；然后按下面「重启后如何确认」那张表逐条核对。
 
+那条命令有一个限制，是量出来的不是猜的：`dsh plugin add` 对不存在的 profile 名会**自动建一个**，而它从零建出来的 profile 只有 `@deepseek-ai/dsh-base`。本 bundle 把 `webServer` 列在 `inject` 前置条件里——那是**装配要求**，不是运行时查找——所以装进这种 profile 会让该行停在 `pending`，**dsh 整个启动被拒**：
+
+```text
+Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate
+@local/team-flowise: pending (waiting for service: webServer)
+```
+
+请装进一个已经组合了 web app 的 profile，`--profile web` 就是。
+`validation/preflight-install.mjs` 把这句话的两半都做成了断言——可行的路和这条锋利边缘都不是口口相传。
+
 ### 从克隆装
 
 下面全部是本地克隆这条路：它额外会把面向 agent 的技能装上，而且完全不需要联网。
@@ -141,6 +151,7 @@ node scripts/uninstall.mjs --remove-skill   # 连技能一起卸（默认保留�
 | `skills/team-flowise/SKILL.md` | 会被装进技能根目录的技能 |
 | `deploy/` | 插件是怎么接进 dsh profile 的，外加一份可移植的 profile 快照 |
 | `validation/` | 验收脚本（`p8`、`p10`、`p11`、`p12`、`p13`、`p15`、`p16`） |
+| `validation/preflight-install.mjs` | 发布闸门：把发布产物按每一条路径装进一次性 profile，再启动其中一个、把它整套 HTTP 面跑一遍。非默认执行——它需要联网，并会在空闲端口上临时起一个 dsh |
 | `workflows/` | 示例工作流定义 |
 | `packages/team-flowise/screenshots/` | 上面的截图（同时就是市场声明的那些文件） |
 
@@ -165,6 +176,7 @@ node scripts/uninstall.mjs --remove-skill   # 连技能一起卸（默认保留�
 | 仓库打好 `dsh-plugin` topic | 仓库设置，不是文件 |
 | 仓库创建满一天 | 自己会到 |
 | 描述属实、不带营销词 | 本 README 第一段 |
+| 发布产物真的装得上、跑得起来 | `node validation/preflight-install.mjs`——50 项，覆盖每条安装路径外加一个真实启动的宿主 |
 
 monorepo 子包的条目要指向子目录、并把子包写进名字里——见 registry 的 `contributing.md`。本仓库上面那条安装命令里的路径片段，正是市场要用的那个。
 
