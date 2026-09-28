@@ -1,17 +1,41 @@
 # team-flowise — a multi-agent team orchestration plugin for dsh
 
+English | [中文](README.zh.md)
+
 `@local/team-flowise` turns "one agent does everything" into "a team of roles
 does it and leaves evidence": a dependency-ordered node graph, per-role model
 routes / personas / tool presets / timeouts, an independent review gate with
 bounded rework, a durable run ledger, and a progress panel in the web UI.
 
-- host half: `packages/team-flowise/src/index.js` (registers the `team_*` model
+- host half: `packages/team-flowise/src/index.js` — registers the `team_*` model
   tools, publishes the `teamOrchestrator` service, owns four storage domains,
-  serves `/api/team-flowise/*`)
-- client half: `packages/team-flowise/src/client/index.js` (settings section,
-  sidebar entry, right-pane progress page)
-- skill: `skills/team-flowise/SKILL.md` (tells an agent when and how to use it)
-- wiring snapshot: `deploy/` (how the plugin is mounted into a dsh profile)
+  serves `/api/team-flowise/*`
+- client half: `packages/team-flowise/src/client/index.js` — settings section,
+  sidebar entry, right-pane progress page
+- skill: `skills/team-flowise/SKILL.md` — tells an agent when and how to use it
+- wiring snapshot: `deploy/` — how the plugin is mounted into a dsh profile
+
+## Screenshots
+
+**Roles.** The Agents tab lists every stored role with the model route it will
+run under and a one-line summary of its persona. A role created here is a plain
+record; the run reads it when a node names it.
+
+![The Agents tab: role rows with their provider/model and persona size](images/角色.png)
+
+**Task board.** Every node of a run becomes one ledger task, so the board is the
+run's own state — columns are lifecycle, and a card carries its assignee and its
+iteration count. `it1` means first attempt; a card that was sent back says so.
+
+![The task board: queued / submitted / in-progress columns with assignee and iteration per card](images/任务看板.png)
+
+**Run progress.** The right sidebar carries the live run: the node graph with its
+wave-by-wave dispatch, each role's own progress, and — for the node you select —
+what it actually ran with: provider and model, reasoning effort, output cap, the
+persona it got, and the reviewer's verdict. The run below is this plugin
+building its own UI.
+
+![The right-pane progress page: node graph, per-role progress, and the selected node's model route, persona and review verdict](images/多角色进度.png)
 
 ---
 
@@ -23,7 +47,7 @@ The plugin is a plain package inside this repository, so dsh's own plugin comman
 can install it straight from GitHub — no clone, no registry:
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/<owner>/team-craft.git#path:packages/team-flowise"
+dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
 That command is a thin pnpm forwarder: it installs the package into the profile's
@@ -180,7 +204,7 @@ node scripts/uninstall.mjs --remove-skill   # also unmount the skill (default: k
 ```
 
 It removes exactly what the installer added — the link, the `dependencies` entry,
-the `dsh.profile.bundles` entry, and the whole `- insert:` block — and is
+the `dsh.profile.bundles` entry, and any legacy `- insert:` block — and is
 idempotent too (a second run reports `不存在，跳过` for everything). Comments and
 all other lines of `cordis.patch.yml` stay byte-identical; if the patch layer is
 left with no entries at all, the script re-adds a `[]` line, because dsh requires
@@ -202,8 +226,9 @@ Restart dsh afterwards — for the same reason as above.
 | `scripts/install.mjs`, `scripts/uninstall.mjs` | the portable installer / uninstaller described above |
 | `skills/team-flowise/SKILL.md` | the skill installed into a skill root |
 | `deploy/` | how the plugin is wired into a dsh profile, plus a portable profile snapshot |
-| `validation/` | the acceptance scripts (`p8`, `p10`, `p11`, `p12`) |
+| `validation/` | the acceptance scripts (`p8`, `p10`, `p11`, `p12`, `p13`, `p15`, `p16`) |
 | `workflows/` | example workflow definitions |
+| `images/` | the screenshots above |
 
 ## Notes for contributors
 
@@ -278,6 +303,16 @@ The remaining `peerDependencies` are the host bundles whose Cordis services this
 plugin `inject`s; they are intentionally not installed, and pnpm reports them as
 unmet peers on every host-plane plugin. That warning is expected.
 
+### Screenshots in the storefront
+
+dsh-market shows AppStore-style screenshots, and a repository declares them with
+a `screenshots.json` **next to the package's `package.json`** — for a monorepo
+entry that means inside the subdirectory, and the paths may not contain `..`. The
+images here live at the repository root (`images/`), which is outside
+`packages/team-flowise/`, so this repository declares nothing and the storefront
+falls back to extracting images from this README. To curate the order instead,
+move the images under `packages/team-flowise/` and add the file there.
+
 ### Release tarball (optional)
 
 Storefronts prefer a prebuilt tarball over a source build. The repository's own
@@ -298,13 +333,13 @@ point the catalog entry at it.
 ### Catalog entry
 
 The submission is one file added to `awesome-dsh-plugin/awesome-dsh-plugin`,
-named `data/plugins/<owner>__<repo>--packages-team-flowise.yml`:
+named `data/plugins/Drkoh-wz__team-craft--packages-team-flowise.yml`:
 
 ```yaml
-url: https://github.com/<owner>/team-craft/tree/main/packages/team-flowise
-name: <owner>/team-craft#team-flowise
+url: https://github.com/Drkoh-wz/team-craft/tree/main/packages/team-flowise
+name: Drkoh-wz/team-craft#team-flowise
 category: workflow
-tarball: https://github.com/<owner>/team-craft/releases/latest/download/team-flowise.tgz
+tarball: https://github.com/Drkoh-wz/team-craft/releases/latest/download/team-flowise.tgz
 description:
   en: 'Dependency-ordered multi-agent team runner for DeepSeek Harness: define roles, run a node graph with an independent review gate and bounded rework, and watch progress in the web UI.'
   zh: 'DSH 的多角色团队编排插件：定义角色、按依赖跑节点图，带独立评审与有上限的返工，并在界面里看进度。'
