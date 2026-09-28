@@ -257,14 +257,26 @@ const webHome = path.join(tmp, `home-${webProfile}`)
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
   }, null, 2) + '\n', 'utf8')
   fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n', 'utf8')
+  // The workspace file dsh itself writes when it initialises a profile (copied
+  // from one, not invented). Without it pnpm falls back to ITS OWN defaults --
+  // autoInstallPeers true, the isolated linker -- and installs 27 packages with a
+  // nested node_modules into a shape no real dsh profile ever has. That is a
+  // harness bug rather than a plugin one, and it is invisible unless the installed
+  // SET is asserted: with the wrong defaults this profile still booted and served.
+  fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\n', 'utf8')
   const env = { ...process.env, DSH_HOME: webHome }
   sh('dsh', ['plugin', '--profile', webProfile, 'add', DIST_TGZ], { env })
   const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
   console.log('    bundles after add: ' + JSON.stringify(pkg.dsh.profile.bundles))
   const files = installedFiles(path.join(dir, 'node_modules', '@local', 'team-flowise'))
-  console.log('    installed entries: ' + (files === null ? 'MISSING' : files.length))
+  console.log('    installed entries: ' + (files === null ? 'MISSING' : files.length + ' -> ' + files.join(', ')))
   ok('B2: the plugin lands in a web-shaped profile and joins its bundle list',
     Array.isArray(files) && files.includes('src/index.js') && pkg.dsh.profile.bundles.includes('@local/team-flowise'))
+  // Exactly the published set, and nothing else: this is the assertion that would
+  // have caught the harness installing under pnpm's defaults instead of dsh's.
+  ok('B2: the install pulls exactly the published 7 entries (a nested node_modules here would mean the profile is not shaped like a real one)',
+    Array.isArray(files) && files.length === 7 && !files.some((f) => f.includes('screenshots') || f.includes('node_modules')),
+    (files || []).length + ' entries')
 }
 const port = await freePort()
 const env = { ...process.env, DSH_HOME: webHome }
