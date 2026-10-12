@@ -582,7 +582,15 @@ await sleep(1500)
 const dead = await http(`${base}/api/team-flowise/ping`, { timeout: 3000 })
 ok('the temporary host is gone (port closed again)', dead.status === 0, 'status=' + dead.status)
 
-fs.rmSync(tmp, { recursive: true, force: true })
+// Housekeeping, deliberately NOT a check and deliberately retried: a path the
+// just-killed child had as its cwd, or a pnpm link, can keep a temp directory busy
+// on Windows for a moment. This used to throw here and abort the run BEFORE the
+// summary, so an entirely green gate exited 1 with no verdict printed at all.
+let cleaned = false
+for (let i = 0; i < 6 && !cleaned; i += 1) {
+  try { fs.rmSync(tmp, { recursive: true, force: true }); cleaned = true } catch { await sleep(700) }
+}
+console.log('\n    temp home: ' + (cleaned ? 'removed' : 'left behind at ' + tmp))
 
 console.log('\n### SUMMARY')
 const failed = results.filter((r) => !r.cond)
