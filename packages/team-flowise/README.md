@@ -120,6 +120,7 @@ node scripts/uninstall.mjs [--profile <dir>] [--dry-run] [--check] [--help]
 ```
 
 - 默认 profile 为用户目录下的 `web` profile（`~/.dsh/profiles/web`），**脚本不写死机器专属绝对路径**。
+- **打包的 DSH Desktop 上没有 `dsh` 命令可敲**：harness 在应用内部、profile 由应用托管，所以安装入口是应用自己的「插件」面板。收录前的直连做法——走应用自己的二进制，因为 `lib/bin.js` 位于 `app.asar` 内、普通 `node` 打不开——以及桌面端那条 peer 兼容门禁（声明的 `@deepseek-ai/dsh-*` 范围不含当前 harness 时，装上也会被启动拒绝，直到为那几个确切版本授予豁免），都写在仓库根 `README.md` 的「DSH Desktop」小节。
 - 脚本做的事：把本包链接进 profile 的 `node_modules`；在 profile 的 `package.json` 里补依赖与 `dsh.profile.bundles` 项；**删除** profile 的 `cordis.patch.yml` 里历史遗留的 `flowise-team` `- insert:` 行（本仓库早期版本写过它；宿主行现在由本包自己的 `cordis.patch.yml` 声明，profile 里留着会让同一个 id 被装配两次、宿主启动即抛 `duplicate loader entry id`）；安装技能文件。
 - 全部幂等：重复执行不产生重复链接 / 重复依赖 / 重复 bundles 项，也不会重复删行。`--check` 用退出码区分「已装且一致」与「未安装/不一致」——一个仍带着历史行的 profile 会报 3（需要迁移），这是刻意的。
 - **装完必须重启 dsh**：宿主代码与客户端 bundle 在启动时加载/快照。重启前访问新路径会得到 401（本部署的网关把未注册的 `/api` 路径伪装成 401），界面入口也不会出现。
