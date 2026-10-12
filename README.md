@@ -30,23 +30,48 @@ Seven `team_*` tools drive all of it from the chat: `team_create_agent`, `team_c
 
 ## Install
 
-You need DeepSeek Harness, and a profile that composes a web app — `web` is the usual one.
+Two clients, two different ways in. Use the one you have.
+
+### `dsh` on your PATH (the CLI, or `dsh web`)
 
 ```sh
 dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
-There is no build step, and nothing to approve.
+Or the prebuilt package, which needs no git:
+
+```sh
+dsh plugin --profile web add "https://github.com/Drkoh-wz/team-craft/releases/latest/download/team-flowise.tgz"
+```
+
+There is no build step, and nothing to approve. Install into a profile that has a web app, so you actually get the UI. (The plugin mounts in a bare profile too; you just get no browser half.) Now restart dsh — host code and the client bundle are both read at startup, so nothing is live until you do.
+
+### DSH Desktop (the packaged app)
+
+There is no `dsh` command to run here: the app carries the harness inside itself and owns its profile, so **its own plugin panel is the install surface** — this plugin shows up there once the catalog lists it. Before that, you can drive the bundled harness directly. Quit Desktop first, then in PowerShell:
+
+```powershell
+$exe = (Get-Process 'DSH Desktop' | Select-Object -First 1).Path   # resolve it before quitting
+$Desktop = Split-Path $exe
+
+$env:DSH_HOME = "$env:APPDATA\dsh-desktop\harness"
+$env:ELECTRON_RUN_AS_NODE = '1'
+& "$Desktop\DSH Desktop.exe" "$Desktop\resources\harness-node-entry.mjs" `
+  "$Desktop\resources\app.asar\node_modules\@deepseek-ai\dsh\lib\bin.js" `
+  plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+```
+
+`bin.js` lives **inside `app.asar`**, so plain `node` cannot load it: the command has to go through the app's own binary in Node mode, which is what the lines above do. Start Desktop again afterwards.
+
+Desktop also gates a plugin on the `@deepseek-ai/dsh-*` peers it declares. A range that does not include the running harness means the plugin stays installed but profile startup **denies** it until you grant an exemption for those exact versions. This build declares `>=0.2.0-rc.2 <0.3.0-0`, which matches, so there is nothing to grant.
+
+### Both
 
 Verified end to end on **DSH Desktop `0.2.0-rc.2`** and the **`dsh` CLI `0.2.0-rc.2`**, on Node 24. The peer ranges in `packages/team-flowise/package.json` say `>=0.2.0-rc.2 <0.3.0-0`, and the harness checks that declaration before it imports the plugin — so a harness that is too old refuses this plugin in one clear line instead of failing in a confusing way later.
 
 Two things worth knowing, because each of them broke this plugin once.
 
 The harness supplies the `@deepseek-ai/*` packages itself, and a copy sitting in the plugin's own directory is found *first*. A leftover `dsh-tools@0.1.x` from an old local install therefore shadowed the harness's copy, crashed on import, and took the whole Desktop bootstrap down with it. That is also why the floor is `0.2.0-rc.2`: the supply arrived in the 0.2 line, and on `0.1.5` a peers-only plugin cannot import at all. Installing from a checkout? Make sure `packages/team-flowise/node_modules` holds no `@deepseek-ai/*` — `npm install --omit=peer` in that directory is the command that keeps it right.
-
-Install into a profile that has a web app, so you actually get the UI. (The plugin mounts in a bare profile too; you just get no browser half.)
-
-Now restart dsh. Host code and the client bundle are both read at startup, so nothing is live until you do.
 
 <details>
 <summary>Installing from a clone instead</summary>
@@ -86,10 +111,13 @@ In this order. Do not trust the browser cache.
 
 | # | Check | Expected |
 |---|---|---|
-| 1 | `curl -s http://127.0.0.1:3080/api/team-flowise/ping` | `{"ok":true,"pong":true,"domains":[…4…]}` |
-| 2 | A new agent session's tool list | the seven `team_*` tools |
-| 3 | Settings | a **team-flowise** section: roles, workflows, runs |
-| 4 | Right sidebar | a **多 Agent 进度** tab |
+| 1 | A new agent session's tool list | the seven `team_*` tools |
+| 2 | Settings | a **team-flowise** section: roles, workflows, runs |
+| 3 | Right sidebar | a **多 Agent 进度** tab |
+
+On the CLI, `curl -s http://127.0.0.1:<port>/api/team-flowise/ping` should also answer `{"ok":true,"pong":true,"domains":[…4…]}` — `<port>` being whatever `dsh web` printed.
+
+On DSH Desktop skip that one: the port is chosen per launch, and a local HTTP request is answered **401** unless it carries the boot token from the URL the app opened, so the three checks above are the honest ones. A 404 where you expected the ping means it never mounted; the harness log says why, and the most common reason is a duplicate `flowise-team` row.
 
 A 404 on 1 means it is not mounted — the host log says why, and a duplicate `flowise-team` row is the usual answer. If 1 works but 2 or 3 does not, it mounted and contributed nothing; the log will say that too.
 
@@ -99,9 +127,11 @@ A 404 on 1 means it is not mounted — the host log says why, and a duplicate `f
 dsh plugin --profile web remove @local/team-flowise
 ```
 
+On DSH Desktop, the same command with `add` swapped for `remove`, through the app's own binary — take the block in the **DSH Desktop** section above and change that one word — or just remove it from the app's plugin panel.
+
 Or, from a clone, `node scripts/uninstall.mjs` — which also takes the skill back out with `--remove-skill`, and leaves everything it did not write alone.
 
-Restart dsh afterwards, for the same reason as before.
+Restart afterwards, for the same reason as before.
 
 ## How it works
 

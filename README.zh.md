@@ -30,23 +30,48 @@
 
 ## 安装
 
-需要 DeepSeek Harness，以及一个组合了 web app 的 profile——通常就是 `web`。
+有两种客户端，装法不同。按你手上的那种来。
+
+### PATH 上有 `dsh`（命令行，或 `dsh web`）
 
 ```sh
 dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
-不用构建，也没有需要批准的步骤。
+或者用现成的包，不需要 git：
+
+```sh
+dsh plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+```
+
+不用构建，也没有需要批准的步骤。请装进有 web app 的 profile，这样界面才会出现。（装进裸 profile 也挂得上，只是没有浏览器那一半。）然后重启 dsh——宿主代码和客户端 bundle 都是启动时读的，不重启就不生效。
+
+### DSH Desktop（打包的桌面应用）
+
+桌面端**没有 `dsh` 命令可敲**：harness 在应用内部，profile 也由应用自己托管，所以**它自己的「插件」面板就是安装入口**——本插件被目录收录后就会出现在那里。在收录之前，你可以直接驱动应用内置的 harness。**先完全退出 Desktop**，然后在 PowerShell 里：
+
+```powershell
+$exe = (Get-Process 'DSH Desktop' | Select-Object -First 1).Path   # 退出前先把路径取出来
+$Desktop = Split-Path $exe
+
+$env:DSH_HOME = "$env:APPDATA\dsh-desktop\harness"
+$env:ELECTRON_RUN_AS_NODE = '1'
+& "$Desktop\DSH Desktop.exe" "$Desktop\resources\harness-node-entry.mjs" `
+  "$Desktop\resources\app.asar\node_modules\@deepseek-ai\dsh\lib\bin.js" `
+  plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+```
+
+`bin.js` **在 `app.asar` 里面**，普通 `node` 打不开它——必须像上面这样走应用自己的二进制、以 Node 模式运行。装完重新启动 Desktop。
+
+桌面版还会按插件声明的 `@deepseek-ai/dsh-*` peer 范围做门禁：范围不包含当前 harness 时，插件会装上但**启动被拒绝**，需要你为那几个确切版本授予豁免。本版本声明的是 `>=0.2.0-rc.2 <0.3.0-0`，匹配，不需要授予任何东西。
+
+### 两种客户端都适用
 
 已在 **DSH Desktop `0.2.0-rc.2`** 与 **`dsh` CLI `0.2.0-rc.2`** 上端到端验证（Node 24）。`packages/team-flowise/package.json` 里的 peer 范围写的是 `>=0.2.0-rc.2 <0.3.0-0`，而 harness 会在导入插件**之前**核对这个声明——所以版本过旧的 harness 会用**一行清晰的拒绝**说明不兼容，而不是稍后以一种令人困惑的方式失败。
 
 有两件事值得知道，因为它们各自把这个插件弄挂过一次。
 
 `@deepseek-ai/*` 由 harness 自己供给，而插件目录里若有一份副本，Node 会**先命中副本**。一个旧本地安装残留的 `dsh-tools@0.1.x` 因此遮住了 harness 的那份，import 时崩溃，把整个 Desktop 启动一起带下去了。这也正是下界取 `0.2.0-rc.2` 的原因：这套供给是 0.2 那条线才有的，在 `0.1.5` 上只声明 peer 的插件根本 import 不了。如果你从检出目录安装，请确认 `packages/team-flowise/node_modules` 里没有 `@deepseek-ai/*`——在该目录跑 `npm install --omit=peer` 就是把它保持正确的命令。
-
-请装进有 web app 的 profile，这样界面才会出现。（装进裸 profile 也挂得上，只是没有浏览器那一半。）
-
-然后重启 dsh。宿主代码和客户端 bundle 都是启动时读的，不重启就不生效。
 
 <details>
 <summary>或者从克隆安装</summary>
@@ -86,12 +111,13 @@ rmSync(tree, { recursive: true })       ->  OK，而目标目录现在是空的
 
 | # | 检查 | 期望 |
 |---|---|---|
-| 1 | `curl -s http://127.0.0.1:3080/api/team-flowise/ping` | `{"ok":true,"pong":true,"domains":[…4 个…]}` |
-| 2 | 新开会话，看它的工具列表 | 那七个 `team_*` 工具 |
-| 3 | 设置页 | 出现 **team-flowise** 分区：角色、工作流、运行 |
-| 4 | 侧边栏 | 出现 **多 Agent 进度** 页签 |
+| 1 | 新开会话，看它的工具列表 | 那七个 `team_*` 工具 |
+| 2 | 设置页 | 出现 **team-flowise** 分区：角色、工作流、运行 |
+| 3 | 侧边栏 | 出现 **多 Agent 进度** 页签 |
 
-第 1 条返回 404 就是没挂上——宿主日志会说明原因，最常见的是 `flowise-team` 行重复。第 1 条通了但 2 或 3 不通，说明挂上了却没贡献东西，日志同样会讲。
+命令行那条路还可以加一条：`curl -s http://127.0.0.1:<端口>/api/team-flowise/ping` 应返回 `{"ok":true,"pong":true,"domains":[…4 个…]}`（`<端口>` 就是 `dsh web` 打印的那个）。
+
+**DSH Desktop 上请跳过这一条**：端口每次启动都可能不同，而且本地 HTTP 请求若不带应用打开界面时 URL 里的 boot token，会得到 **401**，所以上面三条才是能作准的。本该出现 ping 的位置返回 404，就是没挂上——宿主日志会说明原因，最常见的是 `flowise-team` 行重复。挂上了但 1 或 2 不通，说明挂上了却没贡献东西，日志同样会讲。
 
 ## 卸载
 
@@ -99,9 +125,11 @@ rmSync(tree, { recursive: true })       ->  OK，而目标目录现在是空的
 dsh plugin --profile web remove @local/team-flowise
 ```
 
+DSH Desktop 上用同一条命令、把 `add` 换成 `remove`，同样走应用自己的二进制——拿上面 **DSH Desktop** 那段代码块改这一个词；或者直接在应用的插件面板里移除。
+
 从克隆装的话用 `node scripts/uninstall.mjs`——加 `--remove-skill` 连技能一起收回，而且不碰任何不是它写的东西。
 
-之后重启 dsh，理由同前。
+之后重启，理由同前。
 
 ## 它怎么工作
 
