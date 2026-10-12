@@ -48,7 +48,21 @@ dsh plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/la
 
 ### DSH Desktop（打包的桌面应用）
 
-桌面端**没有 `dsh` 命令可敲**：harness 在应用内部，profile 也由应用自己托管，所以**它自己的「插件」面板就是安装入口**——本插件被目录收录后就会出现在那里。在收录之前，你可以直接驱动应用内置的 harness。**先完全退出 Desktop**，然后在 PowerShell 里：
+桌面端**没有 `dsh` 命令可敲**：harness 在应用内部，profile 也由应用自己托管，所以**它自己的「插件」面板就是安装入口**——本插件被目录收录后就会出现在那里。在收录之前，一个脚本就够。**先完全退出 Desktop**，然后：
+
+```powershell
+.\scripts\install-desktop.ps1
+```
+
+它会自己找到应用、在 Desktop 运行时**拒绝执行**（这正是防止它自己的 profile 维护把你的改动对账掉）、用应用自带的 pnpm、装上本项目的 Release 包，并列出重新启动后该看哪几处。其余选项是 `-Action uninstall`、`-Action check`、`-Spec <pnpm 能接受的任何东西>`、`-DryRun`、`-Force`；`Get-Help .\scripts\install-desktop.ps1 -Full` 会打印出来。它也放在 Release 归档里的 `scripts/` 下。
+
+三件值得知道的事，都是手工操作容易踩的：
+
+- `lib/bin.js` **在 `app.asar` 里面**，普通 `node` 打不开它。必须**走应用自己的二进制**、以 Node 模式驱动 harness——脚本做的就是这件事。
+- pnpm 会打印一段 `missing peer`，点名 `@deepseek-ai/*` 那几个包。**这是预期的，不是失败**：那些包由 harness 在导入时自己供给，本包刻意不 vendor 任何一个。
+- 如果 Windows 拒绝执行脚本——`running scripts is disabled` 或 `not digitally signed`——说明文件带着"已下载"标记。`Unblock-File .\scripts\install-desktop.ps1` 可以清掉，或者临时用 `powershell -ExecutionPolicy Bypass -File .\scripts\install-desktop.ps1` 跑一次。
+
+想直接看命令而不是跑脚本？就是应用自己的三个文件；`--dump-config` 是个只读的试探办法：
 
 ```powershell
 $exe = (Get-Process 'DSH Desktop' | Select-Object -First 1).Path   # 退出前先把路径取出来
@@ -61,7 +75,7 @@ $env:ELECTRON_RUN_AS_NODE = '1'
   plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
 ```
 
-`bin.js` **在 `app.asar` 里面**，普通 `node` 打不开它——必须像上面这样走应用自己的二进制、以 Node 模式运行。装完重新启动 Desktop。
+装完重新启动 Desktop。
 
 桌面版还会按插件声明的 `@deepseek-ai/dsh-*` peer 范围做门禁：范围不包含当前 harness 时，插件会装上但**启动被拒绝**，需要你为那几个确切版本授予豁免。本版本声明的是 `>=0.2.0-rc.2 <0.3.0-0`，匹配，不需要授予任何东西。
 

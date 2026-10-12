@@ -48,7 +48,21 @@ There is no build step, and nothing to approve. Install into a profile that has 
 
 ### DSH Desktop (the packaged app)
 
-There is no `dsh` command to run here: the app carries the harness inside itself and owns its profile, so **its own plugin panel is the install surface** — this plugin shows up there once the catalog lists it. Before that, you can drive the bundled harness directly. Quit Desktop first, then in PowerShell:
+There is no `dsh` command to run here: the app carries the harness inside itself and owns its profile, so **its own plugin panel is the install surface** — this plugin shows up there once the catalog lists it. Until then, one script does the work. Quit Desktop first, then:
+
+```powershell
+.\scripts\install-desktop.ps1
+```
+
+It finds the app, refuses to run while Desktop is up (that is what stops its own profile maintenance from reconciling the change away), picks up the pnpm the app ships, installs this project's published release package, and lists what to check when you start Desktop again. `-Action uninstall`, `-Action check`, `-Spec <anything pnpm accepts>`, `-DryRun` and `-Force` are the rest; `Get-Help .\scripts\install-desktop.ps1 -Full` prints them. It is in the release archive too, under `scripts/`.
+
+Three things worth knowing, all of them ways this goes wrong by hand:
+
+- `lib/bin.js` lives **inside `app.asar`**, so plain `node` cannot load it. The harness has to be driven *through the app's own binary* in Node mode, which is what the script does.
+- pnpm prints a block of `missing peer` lines for the `@deepseek-ai/*` packages. That is expected, not a failure: the harness supplies those itself at import time, and this package deliberately vendors none of them.
+- If Windows refuses to run the script — `running scripts is disabled`, or `not digitally signed` — the file carries the mark of having been downloaded. `Unblock-File .\scripts\install-desktop.ps1` clears it, or run it once as `powershell -ExecutionPolicy Bypass -File .\scripts\install-desktop.ps1`.
+
+Rather see the command than run a script? It is the app's own three files, and `--dump-config` is a read-only way to try it:
 
 ```powershell
 $exe = (Get-Process 'DSH Desktop' | Select-Object -First 1).Path   # resolve it before quitting
@@ -61,7 +75,7 @@ $env:ELECTRON_RUN_AS_NODE = '1'
   plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
 ```
 
-`bin.js` lives **inside `app.asar`**, so plain `node` cannot load it: the command has to go through the app's own binary in Node mode, which is what the lines above do. Start Desktop again afterwards.
+Start Desktop again afterwards.
 
 Desktop also gates a plugin on the `@deepseek-ai/dsh-*` peers it declares. A range that does not include the running harness means the plugin stays installed but profile startup **denies** it until you grant an exemption for those exact versions. This build declares `>=0.2.0-rc.2 <0.3.0-0`, which matches, so there is nothing to grant.
 

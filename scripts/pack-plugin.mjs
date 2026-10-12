@@ -96,6 +96,7 @@ const REQUIRED_FILES = [
 	`${SKILL_REL}/SKILL.md`,
 	'scripts/install.mjs',
 	'scripts/uninstall.mjs',
+	'scripts/install-desktop.ps1',
 ];
 
 /** Screenshots are in this list for a different reason than the rest: they are
@@ -297,7 +298,7 @@ function collectEntries(pluginDir, skillDir) {
 	collectTree(pluginDir, PACKAGE_REL, entries, skipped);
 	if (isDir(skillDir)) collectTree(skillDir, SKILL_REL, entries, skipped);
 	else skipped.push(`${SKILL_REL}/ (skill directory not found)`);
-	for (const rel of ['scripts/install.mjs', 'scripts/uninstall.mjs']) {
+	for (const rel of ['scripts/install.mjs', 'scripts/uninstall.mjs', 'scripts/install-desktop.ps1']) {
 		const abs = join(REPO_ROOT, rel);
 		if (!isFile(abs)) throw new Fail(`installer missing from the repository: ${abs}`);
 		entries.push({ name: rel, abs, data: readFileSync(abs), mode: 0o644, mtimeSec: Math.floor(statSync(abs).mtimeMs / 1000) });
@@ -581,7 +582,7 @@ function main(argv) {
 		imageEntries.length === 0, imageEntries.slice(0, 3).map((f) => f.name).join(', ') || 'clean');
 	const absoluteHits = [];
 	for (const f of back) {
-		if (!/\.(md|mjs|js|json|yml|yaml|txt)$/i.test(f.name)) continue;
+		if (!/\.(md|mjs|js|ps1|json|yml|yaml|txt)$/i.test(f.name)) continue;
 		const text = f.data.toString('utf8');
 		const m = DRIVE_PATH_RE.exec(text);
 		if (m) absoluteHits.push(`${f.name}: ${JSON.stringify(text.slice(Math.max(0, m.index - 20), m.index + 24))}`);
@@ -592,6 +593,19 @@ function main(argv) {
 	check('F1.4 the installer inside the archive is byte-identical to the repository copy',
 		installEntry !== undefined && sha256(installEntry.data) === sha256(readFileSync(INSTALLER)),
 		installEntry === undefined ? 'missing' : sha256(installEntry.data).slice(0, 16));
+	// The desktop helper has to survive the trip for the same reason the CLI
+	// installers do -- it is the only route a desktop user has before the catalog
+	// lists this plugin -- and it has a constraint they do not: Windows PowerShell
+	// 5.1 reads a .ps1 as ANSI unless it carries a BOM, so any non-ASCII character
+	// in it prints as mojibake for exactly the users it is written for.
+	const desktopEntry = back.find((f) => f.name === 'scripts/install-desktop.ps1');
+	const desktopText = desktopEntry === undefined ? '' : desktopEntry.data.toString('utf8');
+	const nonAscii = [...desktopText].filter((c) => c.charCodeAt(0) > 127);
+	check('F1.6 the desktop installer is in the archive', desktopEntry !== undefined,
+		desktopEntry === undefined ? 'missing' : desktopEntry.data.length + ' bytes');
+	check('F1.7 the desktop installer is pure ASCII (Windows PowerShell 5.1 reads a .ps1 as ANSI, so non-ASCII prints as mojibake)',
+		desktopEntry !== undefined && nonAscii.length === 0,
+		nonAscii.length === 0 ? 'clean' : nonAscii.length + ' non-ASCII char(s)');
 
 	/* ---- I/K/N/U/V: extract and really install it ---- */
 	if (!opts.verify) {
