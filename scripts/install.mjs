@@ -40,6 +40,7 @@ import {
 	rmSync,
 	statSync,
 	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -630,6 +631,27 @@ function validatePackage(ctx) {
 	return parsed;
 }
 
+/**
+ * Remove a link (or a Windows junction) without touching what it points at.
+ *
+ * `rmSync(p, { recursive: false })` cannot do this on Windows. A junction reports
+ * isSymbolicLink() from lstat, but rm resolves the path, sees a directory and
+ * throws ERR_FS_EISDIR — which is how the uninstaller died before running any of
+ * its steps and reported "0 removed / 0 already absent / 0 left over".
+ *
+ * `recursive: true` is NOT the fix: measured on Node 24 / Windows, it removes the
+ * junction AND the target's contents, i.e. the plugin's own source. unlinkSync
+ * removes the link alone; rmdirSync is the fallback for a bare junction.
+ */
+function removeLink(p) {
+	try {
+		unlinkSync(p);
+	} catch (error) {
+		if (error && (error.code === 'EISDIR' || error.code === 'EPERM')) rmdirSync(p);
+		else throw error;
+	}
+}
+
 function createLink(ctx, linkPath) {
 	mkdirSync(dirname(linkPath), { recursive: true });
 	try {
@@ -670,7 +692,7 @@ function stepLink(ctx) {
 			throw new FatalError(`node_modules 链接冲突：${detail}\n  脚本不会悄悄覆盖；确认后加 --force 重建，或先跑 uninstall.mjs。`);
 		}
 		if (ctx.dryRun) return record('1-link', 'changed', `将删除旧链接（${info.abs ?? '(未知目标)'}）并重建 → ${ctx.pkg}`);
-		rmSync(linkPath, { recursive: false, force: true });
+		removeLink(linkPath);
 		createLink(ctx, linkPath);
 		return record('1-link', 'changed', `已重建链接：${linkPath} → ${ctx.pkg}（旧目标 ${info.abs ?? '(未知目标)'}）`);
 	}
@@ -977,7 +999,10 @@ function rollback(ctx) {
 				if (action.backup && existsSync(action.backup)) copyFileSync(action.backup, action.file);
 				else if (existsSync(action.file)) rmSync(action.file, { force: true });
 			} else if (action.kind === 'link') {
-				if (existsSync(action.path)) rmSync(action.path, { recursive: action.mode === 'copy', force: true });
+				if (existsSync(action.path)) {
+					if (action.mode === 'copy') rmSync(action.path, { recursive: true, force: true });
+					else removeLink(action.path);
+				}
 			} else if (action.kind === 'moved') {
 				if (existsSync(action.to)) renameSync(action.to, action.from);
 			} else if (action.kind === 'removePath') {

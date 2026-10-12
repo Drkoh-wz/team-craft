@@ -20,7 +20,7 @@
  * Usage: node scripts/uninstall.mjs [options]   (see --help)
  */
 
-import { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -440,6 +440,28 @@ function validateProfile(ctx) {
 	return { pkgJsonPath, text, obj, patchPath: join(dir, 'cordis.patch.yml'), patchExists: existsSync(join(dir, 'cordis.patch.yml')) };
 }
 
+/**
+ * Remove a link (or a Windows junction) without touching what it points at.
+ *
+ * `rmSync(p, { recursive: false })` cannot do this on Windows. A junction reports
+ * isSymbolicLink() from lstat, but rm resolves the path, sees a directory and
+ * throws ERR_FS_EISDIR — which is exactly what happened here: stepLink threw,
+ * every later step went unrun, and the run reported "0 removed / 0 already
+ * absent / 0 left over" as though there had been nothing to remove.
+ *
+ * `recursive: true` is NOT the fix: measured on Node 24 / Windows, it removes the
+ * junction AND the target's contents, i.e. the plugin's own source. unlinkSync
+ * removes the link alone; rmdirSync is the fallback for a bare junction.
+ */
+function removeLink(p) {
+	try {
+		unlinkSync(p);
+	} catch (error) {
+		if (error && (error.code === 'EISDIR' || error.code === 'EPERM')) rmdirSync(p);
+		else throw error;
+	}
+}
+
 function stepLink(ctx) {
 	const linkPath = join(ctx.profile, 'node_modules', PLUGIN_NAME);
 	const info = inspectPath(linkPath);
@@ -473,8 +495,8 @@ function stepLink(ctx) {
 		ctx.undo.push({ kind: 'moved', from: linkPath, to: backup });
 		CHANGES.push({ file: linkPath, backup });
 	} else {
-		// remove the link ONLY: recursive:false never follows it into the package
-		rmSync(linkPath, { recursive: false, force: true });
+		// remove the link ONLY: never follow it into the package
+		removeLink(linkPath);
 		ctx.undo.push({ kind: 'link', path: linkPath, target: info.abs });
 	}
 
@@ -750,7 +772,13 @@ function main(argv) {
 	const finish = (code, extra) => {
 		log('');
 		log('----------------------------------------------------------------');
-		log(`结果：${STEPS.filter((s) => s.status === 'removed').length} 项移除 / ${STEPS.filter((s) => s.status === 'unchanged').length} 项本就不存在 / ${STEPS.filter((s) => s.status === 'present').length} 项残留`);
+		// Errors and conflicts belong in the count. Without them an aborted run
+		// printed "0 removed / 0 already absent / 0 left over" right under the
+		// error it was aborting for, which reads as "there was nothing here".
+		const n = (status) => STEPS.filter((s) => s.status === status).length;
+		const rest = n('error') + n('conflict');
+		const tail = rest > 0 ? `（另有 ${n('error')} 项错误 / ${n('conflict')} 项冲突——原因见上方 [错误] / [冲突] 行）` : '';
+		log(`结果：${n('removed')} 项移除 / ${n('unchanged')} 项本就不存在 / ${n('present')} 项残留${tail}`);
 		emitReport(ctx, code, extra);
 		return code;
 	};
