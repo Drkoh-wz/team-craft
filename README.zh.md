@@ -128,7 +128,8 @@ dsh plugin --profile web remove @local/team-flowise
 
 - 宿主半是纯 ESM JavaScript；客户端半用 `React.createElement`，必须保持 `window.__ModuleLoader__.load({ id, factory })` 这个形状。两边都不许引入运行时依赖。
 - `deploy/web-profile/package.json` 是可移植模板，它的依赖路径是相对它自己算的。不要手改活动 profile，跑安装器。
-- `node validation/preflight-install.mjs` 是发布闸门：把包按每一条发布路径装进一次性 profile，再启动其中一个、把它整套 HTTP 面跑一遍。它需要联网，并会临时起一个宿主。
+- `node validation/preflight-install.mjs` 是发布闸门：把包按每一条发布路径装进一次性 profile，再启动其中一个、把它整套 HTTP 面跑一遍。它需要联网，并会临时起一个宿主。它会自己找到可测的 harness（用 `--dsh <bin>` 或 `--desktop <dir>` 指定），所以只有 DSH Desktop 的机器上也能跑。
+- 离线套件（`p8` 与 `p10`–`p16`）直接 import 插件源码，而插件 import 的是 `@deepseek-ai/*` peer——测试进程没有这些。先跑一次 `node validation/dev-host-packages.mjs`，它们就会从 `.dev-host-packages/` 解析；那个目录刻意放在包目录**之外**，因为包目录里一旦有副本，就会抢在 harness 自己的供给之前被命中——那正是本次修复的那个事故。
 
 ## 许可证
 

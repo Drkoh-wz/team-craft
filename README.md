@@ -128,7 +128,8 @@ A node is dispatched as a worker subagent carrying the persona, model route and 
 
 - The host half is plain ESM JavaScript. The client half uses `React.createElement` and has to keep the `window.__ModuleLoader__.load({ id, factory })` shape. Neither half may add a runtime dependency.
 - `deploy/web-profile/package.json` is a portable template — its dependency path is relative to itself. Do not hand-edit a live profile; run the installer.
-- `node validation/preflight-install.mjs` is the release gate: it installs the package every published way into throwaway profiles, then boots one and drives its whole HTTP surface. It needs network access and starts a temporary host on a free port.
+- `node validation/preflight-install.mjs` is the release gate: it installs the package every published way into throwaway profiles, then boots one and drives its whole HTTP surface. It needs network access and starts a temporary host on a free port. It finds a harness to test against by itself (`--dsh <bin>` or `--desktop <dir>` to pick one), so it also works on a machine that only has DSH Desktop.
+- The offline suites (the `p8` and `p10`–`p16` files) import the plugin source directly, and the plugin imports its `@deepseek-ai/*` peers, which no test process has. Run `node validation/dev-host-packages.mjs` once and they resolve those from `.dev-host-packages/` — deliberately outside the package directory, which has to stay free of them: a copy inside it wins over the harness's own supply, which is exactly the outage this release fixes.
 
 ## License
 
