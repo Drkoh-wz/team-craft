@@ -242,16 +242,27 @@ async function installRoute(id, spec, { bare } = {}) {
 console.log('### A. install routes')
 await installRoute('rFile', `file:${path.join(REPO, 'packages', 'team-flowise')}`)
 
-// The GitHub route, stood in for by a bare clone of this very repository (so the
-// multi-package layout, the absent root package.json and .gitattributes are all
-// the real ones).
+// The route the README documents. A bare clone of this very repository stands in
+// for GitHub (so the multi-package layout, the absent root package.json and
+// .gitattributes are all the real ones).
 const bare = path.join(tmp, 'team-craft.git')
 sh('git', ['clone', '-q', '--bare', REPO, bare])
 const bareUrl = 'git+file:///' + bare.replace(/\\/g, '/')
 await installRoute('rGit', `${bareUrl}#path:packages/team-flowise`)
 
-// The route the catalog's `tarball:` field points at.
+// A LOCAL .tgz path -- deliberately not an https tarball URL. Measured on pnpm 10:
+// a tarball-URL dependency fails permanently once the store holds that URL
+// ("ERR_PNPM_MISSING_TARBALL_INTEGRITY: its lockfile entry has no integrity
+// field"), twice over, for version-free and version-pinned URLs alike, and
+// deleting the lockfile does not recover it. So the published instructions use git
+// or a downloaded file, and the gate tests what they say. Re-adding a URL here
+// would make this route pass on a cold store and fail on a warm one.
 await installRoute('rTgz', DIST_TGZ)
+
+// A route is only usable if running it a SECOND time works: the store is warm by
+// then, and that is the state every machine after the first install is in. The URL
+// form failed exactly here, which is why a green gate never noticed it.
+await installRoute('rGitAgain', `${bareUrl}#path:packages/team-flowise`)
 
 for (const r of routes) {
   console.log(`\n-- ${r.id}: judgements`)

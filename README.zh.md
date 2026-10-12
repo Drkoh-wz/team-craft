@@ -38,11 +38,19 @@
 dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
-或者用现成的包，不需要 git：
+或者用现成的包，不需要 git——但要从**你下载到的路径**装，而不是从它的 URL：
 
 ```sh
-dsh plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+dsh plugin --profile web add "/path/to/team-flowise.tgz"
 ```
+
+这个区分不是吹毛求疵。在 pnpm 10 上，**tarball URL** 形式的依赖一旦 pnpm 的 store 里有了该 URL 的内容，就会**永久失败**：
+
+```
+ERR_PNPM_MISSING_TARBALL_INTEGRITY  its lockfile entry has no integrity field
+```
+
+它不是网络抖动：换第二个 profile、共用同一个 store 再装一次依然复现；`latest/` 这种不带版本号的 URL 和带版本号的 URL 都一样；**删 lockfile 也救不回来**（只有全新的 store 才行）。本地文件与 git 源不受影响。所以本页所有命令都走 git 源。
 
 不用构建，也没有需要批准的步骤。请装进有 web app 的 profile，这样界面才会出现。（装进裸 profile 也挂得上，只是没有浏览器那一半。）然后重启 dsh——宿主代码和客户端 bundle 都是启动时读的，不重启就不生效。
 
@@ -55,6 +63,8 @@ dsh plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/la
 ```
 
 它会自己找到应用、在 Desktop 运行时**拒绝执行**（这正是防止它自己的 profile 维护把你的改动对账掉）、用应用自带的 pnpm、装上本项目的 Release 包，并列出重新启动后该看哪几处。其余选项是 `-Action uninstall`、`-Action check`、`-Spec <pnpm 能接受的任何东西>`、`-DryRun`、`-Force`；`Get-Help .\scripts\install-desktop.ps1 -Full` 会打印出来。它也放在 Release 归档里的 `scripts/` 下。
+
+它**先用纯 HTTPS 把包下载下来，再从落地的那份文件安装**——正是上面实测出的那两个原因：tarball-URL 依赖在 pnpm store 变暖后会坏；而 git 源需要 git-over-HTTPS 到 github.com，在 HTTPS 被重置的网络里会回退到 ssh 并因 host key 失败。若下载连不上 GitHub，脚本会说明，并让你自己下载后传 `-Spec <路径>`——**本地文件这条路在任何情况下都能用**。
 
 三件值得知道的事，都是手工操作容易踩的：
 
@@ -72,7 +82,7 @@ $env:DSH_HOME = "$env:APPDATA\dsh-desktop\harness"
 $env:ELECTRON_RUN_AS_NODE = '1'
 & "$Desktop\DSH Desktop.exe" "$Desktop\resources\harness-node-entry.mjs" `
   "$Desktop\resources\app.asar\node_modules\@deepseek-ai\dsh\lib\bin.js" `
-  plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+  plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
 装完重新启动 Desktop。

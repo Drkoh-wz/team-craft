@@ -38,11 +38,19 @@ Two clients, two different ways in. Use the one you have.
 dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
-Or the prebuilt package, which needs no git:
+Or the prebuilt package, which needs no git — but install it from the **path you downloaded it to**, not from its URL:
 
 ```sh
-dsh plugin --profile web add "https://github.com/Drkoh-wz/team-craft/releases/latest/download/team-flowise.tgz"
+dsh plugin --profile web add "/path/to/team-flowise.tgz"
 ```
+
+That distinction is not pedantry. On pnpm 10 an `https` tarball-**URL** dependency fails permanently once pnpm's store holds that URL:
+
+```
+ERR_PNPM_MISSING_TARBALL_INTEGRITY  its lockfile entry has no integrity field
+```
+
+It is not a network blip: it reproduces on a second install into a second profile sharing the store, for a version-free `latest/` URL and a version-pinned one alike, and deleting the lockfile does not recover it (only a fresh store does). Local files and git specs are unaffected. That is why every command on this page uses the git spec.
 
 There is no build step, and nothing to approve. Install into a profile that has a web app, so you actually get the UI. (The plugin mounts in a bare profile too; you just get no browser half.) Now restart dsh — host code and the client bundle are both read at startup, so nothing is live until you do.
 
@@ -55,6 +63,8 @@ There is no `dsh` command to run here: the app carries the harness inside itself
 ```
 
 It finds the app, refuses to run while Desktop is up (that is what stops its own profile maintenance from reconciling the change away), picks up the pnpm the app ships, installs this project's published release package, and lists what to check when you start Desktop again. `-Action uninstall`, `-Action check`, `-Spec <anything pnpm accepts>`, `-DryRun` and `-Force` are the rest; `Get-Help .\scripts\install-desktop.ps1 -Full` prints them. It is in the release archive too, under `scripts/`.
+
+It **downloads** that package over plain HTTPS and then installs from the file it landed in, for the two reasons measured above: a tarball-URL dependency breaks on a warm pnpm store, and a git spec needs git-over-HTTPS to github.com, which drops to ssh and host-key failure on networks where that is reset. If the download cannot reach GitHub, the script says so and asks you to fetch the file yourself and pass `-Spec <path>` — the local-file route is the one that works regardless.
 
 Three things worth knowing, all of them ways this goes wrong by hand:
 
@@ -72,7 +82,7 @@ $env:DSH_HOME = "$env:APPDATA\dsh-desktop\harness"
 $env:ELECTRON_RUN_AS_NODE = '1'
 & "$Desktop\DSH Desktop.exe" "$Desktop\resources\harness-node-entry.mjs" `
   "$Desktop\resources\app.asar\node_modules\@deepseek-ai\dsh\lib\bin.js" `
-  plugin --profile web add "https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz"
+  plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#path:packages/team-flowise"
 ```
 
 Start Desktop again afterwards.

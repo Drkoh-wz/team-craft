@@ -23,8 +23,11 @@
   install (default), uninstall, or check.
 
 .PARAMETER Spec
-  What to install. Defaults to this project's prebuilt release package. Anything
-  pnpm accepts works: an https .tgz URL, a git URL, `name@version`, a local path.
+  What to install. Defaults to this project's prebuilt release package, which the
+  script DOWNLOADS and then installs from the local file: an https tarball-URL
+  dependency fails on pnpm 10 once its store holds that URL, and a git spec needs
+  git-over-https to github.com, which not every network has. A local .tgz path,
+  `name@version` or any other spec pnpm accepts is passed through untouched.
 
 .PARAMETER Profile
   The dsh profile to install into. Default: web.
@@ -74,7 +77,7 @@ if ($env:OS -ne 'Windows_NT') {
   throw 'This script is for the Windows build of DSH Desktop. On macOS or Linux, use the same three-file command shape from the README with your install directory.'
 }
 
-$DEFAULT_SPEC = 'https://github.com/Drkoh-Wz/team-craft/releases/latest/download/team-flowise.tgz'
+$DEFAULT_SPEC = 'https://github.com/Drkoh-wz/team-craft/releases/latest/download/team-flowise.tgz'
 $PACKAGE_ID = '@local/team-flowise'
 if (-not $Spec) { $Spec = $DEFAULT_SPEC }
 
@@ -157,6 +160,35 @@ Write-Step "harness home : $harnessHome"
 Write-Step "profile      : $Profile"
 
 # ------------------------------------------------------------------ build argv
+# An https .tgz spec is DOWNLOADED first and installed from the local path. Two
+# measured reasons, both of which bit this project:
+#   * pnpm fails permanently on a tarball-URL dependency once its store holds that
+#     URL (ERR_PNPM_MISSING_TARBALL_INTEGRITY, no recovery by deleting the lockfile);
+#   * a git spec needs git over https to github.com, which is not always reachable
+#     from every network -- it falls back to ssh and dies on host key verification.
+# A plain HTTPS download is the step that kept working in both cases.
+$downloaded = $null
+if (-not $DryRun -and $Action -eq 'install' -and $Spec -match '^https?://') {
+  $downloaded = Join-Path ([IO.Path]::GetTempPath()) ("team-flowise-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".tgz")
+  Write-Step "downloading  : $Spec"
+  try {
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $Spec -OutFile $downloaded -UseBasicParsing
+    $ProgressPreference = $prevProgress
+  } catch {
+    Write-Fail "download failed: $($_.Exception.Message)"
+    Write-Step 'A plain HTTPS fetch of the release asset is the step this script'
+    Write-Step 'relies on; if it cannot reach GitHub, download the file by hand and'
+    Write-Step 'pass its path: -Spec "<path to team-flowise.tgz>"'
+    exit 4
+  }
+  $size = (Get-Item $downloaded).Length
+  Write-Step "downloaded   : $size bytes -> $downloaded"
+  Write-Step 'installing from the local path, so pnpm never resolves a URL'
+  $Spec = $downloaded
+}
+
 $pluginArgs = switch ($Action) {
   'install' { @('plugin', '--profile', $Profile, 'add', $Spec) }
   'uninstall' { @('plugin', '--profile', $Profile, 'remove', $PACKAGE_ID) }
@@ -187,6 +219,9 @@ $env:ELECTRON_RUN_AS_NODE = '1'
 if ($DryRun) {
   Write-Host ''
   Write-Host 'Dry run. This is what would run:' -ForegroundColor Yellow
+  if ($Action -eq 'install' -and $Spec -match '^https?://') {
+    Write-Host "  (1) download $Spec to a temp file, then (2) install from that path:"
+  }
   Write-Host "  `$env:DSH_HOME = '$harnessHome'"
   Write-Host '  $env:ELECTRON_RUN_AS_NODE = 1'
   Write-Host ('  & "{0}" `' -f $exe)
@@ -212,6 +247,7 @@ try {
   $ErrorActionPreference = $previousPreference
 }
 if ($null -eq $code) { $code = 1 }
+if ($downloaded -ne $null) { Remove-Item $downloaded -Force -ErrorAction SilentlyContinue }
 
 Write-Host ''
 if ($code -eq 0) {
@@ -237,5 +273,15 @@ if ($code -eq 0) {
   Write-Step "If it mentions a version exemption, the plugin declares @deepseek-ai/dsh-*"
   Write-Step "peers that do not include this harness; the message names the exact"
   Write-Step 'allow-version command that grants one.'
+  # Measured on pnpm 10: an https tarball URL dependency fails permanently once the
+  # store holds that URL -- "its lockfile entry has no integrity field" -- and
+  # deleting the lockfile does not recover it. git specs and local files are
+  # unaffected. Worth naming, because the symptom looks like corruption and the
+  # obvious remedy does nothing.
+  Write-Step ''
+  Write-Step 'A spec of the form https://.../something.tgz is a known trap on pnpm 10:'
+  Write-Step 'once its store holds that URL the install fails with'
+  Write-Step 'ERR_PNPM_MISSING_TARBALL_INTEGRITY and stays failed. Use the git spec'
+  Write-Step '(the default) or a local .tgz path instead.'
 }
 exit $code
