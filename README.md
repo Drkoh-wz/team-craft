@@ -38,7 +38,11 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 There is no build step, and nothing to approve.
 
-Built and verified against **DeepSeek Harness `0.1.5-rc.1`**, with the `@deepseek-ai/*` packages at **`0.1.5-rc.2`**, on **Node 24**. That is the combination this release was tested on end to end, and what `engines.dsh` and the peer ranges in `packages/team-flowise/package.json` are written for. If a harness update ever leaves the plugin unmounted — the row never activates, or the `team_*` tools stop appearing — compare against those numbers before anything else.
+Verified end to end on **DSH Desktop `0.2.0-rc.2`** and the **`dsh` CLI `0.2.0-rc.2`**, on Node 24. The peer ranges in `packages/team-flowise/package.json` say `>=0.2.0-rc.2 <0.3.0-0`, and the harness checks that declaration before it imports the plugin — so a harness that is too old refuses this plugin in one clear line instead of failing in a confusing way later.
+
+Two things worth knowing, because each of them broke this plugin once.
+
+The harness supplies the `@deepseek-ai/*` packages itself, and a copy sitting in the plugin's own directory is found *first*. A leftover `dsh-tools@0.1.x` from an old local install therefore shadowed the harness's copy, crashed on import, and took the whole Desktop bootstrap down with it. That is also why the floor is `0.2.0-rc.2`: the supply arrived in the 0.2 line, and on `0.1.5` a peers-only plugin cannot import at all. Installing from a checkout? Make sure `packages/team-flowise/node_modules` holds no `@deepseek-ai/*` — `npm install --omit=peer` in that directory is the command that keeps it right.
 
 Install into a profile that has a web app, so you actually get the UI. (The plugin mounts in a bare profile too; you just get no browser half.)
 

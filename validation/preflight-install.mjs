@@ -58,7 +58,78 @@ const argvFlag = (flag) => {
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(argvFlag('--repo') ?? join(HERE, '..'))
 const DIST_TGZ = resolve(argvFlag('--tgz') ?? join(REPO, 'dist', 'team-flowise.tgz'))
-const DSH_BIN = join(process.env.APPDATA ?? '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+
+/* ------------------------------------------------------------------ harness
+ * Which harness to install into and boot. This used to be the npm-global `dsh`
+ * on PATH, which is an assumption that does not hold on a machine running DSH
+ * Desktop: there the CLI lives inside the app bundle and no global `dsh` exists
+ * at all, so every route reported "PACKAGE MISSING" instead of testing anything.
+ *
+ * Discovery, first hit wins:
+ *   --dsh <path to lib/bin.js>   explicit
+ *   $DSH_BIN                     same thing, in the environment
+ *   the npm-global install       the classic CLI
+ *   DSH Desktop                  its bundled harness, run through Electron in
+ *                                Node mode (it has to read packages out of app.asar)
+ */
+const DESKTOP_ROOT = argvFlag('--desktop') ?? 'D:\\dsh\\DSH Desktop'
+
+function discoverHarness() {
+  const explicit = argvFlag('--dsh') ?? process.env.DSH_BIN ?? null
+  const candidates = []
+  if (explicit !== null) candidates.push({ label: 'given', bin: explicit, node: process.execPath, prefix: [] })
+  candidates.push({
+    label: 'npm-global dsh',
+    bin: join(process.env.APPDATA ?? '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    node: process.execPath,
+    prefix: [],
+  })
+  candidates.push({
+    label: 'DSH Desktop',
+    bin: join(DESKTOP_ROOT, 'resources', 'app.asar', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    node: join(DESKTOP_ROOT, 'DSH Desktop.exe'),
+    prefix: [join(DESKTOP_ROOT, 'resources', 'harness-node-entry.mjs')],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  })
+  for (const c of candidates) {
+    if (!fs.existsSync(c.bin)) continue
+    try {
+      // A shim without its package (npm left the launcher and removed the tree)
+      // looks installed and answers nothing -- so actually run it.
+      const v = execFileSync(c.node, [...c.prefix, c.bin, '--version'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000,
+        env: { ...process.env, ...(c.env ?? {}) },
+      }).trim()
+      if (v !== '') return { ...c, version: v }
+    } catch { /* try the next one */ }
+  }
+  throw new Error(
+    'no usable DSH harness found. Pass --dsh <path to .../@deepseek-ai/dsh/lib/bin.js>, ' +
+    `or --desktop <DSH Desktop install dir> (tried: ${candidates.map((c) => c.label).join(', ')})`,
+  )
+}
+
+const HARNESS = discoverHarness()
+/**
+ * Run one harness command synchronously.
+ *
+ * Deliberately NOT through `sh()`: that one goes through a shell to let `git` and
+ * `taskkill` be found on PATH, and a shell splits an executable path on its spaces
+ * — `D:\dsh\DSH Desktop\DSH Desktop.exe` never ran, so every route reported a
+ * failed install and the gate blamed the plugin for it.
+ */
+const harness = (args, env) =>
+  execFileSync(HARNESS.node, [...HARNESS.prefix, HARNESS.bin, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...env, ...(HARNESS.env ?? {}) },
+  })
+/** Spawn a long-lived harness process (the web app). */
+const harnessSpawn = (args, env) =>
+  spawn(HARNESS.node, [...HARNESS.prefix, HARNESS.bin, ...args],
+    { env: { ...env, ...(HARNESS.env ?? {}) }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+
+console.log(`harness: ${HARNESS.label} ${HARNESS.version}  (${HARNESS.bin})`)
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-preflight-'))
 const results = []
@@ -107,13 +178,25 @@ function installedFiles(dir) {
   return walk(dir).sort()
 }
 
+/**
+ * Where each import resolves FROM THE INSTALLED COPY, by plain Node resolution.
+ *
+ * The two answers mean different things, and conflating them is what let the
+ * Desktop failure through:
+ *   - the plugin's own dependency (zod) must resolve — a link-style install never
+ *     installs the target's dependencies, so the plugin has to carry its own;
+ *   - a host package (`@deepseek-ai/*`) must NOT resolve from inside the plugin
+ *     directory. The harness supplies those at import time, and a copy sitting in
+ *     the plugin's own tree is found first and wins.
+ * So this returns the resolved PATH, not a verdict, and the caller judges.
+ */
 function resolveFrom(profileDir) {
   const base = path.join(profileDir, 'node_modules', '@local', 'team-flowise', 'src', 'index.js')
   if (!fs.existsSync(base)) return { missing: true }
   const req = createRequire(base)
   const out = {}
-  for (const s of ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-storage-domain', 'zod']) {
-    try { req.resolve(s); out[s] = 'OK' } catch (e) { out[s] = e.code }
+  for (const s of ['zod', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-storage-domain']) {
+    try { out[s] = req.resolve(s) } catch (e) { out[s] = e.code }
   }
   return out
 }
@@ -132,7 +215,7 @@ async function installRoute(id, spec, { bare } = {}) {
   let out = ''
   let code = 0
   try {
-    out = sh('dsh', ['plugin', '--profile', id, 'add', spec], { env })
+    out = harness(['plugin', '--profile', id, 'add', spec], env)
   } catch (e) {
     code = e.status ?? -1
     out = String(e.stdout || '') + String(e.stderr || '')
@@ -143,7 +226,7 @@ async function installRoute(id, spec, { bare } = {}) {
   const pkgDir = path.join(profileDir, 'node_modules', '@local', 'team-flowise')
   const files = installedFiles(pkgDir)
   let dump = ''
-  try { dump = sh('dsh', ['--profile', id, '--dump-config'], { env }) } catch (e) { dump = String(e.stdout || '') + String(e.stderr || '') }
+  try { dump = harness(['--profile', id, '--dump-config'], env) } catch (e) { dump = String(e.stdout || '') + String(e.stderr || '') }
   const rec = {
     id, spec, code, profileDir, files,
     hasRow: /-\s*id:\s*flowise-team/.test(dump),
@@ -176,8 +259,13 @@ for (const r of routes) {
   ok(`${r.id}: the package landed in the profile`, Array.isArray(r.files) && r.files.length > 0, (r.files || []).length + ' entries')
   ok(`${r.id}: every file the runtime needs is present`,
     Array.isArray(r.files) && ['package.json', 'cordis.patch.yml', 'src/index.js', 'src/client/index.js'].every((f) => r.files.includes(f)))
-  ok(`${r.id}: all three imports resolve from where it landed`,
-    Object.values(r.resolution).every((v) => v === 'OK'), JSON.stringify(r.resolution))
+  ok(`${r.id}: the plugin's own dependency (zod) resolves from where it landed`,
+    r.resolution.zod !== undefined && !/^ERR_/.test(String(r.resolution.zod)), String(r.resolution.zod))
+  const pluginDir = path.join(r.profileDir, 'node_modules', '@local', 'team-flowise')
+  const vendored = ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-storage-domain']
+    .filter((s) => typeof r.resolution[s] === 'string' && r.resolution[s].startsWith(pluginDir))
+  ok(`${r.id}: no host package is vendored into the installed copy (the harness supplies them; a copy in the plugin's own tree shadows it)`,
+    vendored.length === 0, vendored.join(', ') || JSON.stringify(['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-storage-domain'].map((s) => r.resolution[s])))
   ok(`${r.id}: the composed tree carries the flowise-team row`, r.hasRow)
   ok(`${r.id}: no screenshot assets shipped`, !(r.files || []).some((f) => f.includes('screenshots')))
 }
@@ -204,6 +292,46 @@ console.log('\n### A2. registration order inside apply()')
 }
 
 /* ======================================================================
+   A3. the source-tree invariant whose violation cost a DSH Desktop outage.
+
+   Node resolves a symlinked plugin's imports from the plugin's physical source
+   directory first. A copy of a HOST package sitting in that directory therefore
+   wins, and the host's own module fallback never runs — its retry only fires on
+   a resolution *failure*. That is exactly what happened: the package carried
+   `@deepseek-ai/dsh-tools@0.1.x` from an old local install, Desktop was on
+   0.2.0-rc.2, and the stale copy crashed importing `CallId` from the host's
+   `dsh-llm`, taking the whole bootstrap down with it ("1 required plugin did not
+   activate").
+
+   Host packages are peers and must never be vendored here. The plugin's own
+   dependency (zod) is different: a link-style install does not install the
+   target's dependencies, so that one has to be present.
+   ====================================================================== */
+console.log('\n### A3. the plugin directory carries no host package')
+{
+  const nm = path.join(REPO, 'packages', 'team-flowise', 'node_modules')
+  const hostCopies = []
+  const walkDirs = (d, depth = 0) => {
+    if (depth > 4) return
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue
+      const p = path.join(d, e.name)
+      if (e.name === '@deepseek-ai') hostCopies.push(path.relative(REPO, p).replace(/\\/g, '/'))
+      walkDirs(p, depth + 1)
+    }
+  }
+  const hasNodeModules = fs.existsSync(nm)
+  if (hasNodeModules) walkDirs(nm)
+  console.log('    plugin node_modules: ' + (hasNodeModules ? 'present' : 'absent') +
+    (hasNodeModules ? ', host copies: ' + (hostCopies.length === 0 ? 'none' : hostCopies.join(', ')) : ''))
+  ok('A3: no @deepseek-ai package is vendored inside the plugin directory (a copy there shadows the host and disables its fallback)',
+    hostCopies.length === 0, hostCopies.join(', ') || 'clean')
+  const ownDepPresent = !hasNodeModules || fs.existsSync(path.join(nm, 'zod'))
+  ok('A3: if the directory has a node_modules, it carries the plugin\'s OWN dependency (zod) for link-style installs',
+    ownDepPresent, hasNodeModules ? 'zod ' + (fs.existsSync(path.join(nm, 'zod')) ? 'present' : 'MISSING') : 'no node_modules at all')
+}
+
+/* ======================================================================
    B1. the case that used to brick a profile: `dsh plugin add` initializes a
        profile for an unknown name with only `@deepseek-ai/dsh-base`, which has
        no webServer. That is now a missing FEATURE (no browser bridge) instead of
@@ -217,14 +345,12 @@ console.log('\n### B1. install into a profile that has no web server (dsh plugin
   const home = path.join(tmp, `home-${id}`)
   fs.mkdirSync(home, { recursive: true })
   const env = { ...process.env, DSH_HOME: home }
-  sh('dsh', ['plugin', '--profile', id, 'add', DIST_TGZ], { env })
+  harness(['plugin', '--profile', id, 'add', DIST_TGZ], env)
   const profilePkg = JSON.parse(fs.readFileSync(path.join(home, 'profiles', id, 'package.json'), 'utf8'))
   console.log('    bundles it initialized with: ' + JSON.stringify(profilePkg.dsh.profile.bundles))
   const port = await freePort()
   let log = ''
-  const bare = spawn(process.execPath, [DSH_BIN, '--profile', id, '--port', String(port)], {
-    env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-  })
+  const bare = harnessSpawn(['--profile', id, '--port', String(port)], env)
   bare.stdout.on('data', (d) => { log += d.toString() })
   bare.stderr.on('data', (d) => { log += d.toString() })
   await sleep(20000)
@@ -265,7 +391,7 @@ const webHome = path.join(tmp, `home-${webProfile}`)
   // SET is asserted: with the wrong defaults this profile still booted and served.
   fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - .\nnodeLinker: hoisted\nautoInstallPeers: false\n', 'utf8')
   const env = { ...process.env, DSH_HOME: webHome }
-  sh('dsh', ['plugin', '--profile', webProfile, 'add', DIST_TGZ], { env })
+  harness(['plugin', '--profile', webProfile, 'add', DIST_TGZ], env)
   const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
   console.log('    bundles after add: ' + JSON.stringify(pkg.dsh.profile.bundles))
   const files = installedFiles(path.join(dir, 'node_modules', '@local', 'team-flowise'))
@@ -280,9 +406,7 @@ const webHome = path.join(tmp, `home-${webProfile}`)
 }
 const port = await freePort()
 const env = { ...process.env, DSH_HOME: webHome }
-const child = spawn(process.execPath, [DSH_BIN, '--profile', webProfile, '--port', String(port)], {
-  env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
-})
+const child = harnessSpawn(['--profile', webProfile, '--port', String(port)], env)
 let bootLog = ''
 child.stdout.on('data', (d) => { bootLog += d.toString() })
 child.stderr.on('data', (d) => { bootLog += d.toString() })

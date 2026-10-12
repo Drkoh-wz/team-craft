@@ -38,7 +38,11 @@ dsh plugin --profile web add "git+https://github.com/Drkoh-wz/team-craft.git#pat
 
 不用构建，也没有需要批准的步骤。
 
-本版本针对 **DeepSeek Harness `0.1.5-rc.1`**、`@deepseek-ai/*` **`0.1.5-rc.2`**、**Node 24** 做过端到端验证，`packages/team-flowise/package.json` 里的 `engines.dsh` 与 peer 范围也是照着这套组合写的。哪天 harness 更新后插件挂不上了——行没激活，或者 `team_*` 工具不再出现——先对照这几个版本号。
+已在 **DSH Desktop `0.2.0-rc.2`** 与 **`dsh` CLI `0.2.0-rc.2`** 上端到端验证（Node 24）。`packages/team-flowise/package.json` 里的 peer 范围写的是 `>=0.2.0-rc.2 <0.3.0-0`，而 harness 会在导入插件**之前**核对这个声明——所以版本过旧的 harness 会用**一行清晰的拒绝**说明不兼容，而不是稍后以一种令人困惑的方式失败。
+
+有两件事值得知道，因为它们各自把这个插件弄挂过一次。
+
+`@deepseek-ai/*` 由 harness 自己供给，而插件目录里若有一份副本，Node 会**先命中副本**。一个旧本地安装残留的 `dsh-tools@0.1.x` 因此遮住了 harness 的那份，import 时崩溃，把整个 Desktop 启动一起带下去了。这也正是下界取 `0.2.0-rc.2` 的原因：这套供给是 0.2 那条线才有的，在 `0.1.5` 上只声明 peer 的插件根本 import 不了。如果你从检出目录安装，请确认 `packages/team-flowise/node_modules` 里没有 `@deepseek-ai/*`——在该目录跑 `npm install --omit=peer` 就是把它保持正确的命令。
 
 请装进有 web app 的 profile，这样界面才会出现。（装进裸 profile 也挂得上，只是没有浏览器那一半。）
 
