@@ -36,6 +36,7 @@
 //
 // 每条检查的标签里都写明「怎么让它变红」；第 E 组真的把四个变异跑起来并打印红输出。
 
+import { safeRemoveTree } from './dev-host-resolution.mjs' // junction-safe cleanup (see that file)
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import http from 'node:http';
@@ -382,7 +383,7 @@ const TEMP_ROOT = join(tmpdir(), 'p13e-pack-' + randomUUID());
 function copyPack(destName, mutate) {
   const dest = join(TEMP_ROOT, destName);
   mkdirSync(TEMP_ROOT, { recursive: true });
-  if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
+  if (existsSync(dest)) safeRemoveTree(dest);
   cpSync(PACK_SRC, dest, { recursive: true });
   if (mutate) mutate(dest);
   return dest;
@@ -1389,7 +1390,7 @@ if (wants('F')) {
 }
 
 // ---------------------------------------------------------------- 收尾
-try { rmSync(TEMP_ROOT, { recursive: true, force: true }); } catch { /* 清理失败不改变结论 */ }
+try { safeRemoveTree(TEMP_ROOT); } catch { /* 清理失败不改变结论 */ }
 
 summary();
 process.exitCode = failures === 0 ? 0 : 1;

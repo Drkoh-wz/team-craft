@@ -65,8 +65,18 @@ It is idempotent, it backs up every file it rewrites, and `--help` lists the res
 node scripts/install.mjs --check           # exit 0 = installed and consistent, 3 = drifted
 node scripts/install.mjs --dry-run         # show the planned changes, write nothing
 node scripts/install.mjs --profile <dir>   # a different profile
+node scripts/install.mjs --link-mode copy  # copy instead of link (read the note below)
 node scripts/install.mjs --skill-root none # skip the skill
 ```
+
+**On Windows, read this before using the default link mode.** The installer links your checkout into the profile, which is fast and keeps the two in sync — but a recursive delete of a directory *containing* that link follows it and empties your checkout. That is not a guess:
+
+```
+tree/node_modules/@local/team-flowise   ->  junction to this checkout
+rmSync(tree, { recursive: true })       ->  OK, and the target is now empty
+```
+
+So anything that removes the profile tree — DSH Desktop rebuilding its profile, a package manager pruning, a manual delete — can take the checkout with it. `--link-mode copy` removes the hazard entirely, and the registry install above (`dsh plugin ... add`) never has it, because pnpm copies the package in.
 
 </details>
 

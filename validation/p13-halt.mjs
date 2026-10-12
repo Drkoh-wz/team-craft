@@ -24,6 +24,7 @@
 //   G  /progress projection-- skipped nodes carry blockedBy, others do NOT
 //   H  client half         -- real bundle: labels, no-dispatch wording, haltBlock
 //   I  mutation proof      -- three deliberate breakages, run for real
+import { DEV_PACKAGES_DIR, safeRemoveTree } from './dev-host-resolution.mjs' // harness packages + junction-safe cleanup (see that file)
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1125,9 +1126,16 @@ const IMPORT_SPECS = ['@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-storage-domain
 function importableCopy(srcFile, outFile) {
   let text = readFileSync(srcFile, 'utf8')
   const require = createRequire(srcFile)
+  const devRequire = createRequire(join(DEV_PACKAGES_DIR, 'anchor.cjs'))
   for (const spec of IMPORT_SPECS) {
     let resolved = null
-    try { resolved = pathToFileURL(require.resolve(spec, { paths: [dirname(srcFile)] })).href } catch { resolved = null }
+    try { resolved = pathToFileURL(require.resolve(spec, { paths: [dirname(srcFile)] })).href } catch {
+      // The @deepseek-ai/* peers fail this lookup ON PURPOSE (see p12's copy of
+      // this comment): the harness supplies them, the package vendors none, and a
+      // test process has no harness -- so use the dev-only directory that
+      // dev-host-resolution.mjs gives the unmutated import.
+      try { resolved = pathToFileURL(devRequire.resolve(spec)).href } catch { resolved = null }
+    }
     if (resolved === null) throw new Error('cannot resolve ' + spec + ' from ' + srcFile)
     const re = new RegExp("from '" + spec.replace(/[/@.]/g, (c) => '\\' + c) + "'", 'g')
     if (!re.test(text)) throw new Error('specifier ' + spec + ' not found in ' + srcFile)
@@ -1391,7 +1399,7 @@ if (process.env.P13_SKIP_MUTATIONS === '1') {
 
 // ===========================================================================
 // Cleanup: remove every temp artefact this file created.
-try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
+try { safeRemoveTree(MUT_TMP) } catch { /* ignore */ }
 
 summary()
 process.exit(failures === 0 ? 0 : 1)

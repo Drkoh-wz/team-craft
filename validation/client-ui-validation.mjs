@@ -8,6 +8,7 @@
 // transport stub, so the surface builds its own store from the page's global
 // fetch, while its assertions read a different, hand-made store. That is why its
 // section D fails. This harness supplies the stub the browser would have.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { readFileSync } from 'node:fs'
 
 const ORIGIN = 'http://127.0.0.1:3080'

@@ -65,8 +65,18 @@ node scripts/install.mjs
 node scripts/install.mjs --check           # exit 0 = 已装且一致，3 = 有漂移
 node scripts/install.mjs --dry-run         # 只打印将发生的改动，不写盘
 node scripts/install.mjs --profile <dir>   # 装进另一个 profile
+node scripts/install.mjs --link-mode copy  # 复制而非链接（先读下面这段）
 node scripts/install.mjs --skill-root none # 不装技能
 ```
+
+**Windows 上用默认链接模式前请先读这段。** 安装器会把你的检出目录链接进 profile——快，且两边保持同步——但对一个**内含该链接**的目录做递归删除时，删除会顺着链接走，把你的检出目录清空。这不是推测：
+
+```
+tree/node_modules/@local/team-flowise   ->  junction，指向本检出目录
+rmSync(tree, { recursive: true })       ->  OK，而目标目录现在是空的
+```
+
+也就是说，任何删掉该 profile 目录的操作——DSH Desktop 重建 profile、包管理器修剪、手工删除——都可能顺手带走你的检出目录。`--link-mode copy` 完全没有这个风险；上面那条注册表安装命令（`dsh plugin ... add`）也从来不会遇到，因为 pnpm 是把包**复制**进 profile 的。
 
 </details>
 

@@ -1,5 +1,6 @@
 # Dependency trees are reproducible from the lockfiles; never baseline them.
 node_modules/
+.dev-host-packages/
 .pnpm-store/
 
 # Local scratch / tooling output.

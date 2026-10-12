@@ -39,6 +39,7 @@
 //
 // Every check states what it verifies AND the concrete change that turns it red;
 // group F runs three of those changes for real and prints the red output.
+import { DEV_PACKAGES_DIR, safeRemoveTree } from './dev-host-resolution.mjs' // harness packages + junction-safe cleanup (see that file)
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -1581,9 +1582,18 @@ function importableCopy(srcFile, outFile) {
   // here resolves relative to THIS validation file, which does not see the
   // package's node_modules and fails with "cannot resolve".)
   const require = createRequire(srcFile)
+  const devRequire = createRequire(join(DEV_PACKAGES_DIR, 'anchor.cjs'))
   for (const spec of IMPORT_SPECS) {
     let resolved = null
-    try { resolved = pathToFileURL(require.resolve(spec, { paths: [dirname(srcFile)] })).href } catch { resolved = null }
+    try { resolved = pathToFileURL(require.resolve(spec, { paths: [dirname(srcFile)] })).href } catch {
+      // The @deepseek-ai/* peers fail this lookup ON PURPOSE: the harness supplies
+      // them at runtime, and the package directory must vendor none (a copy there
+      // shadows the harness and is what broke DSH Desktop). A test process has no
+      // harness, so fall back to the same dev-only directory that
+      // dev-host-resolution.mjs gives the unmutated import, keeping the mutant's
+      // module graph identical to it.
+      try { resolved = pathToFileURL(devRequire.resolve(spec)).href } catch { resolved = null }
+    }
     if (resolved === null) throw new Error('cannot resolve ' + spec + ' from ' + srcFile)
     const re = new RegExp("from '" + spec.replace(/[/@.]/g, (c) => '\\' + c) + "'", 'g')
     if (!re.test(text)) throw new Error('specifier ' + spec + ' not found in ' + srcFile)
@@ -1752,8 +1762,11 @@ if (process.env.P12_SKIP_MUTATIONS === '1') {
 
 // ===========================================================================
 // Cleanup: remove every temp artefact this file created.
-try { rmSync(TMP, { recursive: true, force: true }) } catch { /* ignore */ }
-try { rmSync(MUT_TMP, { recursive: true, force: true }) } catch { /* ignore */ }
+// NOT rmSync(recursive): the fixture profile holds a junction to the plugin
+// source, and a recursive remove follows it and empties the checkout. That is how
+// a green run of this suite deleted packages/team-flowise after its checks passed.
+try { safeRemoveTree(TMP) } catch { /* ignore */ }
+try { safeRemoveTree(MUT_TMP) } catch { /* ignore */ }
 
 summary()
 process.exit(failures === 0 ? 0 : 1)

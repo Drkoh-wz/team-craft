@@ -20,6 +20,7 @@
 //
 // Every check states what it verifies AND what concrete change to the source
 // turns it red; section E of the report runs three such mutations for real.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { readFileSync } from 'node:fs'
 
 const SRC = process.env.P11_SRC && process.env.P11_SRC.trim() !== ''

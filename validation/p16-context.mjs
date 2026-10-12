@@ -28,6 +28,7 @@
 //
 // Exit code: 0 = all checks passed, 1 = at least one failed,
 //            2 = the module under test could not be imported.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

@@ -15,6 +15,7 @@
 // Every check below states what it verifies. A check is only useful if a
 // concrete, nameable change to the source can turn it red; the mutation runs
 // in the report prove that for three of them.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { readFileSync } from 'node:fs'
 
 const SRC = process.env.P10_SRC && process.env.P10_SRC.trim() !== ''

@@ -26,6 +26,7 @@
 // Every check names the change that turns it red. The mutation runs in the
 // report prove that for four of them (spawn bound removed, health guard removed,
 // classifier made unconditional, success no longer clearing the ledger).
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 

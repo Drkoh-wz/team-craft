@@ -2,6 +2,7 @@
 // do those writes land on disk (the criterion-3 evidence a browser click would
 // produce)? Everything here goes through the bundle's materialized api client,
 // over HTTP, to the running host.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'

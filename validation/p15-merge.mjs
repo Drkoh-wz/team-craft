@@ -43,6 +43,7 @@
 // The suite proves it can fail without touching the repository: run as a child
 // with P15_OLD_REF=HEAD, the "pre-merge" module becomes the merged module and
 // B2 must go red. That is group D.
+import './dev-host-resolution.mjs' // harness packages for the offline suites (see that file)
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
