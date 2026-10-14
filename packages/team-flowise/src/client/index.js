@@ -26,6 +26,47 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     { key: 'reworked', label: '需返工', color: '#ef4444' }
   ];
   function statusColor(s) { for (var i = 0; i < STATUS_COLUMNS.length; i++) { if (STATUS_COLUMNS[i].key === s) return STATUS_COLUMNS[i].color; } return '#9aa0a6'; }
+
+  // A delete control that asks once, in place. Two reasons it is not a bare
+  // button: these records are not undoable, and the same row also carries the
+  // "open/edit" action -- so a mis-click next to it would destroy work rather than
+  // merely navigate. The confirm state is local to this button, so arming one row
+  // never arms another.
+  //
+  // `disabled` is passed by callers for the two records the host refuses to remove
+  // (a task whose worker is still writing, a run that is still live). A disabled
+  // control with a reason beats a button that fails after the click.
+  function DeleteButton(props) {
+    var st = React.useState(false);
+    var armed = st[0]; var setArmed = st[1];
+    var disabled = !!(props && props.disabled);
+    var title = (props && props.title) || '删除';
+    if (disabled) {
+      return React.createElement('button', {
+        className: 'tf-icon-btn', disabled: true, title: (props && props.disabledReason) || '当前不可删除'
+      }, '\u2715');
+    }
+    if (!armed) {
+      return React.createElement('button', {
+        className: 'tf-icon-btn danger', title: title,
+        onClick: function (e) { if (e && e.stopPropagation) e.stopPropagation(); setArmed(true); }
+      }, '\u2715');
+    }
+    return React.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+      React.createElement('button', {
+        className: 'tf-btn danger', style: { padding: '2px 8px', fontSize: 12 },
+        onClick: function (e) {
+          if (e && e.stopPropagation) e.stopPropagation();
+          setArmed(false);
+          if (props && props.onConfirm) props.onConfirm();
+        }
+      }, '确认删除'),
+      React.createElement('button', {
+        className: 'tf-btn', style: { padding: '2px 8px', fontSize: 12 },
+        onClick: function (e) { if (e && e.stopPropagation) e.stopPropagation(); setArmed(false); }
+      }, '取消')
+    );
+  }
   // A function component is called with a PROPS OBJECT. This was declared as
   // `Badge(s)` while every caller wrote `createElement(Badge, null, status)`, so
   // `s` was `{children: status}`: statusColor() never matched a key and the label
@@ -37,7 +78,7 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return React.createElement('span', { style: { color: '#fff', background: statusColor(label), borderRadius: 999, padding: '1px 11px', fontSize: 12, whiteSpace: 'nowrap' } }, label);
   }
 
-  var STYLE = '.tf-root{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937)}.tf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tf-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-text-muted,#6b7280)}.tf-tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.tf-toolbar{display:flex;gap:8px}.tf-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;color:var(--dsw-alias-text,#1f2937)}.tf-btn.primary{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-btn.danger{color:#ef4444;border-color:#ef4444}.tf-btn:disabled{opacity:.5;cursor:default}.tf-board{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}.tf-col{min-width:230px;flex:0 0 230px;background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:12px;padding:10px}.tf-col-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.tf-col-title{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}.tf-count{background:var(--dsw-alias-surface,#fff);border-radius:999px;padding:0 8px;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-card{background:var(--dsw-alias-surface,#fff);border-radius:10px;border:1px solid var(--dsw-alias-border,#e5e7eb);padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:box-shadow .15s,border-color .15s}.tf-card:hover{border-color:#3b82f6;box-shadow:0 4px 14px rgba(0,0,0,.08)}.tf-card-req{font-size:13px;font-weight:600;line-height:1.4;margin-bottom:6px}.tf-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-chip{background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:6px;padding:1px 6px;font-size:11px}.tf-list{background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;padding:12px}.tf-row{display:flex;align-items:center;gap:12px;padding:12px 6px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.tf-row:last-child{border-bottom:none}.tf-row-main{flex:1;min-width:0}.tf-row-title{font-size:13px;font-weight:600}.tf-row-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:2px}.tf-icon-btn{background:none;border:none;cursor:pointer;font-size:16px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-icon-btn:hover{color:#3b82f6}.tf-empty{padding:24px;text-align:center;color:var(--dsw-alias-text-muted,#6b7280);font-size:13px}.tf-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999}.tf-modal-card{background:var(--dsw-alias-surface,#fff);border-radius:14px;padding:20px;width:min(560px,92vw);max-height:88vh;overflow:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}.tf-field{margin-bottom:12px}.tf-field-label{font-size:12px;font-weight:600;margin-bottom:5px;color:var(--dsw-alias-text,#1f2937);display:block}.tf-input,.tf-select,.tf-textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);font-size:13px;background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937)}.tf-textarea{min-height:70px;resize:vertical;font-family:inherit}.tf-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-form-row{display:flex;gap:10px;flex-wrap:wrap}.tf-form-col{flex:1 1 180px;min-width:180px}.tf-help{font-size:11px;line-height:1.5;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-ctl-note{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-err{font-size:12px;line-height:1.5;color:#b91c1c;background:#fee2e2;border-radius:8px;padding:6px 9px;margin-bottom:10px}.tf-manual{background:none;border:none;padding:0;cursor:pointer;font-size:11px;color:#3b82f6;text-decoration:underline;margin-top:4px}.tf-manual:hover{color:#1d4ed8}';
+  var STYLE = '.tf-root{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937)}.tf-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.tf-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;font-weight:600;color:var(--dsw-alias-text-muted,#6b7280)}.tf-tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.tf-toolbar{display:flex;gap:8px}.tf-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);cursor:pointer;font-size:13px;color:var(--dsw-alias-text,#1f2937)}.tf-btn.primary{background:#3b82f6;color:#fff;border-color:#3b82f6}.tf-btn.danger{color:#ef4444;border-color:#ef4444}.tf-btn:disabled{opacity:.5;cursor:default}.tf-board{display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px}.tf-col{min-width:230px;flex:0 0 230px;background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:12px;padding:10px}.tf-col-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.tf-col-title{font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}.tf-count{background:var(--dsw-alias-surface,#fff);border-radius:999px;padding:0 8px;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-card{background:var(--dsw-alias-surface,#fff);border-radius:10px;border:1px solid var(--dsw-alias-border,#e5e7eb);padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:box-shadow .15s,border-color .15s}.tf-card:hover{border-color:#3b82f6;box-shadow:0 4px 14px rgba(0,0,0,.08)}.tf-card-req{font-size:13px;font-weight:600;line-height:1.4;margin-bottom:6px}.tf-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-chip{background:var(--dsw-alias-surface-2,#f3f4f6);border-radius:6px;padding:1px 6px;font-size:11px}.tf-list{background:var(--dsw-alias-surface,#fff);border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;padding:12px}.tf-row{display:flex;align-items:center;gap:12px;padding:12px 6px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.tf-row:last-child{border-bottom:none}.tf-row-main{flex:1;min-width:0}.tf-row-title{font-size:13px;font-weight:600}.tf-row-sub{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:2px}.tf-icon-btn{background:none;border:none;cursor:pointer;font-size:16px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-icon-btn.danger{color:#ef4444}.tf-icon-btn:hover{color:#3b82f6}.tf-icon-btn.danger:hover{color:#dc2626}.tf-icon-btn:disabled{cursor:not-allowed;opacity:.4;color:var(--dsw-alias-text-muted,#9ca3af)}.tf-icon-btn:hover{color:#3b82f6}.tf-empty{padding:24px;text-align:center;color:var(--dsw-alias-text-muted,#6b7280);font-size:13px}.tf-modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:9999}.tf-modal-card{background:var(--dsw-alias-surface,#fff);border-radius:14px;padding:20px;width:min(560px,92vw);max-height:88vh;overflow:auto;box-shadow:0 8px 40px rgba(0,0,0,.25)}.tf-field{margin-bottom:12px}.tf-field-label{font-size:12px;font-weight:600;margin-bottom:5px;color:var(--dsw-alias-text,#1f2937);display:block}.tf-input,.tf-select,.tf-textarea{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);font-size:13px;background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937)}.tf-textarea{min-height:70px;resize:vertical;font-family:inherit}.tf-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-form-row{display:flex;gap:10px;flex-wrap:wrap}.tf-form-col{flex:1 1 180px;min-width:180px}.tf-help{font-size:11px;line-height:1.5;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-ctl-note{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-top:4px}.tf-err{font-size:12px;line-height:1.5;color:#b91c1c;background:#fee2e2;border-radius:8px;padding:6px 9px;margin-bottom:10px}.tf-manual{background:none;border:none;padding:0;cursor:pointer;font-size:11px;color:#3b82f6;text-decoration:underline;margin-top:4px}.tf-manual:hover{color:#1d4ed8}';
 
   function Modal(props) {
     if (!props.open) return null;
@@ -58,8 +99,20 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     var cols = STATUS_COLUMNS.map(function (c) {
       var items = by[c.key] || [];
       var cards = items.length ? items.map(function (t) {
+        // The card itself is the "open" affordance, so the delete control has to
+        // stop the click from bubbling -- otherwise arming a delete would also
+        // open the task dialog behind it. DeleteButton does that itself.
+        var working = t.status === 'working';
         return React.createElement('div', { key: t.id, className: 'tf-card', onClick: function () { props.onOpenTask(t); } },
-          React.createElement('div', { className: 'tf-card-req' }, t.requirement),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
+            React.createElement('div', { className: 'tf-card-req', style: { flex: 1 } }, t.requirement),
+            props.onDelete ? React.createElement(DeleteButton, {
+              disabled: working,
+              disabledReason: '任务进行中：worker 还在写它',
+              title: '删除任务',
+              onConfirm: function () { props.onDelete(t); }
+            }) : null
+          ),
           React.createElement('div', { className: 'tf-card-meta' },
             React.createElement('span', { className: 'tf-chip' }, '#' + (t.assignee || '?')),
             t.reviewer ? React.createElement('span', { className: 'tf-chip' }, 'rev:' + t.reviewer) : null,
@@ -109,8 +162,14 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     return parts.join(' · ');
   }
   function AgentsView(props) {
+    var used = props.usedBy || {};
     var rows = props.agents.length ? props.agents.map(function (a) {
       var sub = agentRouteSummary(a);
+      // A role that a workflow still names is not protected from deletion -- the
+      // scheduler copes (the node runs under its own name when the definition is
+      // gone) -- but the operator is told first, because "this role is used by 3
+      // workflows" is exactly what makes a delete a mistake rather than a cleanup.
+      var n = used[a.id] || used[a.name] || 0;
       return React.createElement('div', { key: a.id, className: 'tf-row' },
         React.createElement('div', { className: 'tf-row-main' },
           React.createElement('div', { className: 'tf-row-title' }, a.name),
@@ -119,7 +178,13 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
           sub !== '' ? React.createElement('div', { className: 'tf-row-sub' }, sub) : null
         ),
         React.createElement('span', { className: 'tf-chip' }, Object.keys(a.tools || {}).length + ' 工具'),
-        React.createElement('button', { className: 'tf-btn', onClick: function () { props.onOpenAgent(a); } }, '详情')
+        n > 0 ? React.createElement('span', { className: 'tf-chip', title: '被工作流引用' }, n + ' 处引用') : null,
+        React.createElement('button', { className: 'tf-btn', onClick: function () { props.onOpenAgent(a); } }, '详情'),
+        props.onDelete ? React.createElement(DeleteButton, {
+          title: n > 0 ? ('删除角色（' + n + ' 处工作流引用它，删除后那些节点会以节点名运行）') : '删除角色',
+          disabledReason: '删除角色',
+          onConfirm: function () { props.onDelete(a); }
+        }) : null
       );
     }) : [React.createElement('div', { key: 'e', className: 'tf-empty' }, '暂无 Agent')];
     return React.createElement('div', { className: 'tf-list' }, rows);
@@ -159,7 +224,26 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         React.createElement('div', { style: { width: 90 } },
           React.createElement('div', { className: 'tf-progress' }, React.createElement('div', { className: 'tf-progress-bar', style: { width: pct + '%' } }))
         ),
-        React.createElement(Badge, { value: x.status })
+        React.createElement(Badge, { value: x.status }),
+        // P17: a finished run that did not succeed can be CONTINUED instead of
+        // re-run from scratch. Only offered for `failed`/`halted`/`interrupted`:
+        // a completed run has nothing left to do (the host refuses it too), and a
+        // running one would race its own scheduler.
+        (props.onResume && (x.status === 'failed' || x.status === 'halted' || x.status === 'interrupted'))
+          ? React.createElement('button', {
+              className: 'tf-btn', title: '保留已完成的节点，只重跑失败的和它后面被中断的',
+              disabled: props.loading, onClick: function () { props.onResume(x); }
+            }, '继续运行')
+          : null,
+        // A live run is still being written by its scheduler: the host refuses it,
+        // and the button says so rather than reporting a delete that would be
+        // undone by the next node-state write.
+        props.onDelete ? React.createElement(DeleteButton, {
+          disabled: x.status === 'running',
+          disabledReason: '运行仍在进行：它还在写节点状态，结束后才能删除',
+          title: '删除这条运行记录',
+          onConfirm: function () { props.onDelete(x); }
+        }) : null
       );
     }) : [React.createElement('div', { key: 'e', className: 'tf-empty' }, '暂无运行')];
     return React.createElement('div', { className: 'tf-list' }, rows);
@@ -167,13 +251,22 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
 
   function TasksView(props) {
     var rows = props.tasks.length ? props.tasks.map(function (t) {
+      // The host refuses to remove a task a worker is still writing to, so the
+      // control says that up front instead of failing after the click.
+      var working = t.status === 'working';
       return React.createElement('div', { key: t.id, className: 'tf-row' },
         React.createElement('div', { className: 'tf-row-main' },
           React.createElement('div', { className: 'tf-row-title' }, t.requirement),
           React.createElement('div', { className: 'tf-row-sub' }, (t.assignee || '') + (t.reviewer ? ' · 评审:' + t.reviewer : '') + ' · it' + (t.iteration || 1))
         ),
         React.createElement(Badge, { value: t.status }),
-        React.createElement('button', { className: 'tf-icon-btn', onClick: function () { props.onOpenTask(t); } }, '\u270E')
+        React.createElement('button', { className: 'tf-icon-btn', onClick: function () { props.onOpenTask(t); } }, '\u270E'),
+        props.onDelete ? React.createElement(DeleteButton, {
+          disabled: working,
+          disabledReason: '任务进行中：worker 还在写它，先等它结束（或让它 settle）再删除',
+          title: '删除任务',
+          onConfirm: function () { props.onDelete(t); }
+        }) : null
       );
     }) : [React.createElement('div', { key: 'e', className: 'tf-empty' }, '暂无任务')];
     return React.createElement('div', { className: 'tf-list' }, rows);
@@ -427,13 +520,37 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     }
     function startRun(w) { runAction(function () { return post('/run/start', { workflowId: w.id }); }); }
     function deleteWorkflow(w) { runAction(function () { return del('/workflow?id=' + encodeURIComponent(w.id)); }); }
+    // The other three records a user needs to be able to remove by hand. Before
+    // this, the only way to delete a role or a board task was to ask an agent to
+    // call the tool -- the UI had a button for workflows alone.
+    function deleteAgent(a) { runAction(function () { return del('/agent?id=' + encodeURIComponent(a.id)); }); }
+    function deleteTask(t) { runAction(function () { return del('/task?id=' + encodeURIComponent(t.id)); }); }
+    function deleteRun(x) { runAction(function () { return del('/run?id=' + encodeURIComponent(x.id)); }); }
+    // P17: continue a finished run. The host adopts that run's completed nodes and
+    // dispatches only the failed ones and whatever was cut off behind them, so a
+    // single infrastructure failure no longer costs the whole pipeline.
+    function resumeRun(x) { runAction(function () { return post('/run/resume', { runId: x.id }); }); }
+
+    // How many workflow nodes name each role. Read from the workflows already in
+    // state (no extra request) and only used to warn before a delete: a role that
+    // three workflows still reference is exactly the one whose removal is a
+    // mistake rather than a cleanup.
+    var agentUse = {};
+    (s.w || []).forEach(function (w) {
+      var ns = (w && w.nodes) || {};
+      Object.keys(ns).forEach(function (k) {
+        var nd = ns[k] || {};
+        if (nd.agent) agentUse[nd.agent] = (agentUse[nd.agent] || 0) + 1;
+        if (nd.reviewer) agentUse[nd.reviewer] = (agentUse[nd.reviewer] || 0) + 1;
+      });
+    });
 
     var body;
-    if (s.tab === 'agents') body = React.createElement(AgentsView, { agents: s.a, onOpenAgent: openAgent });
+    if (s.tab === 'agents') body = React.createElement(AgentsView, { agents: s.a, onOpenAgent: openAgent, onDelete: deleteAgent, usedBy: agentUse });
     else if (s.tab === 'workflows') body = React.createElement(WorkflowsView, { workflows: s.w, loading: s.loading, onRun: startRun, onDelete: deleteWorkflow });
-    else if (s.tab === 'tasks') body = React.createElement(TasksView, { tasks: s.t, onOpenTask: openTask });
-    else if (s.tab === 'runs') body = React.createElement(RunsView, { runs: s.r });
-    else body = React.createElement(BoardView, { tasks: s.t, onOpenTask: openTask });
+    else if (s.tab === 'tasks') body = React.createElement(TasksView, { tasks: s.t, onOpenTask: openTask, onDelete: deleteTask });
+    else if (s.tab === 'runs') body = React.createElement(RunsView, { runs: s.r, onDelete: deleteRun, onResume: resumeRun, loading: s.loading });
+    else body = React.createElement(BoardView, { tasks: s.t, onOpenTask: openTask, onDelete: deleteTask });
 
     var modal = null; var modalTitle = '';
     if (s.modal === 'task') {
@@ -856,7 +973,19 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   // used to carry their own leading <style> and trailing </style>, so the parser
   // saw a malformed first qualified rule (`<style>.tf-root{...}`) and dropped it
   // -- the element's own first rule never applied.
-  var PAGE_STYLE = '.tf-pg{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937);padding:2px}.tf-pg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.tf-pg-title{margin:0;font-size:16px;font-weight:700}.tf-pg-sub{font-size:12px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pg-toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}.tf-pg-sec{margin-top:18px}.tf-pg-sec-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-select{padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937);font-size:12px;max-width:280px}.tf-seq-box{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff)}.tf-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-legend span{display:inline-flex;align-items:center;gap:4px}.tf-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}.tf-chips{display:flex;gap:8px;flex-wrap:wrap}.tf-chip2{display:flex;align-items:center;gap:7px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);border-radius:10px;padding:6px 11px;cursor:pointer;font-size:12px;color:inherit}.tf-chip2:hover{border-color:#3b82f6}.tf-chip2.on{border-color:#3b82f6;box-shadow:inset 0 0 0 1px #3b82f6}.tf-chip2 b{font-weight:700}.tf-ncard{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff);padding:12px 14px;margin-top:10px}.tf-nhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-nid{font-weight:700;font-size:14px}.tf-kv{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-lbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin:12px 0 4px}.tf-pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-surface-2,#f8fafc);border:1px solid var(--dsw-alias-border,#eef2f7);border-radius:8px;padding:10px;max-height:300px;overflow:auto}.tf-pre.tf-reason{border-color:#8b5cf6}.tf-pre.tf-errbox{border-color:#ef4444;color:#b91c1c}.tf-badge2{border-radius:999px;padding:1px 10px;font-size:11px;color:#fff;white-space:nowrap}.tf-empty{color:var(--dsw-alias-text-muted,#6b7280);font-size:13px;padding:14px 0}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-rv-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-rv-verdict{border-radius:999px;padding:1px 10px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.tf-rv-group{margin-top:10px}.tf-rv-group-h{font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:6px}.tf-rv-item{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface-2,#f8fafc)}.tf-rv-item.blocking{border-left:3px solid #ef4444}.tf-rv-item.advisory{border-left:3px solid #f5a623}.tf-rv-dim{display:inline-block;border-radius:999px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);padding:0 7px;font-size:10px;font-weight:700;margin-right:6px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-crit{font-size:12px;font-weight:600}.tf-rv-field{font-size:11px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);margin-top:3px}.tf-rv-field b{font-weight:700;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-note{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;font-weight:700;background:#fee2e2;color:#b91c1c}.tf-rv-unc{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin:2px 0 0}.tf-rv-res{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface,#fff)}.tf-rv-res.yes{border-left:3px solid #22c55e}.tf-rv-res.no{border-left:3px solid #f5a623}.tf-rv-summary{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937)}.tf-select.tf-select-full{width:100%;max-width:none}.tf-mb{display:flex;flex-direction:column;gap:6px}.tf-mb-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-mb-src{border-radius:6px;padding:0 7px;font-size:10px;font-weight:700;background:var(--dsw-alias-surface-2,#f3f4f6);color:var(--dsw-alias-text-muted,#6b7280)}.tf-mb-eff{font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-line{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-note{font-size:11px;line-height:1.5;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 8px}.tf-mb-warn{font-size:11px;line-height:1.5;color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:5px 8px}';
+  // The page is mounted in two very different containers: the `main` slot (a full
+  // page the host scrolls) and the right sidebar pane (a fixed-height column that
+  // does NOT). Without a scroll container of its own, the pane's lower half --
+  // role detail, reviews -- was simply unreachable, which is the bug this fixes.
+  //
+  // `max-height:100%` is deliberately the mechanism rather than a fixed number: in
+  // an auto-height parent it resolves to no constraint at all, so the full-page
+  // case keeps scrolling the way the host intends, while a definite-height parent
+  // bounds us and we scroll inside it. `min-height:0` is required alongside it,
+  // because a flex child defaults to min-height:auto and would otherwise refuse to
+  // shrink below its content. The compact variant adds a viewport-based fallback
+  // for a pane whose parent does not propagate a height at all.
+  var PAGE_STYLE = '.tf-pg{font-family:var(--dsw-alias-font-sans,system-ui,-apple-system,"Segoe UI",sans-serif);color:var(--dsw-alias-text,#1f2937);padding:2px;box-sizing:border-box;max-height:100%;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}.tf-pg.compact{max-height:calc(100vh - 132px)}.tf-pg-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.tf-pg-title{margin:0;font-size:16px;font-weight:700}.tf-pg-sub{font-size:12px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-pg-toolbar{margin-left:auto;display:flex;gap:8px;align-items:center}.tf-pg-sec{margin-top:18px}.tf-pg-sec-h{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-select{padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);color:var(--dsw-alias-text,#1f2937);font-size:12px;max-width:280px}.tf-seq-box{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff)}.tf-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:8px}.tf-legend span{display:inline-flex;align-items:center;gap:4px}.tf-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto}.tf-chips{display:flex;gap:8px;flex-wrap:wrap}.tf-chip2{display:flex;align-items:center;gap:7px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);border-radius:10px;padding:6px 11px;cursor:pointer;font-size:12px;color:inherit}.tf-chip2:hover{border-color:#3b82f6}.tf-chip2.on{border-color:#3b82f6;box-shadow:inset 0 0 0 1px #3b82f6}.tf-chip2 b{font-weight:700}.tf-ncard{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-surface,#fff);padding:12px 14px;margin-top:10px}.tf-nhead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-nid{font-weight:700;font-size:14px}.tf-kv{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-lbl{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-text-muted,#6b7280);margin:12px 0 4px}.tf-pre{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--dsw-alias-surface-2,#f8fafc);border:1px solid var(--dsw-alias-border,#eef2f7);border-radius:8px;padding:10px;max-height:300px;overflow:auto}.tf-pre.tf-reason{border-color:#8b5cf6}.tf-pre.tf-errbox{border-color:#ef4444;color:#b91c1c}.tf-badge2{border-radius:999px;padding:1px 10px;font-size:11px;color:#fff;white-space:nowrap}.tf-empty{color:var(--dsw-alias-text-muted,#6b7280);font-size:13px;padding:14px 0}.tf-progress{height:6px;border-radius:999px;background:var(--dsw-alias-surface-2,#f3f4f6);overflow:hidden;margin-top:6px}.tf-progress-bar{height:100%;background:#3b82f6;border-radius:999px;transition:width .4s}.tf-rv-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-rv-verdict{border-radius:999px;padding:1px 10px;font-size:11px;font-weight:700;color:#fff;white-space:nowrap}.tf-rv-group{margin-top:10px}.tf-rv-group-h{font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--dsw-alias-text-muted,#6b7280);margin-bottom:6px}.tf-rv-item{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface-2,#f8fafc)}.tf-rv-item.blocking{border-left:3px solid #ef4444}.tf-rv-item.advisory{border-left:3px solid #f5a623}.tf-rv-dim{display:inline-block;border-radius:999px;border:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-surface,#fff);padding:0 7px;font-size:10px;font-weight:700;margin-right:6px;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-crit{font-size:12px;font-weight:600}.tf-rv-field{font-size:11px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);margin-top:3px}.tf-rv-field b{font-weight:700;color:var(--dsw-alias-text-muted,#6b7280)}.tf-rv-note{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;font-weight:700;background:#fee2e2;color:#b91c1c}.tf-rv-unc{font-size:11px;color:var(--dsw-alias-text-muted,#6b7280);margin:2px 0 0}.tf-rv-res{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin-bottom:6px;background:var(--dsw-alias-surface,#fff)}.tf-rv-res.yes{border-left:3px solid #22c55e}.tf-rv-res.no{border-left:3px solid #f5a623}.tf-rv-summary{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937)}.tf-select.tf-select-full{width:100%;max-width:none}.tf-mb{display:flex;flex-direction:column;gap:6px}.tf-mb-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tf-mb-src{border-radius:6px;padding:0 7px;font-size:10px;font-weight:700;background:var(--dsw-alias-surface-2,#f3f4f6);color:var(--dsw-alias-text-muted,#6b7280)}.tf-mb-eff{font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-line{font-size:12px;line-height:1.6;color:var(--dsw-alias-text,#1f2937);word-break:break-all}.tf-mb-note{font-size:11px;line-height:1.5;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:5px 8px}.tf-mb-warn{font-size:11px;line-height:1.5;color:#b91c1c;background:#fee2e2;border:1px solid #fecaca;border-radius:8px;padding:5px 8px}';
 
   var IDLE_COLOR = '#9aa0a6';
   var RUNNING_COLOR = '#3b82f6';
@@ -868,6 +997,10 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
   // the header cannot mistake "we stopped the flow on purpose" for "everything
   // ran and something broke".
   var HALTED_COLOR = '#f59e0b';
+  // P17: a node waiting on its automatic re-dispatch. Its own colour so the board
+  // does not render it as plain '进行中' -- during the backoff nothing is running,
+  // and that is exactly the window an operator stares at wondering if it is stuck.
+  var RETRY_COLOR = '#0ea5e9';
   var NODE_STATUS = {
     pending: { label: '等待', color: IDLE_COLOR, mark: 'tf-ar-i' },
     working: { label: '进行中', color: RUNNING_COLOR, mark: 'tf-ar-w' },
@@ -880,7 +1013,11 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     // P13: never dispatched because the run was halted first. It must NOT read as
     // '等待' (which promises it will still run) and must not read as '失败'
     // (which blames this step for something another step did).
-    skipped: { label: '已跳过', color: HALTED_COLOR, mark: 'tf-ar-i' }
+    skipped: { label: '已跳过', color: HALTED_COLOR, mark: 'tf-ar-i' },
+    // P17: the worker died on an infrastructure fault and another dispatch is
+    // coming. Distinct from '进行中' (nothing is running right now) and from
+    // '失败' (which would say the step is over when it is about to be retried).
+    retrying: { label: '重试中', color: RETRY_COLOR, mark: 'tf-ar-w' }
   };
   var RUN_STATUS = {
     running: { label: '运行中', color: RUNNING_COLOR },
@@ -1348,6 +1485,12 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
       // review is never executed.
       reviewOf(n) === null && n.reviewer ? React.createElement('span', { className: 'tf-kv' }, '评审者 ' + n.reviewer + ' · 尚无评审记录') : null,
       n.dependsOn && n.dependsOn.length ? React.createElement('span', { className: 'tf-kv' }, '依赖: ' + n.dependsOn.join(', ')) : null,
+      // P17: where this node's result came from, and whether it took more than one
+      // dispatch to get it. Both are evidence: an inherited result must never look
+      // like one this run produced, and "it only succeeded on the 3rd try" is the
+      // difference between a healthy pipeline and one running on a flaky provider.
+      n.adoptedFrom ? React.createElement('span', { className: 'tf-kv', title: '这一节点的产出继承自被继续的那次运行' }, '沿用自 #' + String(n.adoptedFrom).slice(-6)) : null,
+      n.retries ? React.createElement('span', { className: 'tf-kv', style: { color: RETRY_COLOR } }, '重试 ' + n.retries + (n.retryOf ? '/' + n.retryOf : '') + ' 次') : null,
       n.taskId ? React.createElement('span', { className: 'tf-kv' }, 'task ' + String(n.taskId).slice(-6) + ' · ' + (n.taskStatus || '') + (n.iteration ? ' · it' + n.iteration : '')) : null
     ));
     // P11: 该节点实际生效的模型与人设段。两者都没有（旧记录，没有 route /
@@ -1671,6 +1814,40 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
     // ordinary unfinished one, which is the whole thing this state exists to
     // prevent.
     var skippedNodes = nodes.filter(function (n) { return n.status === 'skipped'; });
+    // P17: the run did not succeed, so it can be CONTINUED rather than re-run from
+    // scratch. Placed here, next to the explanation of what went wrong, because
+    // this is the moment someone decides "do I have to start over?" -- the answer
+    // is now no. Only for a settled run: a live one would race its own scheduler
+    // (the host refuses it, and the button does not offer it).
+    var resumable = run !== null && (run.status === 'failed' || run.status === 'halted' || run.status === 'interrupted');
+    var failedNodes = nodes.filter(function (n) { return n.status === 'failed'; });
+    var [resuming, setResuming] = React.useState(false);
+    var [resumeError, setResumeError] = React.useState(null);
+    var resumeBlock = !resumable ? null : React.createElement('div', {
+      style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #3b82f6', background: '#eff6ff', color: '#1e40af', fontSize: 12, lineHeight: 1.6 }
+    },
+      React.createElement('div', null, '这次运行没有全部成功' +
+        (failedNodes.length ? '：' + failedNodes.length + ' 个节点失败（' + failedNodes.map(function (n) { return n.id; }).join('、') + '）' : '') +
+        '。可以**继续运行**：已完成的节点会被直接沿用，只重跑失败的和被它挡住没跑的步骤，不必整个重来。'),
+      React.createElement('div', { style: { marginTop: 6, display: 'flex', gap: 8, alignItems: 'center' } },
+        React.createElement('button', {
+          className: 'tf-btn primary', disabled: resuming,
+          onClick: function () {
+            setResuming(true); setResumeError(null);
+            post('/run/resume', { runId: run.id })
+              .then(function (d) {
+                setResuming(false);
+                if (d && d.ok === false) { setResumeError(String(d.error || '继续运行失败')); return; }
+                // 跳到新那条运行：否则界面还停在旧的失败记录上，看起来像没生效。
+                if (d && d.run && d.run.id) { setRunId(d.run.id); setMode('session'); }
+                tick();
+              })
+              .catch(function (e) { setResuming(false); setResumeError(String(e && e.message ? e.message : e)); });
+          }
+        }, resuming ? '正在继续…' : '继续运行（沿用已完成节点）'),
+        resumeError === null ? null : React.createElement('span', { style: { color: '#b91c1c' } }, '继续失败：' + resumeError)
+      )
+    );
     var haltBlock = (run !== null && run.status === 'halted') ? React.createElement('div', {
       style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid ' + HALTED_COLOR, background: '#fffbeb', color: '#92400e', fontSize: 12, lineHeight: 1.5 }
     }, '本次运行已停止' +
@@ -1802,12 +1979,13 @@ window.__ModuleLoader__.load({ id: '@local/team-flowise', factory: function (req
         : React.createElement('div', { className: 'tf-empty' }, '暂无评审记录：本次运行没有节点声明 reviewer，或这些评审记录早于本次改动。')
     );
 
-    return React.createElement('div', { className: 'tf-pg' },
+    return React.createElement('div', { className: 'tf-pg' + (compact ? ' compact' : '') },
       React.createElement('style', null, PAGE_STYLE),
       header,
       errorBlock,
       noteBlock,
       haltBlock,
+      resumeBlock,
       content,
       reviewsBlock
     );
