@@ -203,10 +203,23 @@ console.log('\n--- A 组：派发被真正限时（原缺陷：spawn 无超时�
   try {
     // A1: the spawn never settles. The role's own timeout (1200ms) is ALSO the
     // spawn bound, which is what makes this testable in a second.
+    //
+    // P17 note: `spawn ... timed out after` is classified as an INFRASTRUCTURE
+    // failure, so a node that hits it is now re-dispatched automatically. That is
+    // correct behaviour (the child may never have run) but it changes the timeline
+    // this scenario measures: 1200ms + backoff + 1200ms + backoff + 1200ms exceeds
+    // the 8s deadline below. A1 exists to pin the SPAWN BOUND, not the retry policy
+    // (which validation/p17-delete-retry.mjs group B owns), so the node declares
+    // maxRetries: 0 to isolate it. Without that the suite would be measuring the
+    // retry feature instead of the bound it was written for.
     mount.script = () => ({ hangStart: true })
     const { svc } = await mount('good')
     await defineRoles(svc, ['n1'], { n1: 'dead' }, 1200)
-    await svc.upsertWorkflow({ id: 'wf-a1', name: 'wf-a1', nodes: chain(['n1']) })
+    // `chain()` ignores its second parameter, so the retry bound is set on the
+    // built node directly rather than through it.
+    const a1nodes = chain(['n1'])
+    a1nodes.n1.maxRetries = 0
+    await svc.upsertWorkflow({ id: 'wf-a1', name: 'wf-a1', nodes: a1nodes })
     const t0 = Date.now()
     const { outcome, run } = await runWithDeadline(svc, 'wf-a1', 8000)
     const ms = Date.now() - t0

@@ -501,6 +501,19 @@ if (up) {
   ok('the refused rework left the task queued and untouched',
     (tasks.json?.tasks || []).some((x) => x.id === taskId && x.status === 'queued' && (x.history || []).length === 0))
 
+  // P17: a task can be removed from the board, but not while a worker is writing
+  // it. The refusal is the important half -- a delete racing a worker's report
+  // would be undone by the next write, so reporting success there would be a lie.
+  const delTask = await http(`${base}/api/team-flowise/task?id=${encodeURIComponent(taskId)}`, { method: 'DELETE' })
+  ok('DELETE /task removes a queued task', delTask.json?.ok === true, JSON.stringify(delTask.json).slice(0, 140))
+  const tasksAfter = await http(`${base}/api/team-flowise/tasks`)
+  ok('the deleted task is really gone from the ledger',
+    !(tasksAfter.json?.tasks || []).some((x) => x.id === taskId))
+  const delMissingTask = await http(`${base}/api/team-flowise/task?id=no-such-task`, { method: 'DELETE' })
+  ok('DELETE /task refuses an unknown id instead of reporting success',
+    delMissingTask.json?.ok === false && /unknown task/.test(String(delMissingTask.json?.error)),
+    JSON.stringify(delMissingTask.json).slice(0, 140))
+
   // The scheduler. With no model configured in this throwaway home the worker
   // cannot run, and that is the point: what is being checked is that the run is
   // created, published with an id, and its nodes reach a terminal state with the
@@ -534,6 +547,37 @@ if (up) {
     const role = await http(`${base}/api/team-flowise/role?runId=${encodeURIComponent(runId)}&agent=${encodeURIComponent(agentId)}`)
     ok('GET /role returns that role\'s view of the run', role.status === 200 && role.json?.ok === true,
       JSON.stringify(role.json).slice(0, 140))
+
+    // P17: the resume route. In this throwaway home there is no model, so BOTH
+    // nodes fail and the run genuinely HAS something to continue -- which is the
+    // case worth asserting here: the route must accept it, link the new run back to
+    // the old one, and start it. The refusals (unknown id, nothing left to run) are
+    // covered by validation/p17-delete-retry.mjs, which can drive a run to
+    // completion; asserting "nothing to resume" HERE would be asserting a false
+    // premise, since this environment can never complete a node.
+    const resumeOk = await http(`${base}/api/team-flowise/run/resume`, { method: 'POST', body: { runId } })
+    ok('POST /run/resume continues a failed run and links the new run back to it',
+      resumeOk.json?.ok === true && typeof resumeOk.json?.run?.id === 'string' && resumeOk.json?.run?.resumedFrom === runId,
+      JSON.stringify(resumeOk.json).slice(0, 200))
+    const resumedId = resumeOk.json?.run?.id
+    if (resumedId) {
+      const resumed = await http(`${base}/api/team-flowise/run?id=${encodeURIComponent(resumedId)}`)
+      ok('the resumed run records resumedFrom (the two runs are linkable in storage)',
+        resumed.json?.run?.resumedFrom === runId, JSON.stringify(resumed.json?.run?.resumedFrom))
+      await http(`${base}/api/team-flowise/run?id=${encodeURIComponent(resumedId)}`, { method: 'DELETE' })
+    }
+    const resumeMissing = await http(`${base}/api/team-flowise/run/resume`, { method: 'POST', body: { runId: 'no-such-run' } })
+    ok('POST /run/resume refuses an unknown runId instead of inventing a run',
+      resumeMissing.json?.ok === false && /unknown run/.test(String(resumeMissing.json?.error)),
+      JSON.stringify(resumeMissing.json).slice(0, 160))
+
+    // P17: a run record is removable once it has settled. This is the button the
+    // user asked for; it must really remove the record.
+    const delRun = await http(`${base}/api/team-flowise/run?id=${encodeURIComponent(runId)}`, { method: 'DELETE' })
+    ok('DELETE /run removes a settled run record', delRun.json?.ok === true, JSON.stringify(delRun.json).slice(0, 140))
+    const gone = await http(`${base}/api/team-flowise/run?id=${encodeURIComponent(runId)}`)
+    ok('the deleted run is really gone (not merely hidden from the list)',
+      gone.json?.ok === true && gone.json?.run === null, JSON.stringify(gone.json).slice(0, 140))
   }
 
   /* ---- the client half ------------------------------------------------------
