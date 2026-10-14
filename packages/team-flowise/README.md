@@ -4,7 +4,7 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 
 它把「一个 agent 干完」变成「一组有角色、有依赖、有独立评审、有返工上限的 agent 干完」，并且把过程与产出留在可查的记录里。
 
-- 版本：`0.1.0`（`private`，`type: "module"`）
+- 版本：`0.1.5`（`private`，`type: "module"`）
 - 入口：`main` = `src/index.js`；客户端出口 = `./client` → `src/client/index.js`
 - bundle patch：`cordis.patch.yml`（**声明 `flowise-team` 这一行**——行由拥有它的 bundle 自己声明，这样「装上这个包」就等于「挂上这行」。`dsh plugin --profile <名> add <spec>` 只把包加入 `dsh.profile.bundles` 并组合它的 patch 层，从不改写 profile 自己的 patch 文件；若把行写在 profile 里，装完就是「bundle 挂上了、什么都不注册」）
 
@@ -31,13 +31,15 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 
 | 槽位 | id / key | 作用 |
 |---|---|---|
-| `settings.section` | `team` | 设置页「多 Agent 团队」看板：`看板` / `Agents` / `工作流` / `任务` / `运行` 五个标签；角色的新建/编辑表单（人设、模型路由、工具预设、超时） |
+| `settings.section` | `team` | 设置页「多 Agent 团队」看板：`看板` / `Agents` / `工作流` / `任务` / `运行` 五个标签；角色的新建/编辑表单（人设、模型路由、工具预设、超时）；**每一条都可删除**（角色、看板卡片、任务、工作流、运行），删除二次确认，进行中的任务与仍在运行的记录是不可点的禁用态并写明原因 |
 | `sidebar.panellist` | `team-progress` | 左栏面板图标「多 Agent 团队进度」，打开中央整页视图 |
 | `main` | `team-progress` | 中央进度页：角色交互时序（UML 风格 SVG）+ 角色卡片 + 产出/推理下钻 |
 | `sidebar.right.pane.tab`（+ `.title`） | `team-flowise-progress` | 会话右侧停靠的「多 Agent 进度」页签 |
 | `sidebar.footer.action` | `team-flowise-progress` | 侧栏底部**常驻状态入口**（团队运行中/空闲/其他会话运行中）；点击优先打开右栏页签，服务缺失时逐级降级 |
 
 进度页只读 `/progress`（轻量轮询）与 `/role`（按需下钻）。**会话归属**：默认按当前会话过滤，界面如实区分三种状态——本会话有运行 / 本会话暂无运行（会写明下面这条属于其他会话，或归属未知）/ 完全没有运行；并带「本会话 ↔ 全部运行」开关。请求失败（401/404/500）显示**错误态**，绝不伪装成空态。
+
+进度页**自带滚动容器**（`max-height:100%` + `min-height:0`）：它同时挂在中央整页和右侧固定高度的页签里，没有自己的滚动条时右栏下半截（角色详情、评审）根本够不到；在自动高度的父容器里这个约束等于不生效，所以整页形态的行为不变。
 
 注：`src/client/index.legacy-settings-only.js.txt` 是 P5 之前的「只有设置页」客户端快照，**仅作历史参考**，不参与构建，运行时不会加载 `.txt`。
 
@@ -47,8 +49,8 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 |---|---|---|
 | `team_agent_defs` | `defs` | 角色定义：`name` / `role` / `systemPrompt` / `model`(路由) / `tools`(含 `preset`) / `timeoutMs` |
 | `team_ledger` | `tasks` | 任务台账：`status`（`queued`→`submitted`→`working`→`completed`/`reworked`→`settle`）、`iteration` 返工轮次、`history`、产出 |
-| `team_workflows` | `flows` | 工作流定义：`nodes`（`agent`/`dependsOn`/`reviewer`/`taskTemplate`/`promptAddon`/`route`）、工作流级 `route`/`prompt`/`review` |
-| `team_runs` | `runs` | 运行记录：`status`、`nodeStates`（每节点产出/路由/人设/评审）、`sessionId`、`result` |
+| `team_workflows` | `flows` | 工作流定义：`nodes`（`agent`/`dependsOn`/`reviewer`/`taskTemplate`/`promptAddon`/`route`/`maxRetries`）、工作流级 `route`/`prompt`/`review`/`haltOnFailure`/`maxRetries` |
+| `team_runs` | `runs` | 运行记录：`status`、`nodeStates`（每节点产出/路由/人设/评审/重试次数）、`sessionId`、`input`、`resumedFrom`、`result` |
 
 落盘位置（file 后端）：`~/.dsh/storages/<domain>.json`，例如 `~/.dsh/storages/team_runs.json`。
 
@@ -80,9 +82,28 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 | `/workflow` | POST / DELETE | POST：工作流定义；DELETE：`?id=<工作流 id>` |
 | `/task/create` | POST | 任务台账条目 |
 | `/task/rework` | POST | `{ id, feedback }` |
-| `/run/start` | POST | `{ workflowId, input, route, session }`（`session` 可选，不猜） |
+| `/task` | DELETE | `?id=<任务 id>`；**`working` 的任务被拒绝**（worker 还在写它，删了会被下一次写入复活） |
+| `/run` | DELETE | `?id=<运行 id>`；**仍在运行的被拒绝**（同上：调度器还在写 nodeStates） |
+| `/run/start` | POST | `{ workflowId, input, route, session, resumeFrom }`（后三者可选，不猜） |
+| `/run/resume` | POST | `{ runId }`：继续一次已结束但未全部成功的运行，见第五节 |
 
-## 五、目录结构
+## 五、失败恢复（自动重试 + 继续运行）
+
+一个角色因为**基础设施**原因挂掉（provider/adapter 报错、spawn 触顶、连接被重置）时，以前整条流水线就废了，只能从头再跑一遍。现在有两层：
+
+**自动重试。** 判据是一张**窄名单**（`worker error`、`spawn ... timed out`、`ECONNRESET`/`ETIMEDOUT`/`ENOTFOUND`/`EAI_AGAIN`/socket hang up/network error/fetch failed）。命中就自动重派，最多 `RETRY_LIMITS.maxAutoRetries`（默认 2）次，退避 2s → 8s。**工作类失败不重试**——prompt 写错、工具真的报错，重派只会再烧一个同样的超时，还会把"问题出在任务本身"这个事实藏起来。上限可按节点/工作流下调：`maxRetries`（0 = 不重试），越界被钳到插件上限，只能收紧不能放宽。
+
+重试期间节点状态是 `retrying`（独立颜色），**不是** `working`（那会说"正在跑"，可退避期间什么都没跑），也**不是** `failed`（那会说这一步已经完了）。次数写在节点上（`retries` / `retryOf`），所以"第三次才成功"是可查的证据。
+
+**继续运行。** 已结束但没全部成功的运行可以继续：成功的节点被**沿用**（标 `adoptedFrom`，指向被继续的那次运行），只重派失败的和被它挡住没跑的步骤。这是"一个角色抖了一下"和"整个任务重跑一遍"的区别。
+
+- 这是一条**新运行记录**，不是改写旧的：上一次的 `nodeStates`（哪个节点失败、走的哪条路由、报了什么错）本身就是判断"能不能安全继续"的证据，就地覆盖会毁掉它。新记录的 `resumedFrom` 指向旧的。
+- 原始 `input` 存在运行记录自己的 `input` 字段上，继续时原样复用——这样被重派的步骤拿到的输入，与已沿用步骤当初的输入是同一个。
+- 判定逻辑只有一份（`resumePlan`），路由与测试共用：缺 `runId` / 未知 / **仍在运行** / 工作流已不存在 / 所有节点都已完成，一律**拒绝并说明原因**，绝不启动一个什么都不派发、看起来卡住的空运行。
+
+界面入口：运行列表里未成功的运行有「继续运行」；进度页在失败/停止说明旁边也有一个，点完会跳到新那条运行（否则看起来像没生效）。
+
+## 六、目录结构
 
 ```
 packages/team-flowise/
@@ -102,7 +123,7 @@ packages/team-flowise/
 └── README.md                      # 安装 / 验证 / 卸载章节
 ```
 
-## 六、技能文件
+## 七、技能文件
 
 技能在 **`skills/team-flowise/SKILL.md`**（仓库根下的目录束，相对本包为 `../skills/team-flowise/`；目录名与 frontmatter 的 `name` 一致，都是 `team-flowise`）。
 
@@ -110,7 +131,7 @@ packages/team-flowise/
 
 安装脚本会把它复制/链接到技能根目录（默认用户级 `~/.dsh/skills/team-flowise/`，也支持 `.agents` 兼容根）。
 
-## 七、安装 / 卸载
+## 八、安装 / 卸载
 
 以**仓库根 `README.md` 的「安装」章节**为准（含前置条件、一条命令安装、验证、卸载与「为什么必须重启」）。脚本接口：
 

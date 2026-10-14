@@ -1,7 +1,7 @@
 {
   "name": "@local/team-flowise",
   "description": "Flowise-like multi-agent team orchestration plugin for DeepSeek Harness (production port of the P1-P5 dynamic prototype, packaged as a composable host bundle).",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
   "private": true,
   "type": "module",

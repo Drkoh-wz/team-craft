@@ -10,7 +10,9 @@ One agent is fine until the job has parts. Then you want a planner, a coder, a r
 - **The graph decides the order.** Nodes declare `dependsOn`; everything that is ready runs in the same wave, in parallel.
 - **Review is a gate, not a suggestion.** A node can name its own reviewer. Blocking findings go back to the worker verbatim, and rework is bounded — two rounds per node, three per run.
 - **Runs stick around.** Roles, workflows, the task ledger and run history live in four durable storage domains. A run cut off by a crash comes back marked interrupted rather than quietly repainted as finished.
+- **A flaky step does not cost you the pipeline.** A worker that dies for an infrastructure reason is re-dispatched automatically; a run that ended short can be continued, reusing the nodes that succeeded.
 - **You can watch it.** The right sidebar carries the graph, each role's progress, and — for the node you select — the model, reasoning effort, output cap and persona it actually ran with, plus the reviewer's verdict.
+- **And you can clean up after it.** Every list in Settings has a delete control, so a stale role or a finished run does not need a conversation with an agent to remove.
 
 Seven `team_*` tools drive all of it from the chat: `team_create_agent`, `team_create_workflow`, `team_create_task`, `team_run_workflow`, `team_delegate_agent`, `team_list_agents`, `team_task_status`.
 
@@ -167,6 +169,16 @@ Restart afterwards, for the same reason as before.
 
 A node is dispatched as a worker subagent carrying the persona, model route and tool preset its role declares. When it reports back, the node's reviewer is asked for a verdict, and blocking findings become the next round's feedback. A reviewer that cannot produce a readable verdict is recorded as an error — and an error never counts as a pass.
 
+### When a role fails
+
+A worker that dies for an **infrastructure** reason — an adapter error, a spawn that hit its ceiling, a dropped connection — is re-dispatched automatically (twice by default, with backoff), so one network blip no longer costs the whole pipeline. The classification is a deliberately narrow allow-list: a *work* failure (a bad prompt, a real tool error) is **not** retried, because a second dispatch would only buy the same answer at the price of another full timeout. Set `maxRetries` on a node or a workflow to tighten the bound (0 disables it); it can only ever be lowered, never raised.
+
+A run that ended without everything succeeding can be **continued** instead of started over: its completed nodes are reused and only the failed ones and whatever was cut off behind them are dispatched again. It lands as a new run record linked to the old one by `resumedFrom`, so the previous attempt's evidence survives. In the UI, "继续运行" sits on every unfinished run in the run list, and next to the failure explanation on the progress page.
+
+### Removing things
+
+Every list in the Settings section has a delete control — roles, board cards, tasks, workflows, runs — with a confirmation step, since these records are not undoable and the same row also carries the open/edit action. Two removals are refused on purpose, and the button renders disabled with the reason: a task a worker is still writing, and a run whose scheduler is still advancing. Deleting either would be undone by the next state write, so reporting success would be a lie.
+
 ## Repo layout
 
 | Path | What it is |
@@ -183,7 +195,9 @@ A node is dispatched as a worker subagent carrying the persona, model route and 
 - The host half is plain ESM JavaScript. The client half uses `React.createElement` and has to keep the `window.__ModuleLoader__.load({ id, factory })` shape. Neither half may add a runtime dependency.
 - `deploy/web-profile/package.json` is a portable template — its dependency path is relative to itself. Do not hand-edit a live profile; run the installer.
 - `node validation/preflight-install.mjs` is the release gate: it installs the package every published way into throwaway profiles, then boots one and drives its whole HTTP surface. It needs network access and starts a temporary host on a free port. It finds a harness to test against by itself (`--dsh <bin>` or `--desktop <dir>` to pick one), so it also works on a machine that only has DSH Desktop.
-- The offline suites (the `p8` and `p10`–`p16` files) import the plugin source directly, and the plugin imports its `@deepseek-ai/*` peers, which no test process has. Run `node validation/dev-host-packages.mjs` once and they resolve those from `.dev-host-packages/` — deliberately outside the package directory, which has to stay free of them: a copy inside it wins over the harness's own supply, which is exactly the outage this release fixes.
+- The offline suites (the `p8` and `p10`–`p17` files) import the plugin source directly, and the plugin imports its `@deepseek-ai/*` peers, which no test process has. Run `node validation/dev-host-packages.mjs` once and they resolve those from `.dev-host-packages/` — deliberately outside the package directory, which has to stay free of them: a copy inside it wins over the harness's own supply, which is exactly the outage this release fixes.
+- `validation/p17-mutations.mjs` and `validation/p17-client-mutations.mjs` are not extra feature tests: they break one behaviour at a time and assert that the *named* check goes red. A suite that cannot be made to fail is not evidence, and "it failed somewhere" does not credit a specific assertion. They are written in Node rather than PowerShell on purpose — a `Get-Content`/`Set-Content` round trip re-encodes the file, so every mutation would then "fail" with a `SyntaxError` and credit nothing.
+- Three suites (`p8-acceptance`, `client-ui-validation`, `write-path-check`, plus `ui-form-payload-check`) need a live host on `127.0.0.1:3080` and crash rather than skip without one. That is a pre-existing gap, not a regression; the offline battery is the `p10`–`p17` files.
 
 ## License
 
