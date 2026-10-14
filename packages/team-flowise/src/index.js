@@ -29,6 +29,23 @@ export const inject = ['storageDomain', 'agents', 'subagents'];
 const now = () => Date.now();
 const makeId = () => (Math.random().toString(36).slice(2, 10) + now().toString(36));
 
+// Is this node failure an INFRASTRUCTURE failure (worth another dispatch) or a
+// WORK failure (retrying only burns the same ceiling for the same answer)?
+//
+// Deliberately a short allow-list, not "anything that looks transient": a wrong
+// classification in the permissive direction makes the plugin silently re-run
+// expensive work, and the operator never learns their prompt is the problem.
+// The three shapes below are the ones this plugin has actually observed, and they
+// share a property -- the node's task is untouched by them:
+//   * `worker error` / `worker(rework) error`: the adapter or provider ended the
+//     child (NO_ADAPTER after a long silence, a dropped connection).
+//   * `spawn ... timed out`: P14's own bound fired; the child may never have run.
+//   * ECONNRESET/ETIMEDOUT/ENOTFOUND/socket|network wording: the transport died.
+// A `stopReason` that is neither completed nor a provider fault, a tool error, a
+// validation error or a bad-prompt refusal are all WORK failures and are NOT here.
+const INFRA_FAILURE_RE = /Error: worker\(?rework\)? error\b|spawn of .* timed out after|\bECONNRESET\b|\bETIMEDOUT\b|\bENOTFOUND\b|\bEAI_AGAIN\b|socket hang up|network error|connection reset|fetch failed/i;
+const isInfrastructureFailure = (message) => INFRA_FAILURE_RE.test(String(message));
+
 // P11: a route must be able to say "nothing was declared". With
 // `.default('deepseek')` / `.default('deepseek-chat')` an EMPTY model object was
 // rewritten into a route no author ever wrote -- and `deepseek` has no registered
@@ -97,6 +114,12 @@ export const workflowNodeSchema = z.object({
   mode: z.enum(['once', 'loop']).optional(),
   gate: z.object({ expr: z.string().optional(), condition: z.any().optional() }).optional(),
   maxRework: z.number().int().positive().optional(),
+  // P17: automatic re-dispatch of THIS node when its worker dies for an
+  // infrastructure reason (adapter/provider error, spawn ceiling, dropped
+  // transport). Clamped to RETRY_LIMITS.maxAutoRetries at use time, so a node can
+  // only ever LOWER the bound. Optional like every other node field, so records
+  // stored before this change still validate.
+  maxRetries: z.number().int().min(0).max(2).optional(),
   // P11 node-level route: this step runs on a different model. OPTIONAL, and so
   // is every field inside it -- adding a required key here would make every
   // stored workflow record fail validation the moment a domain opens.
@@ -149,6 +172,9 @@ export const workflowSchema = z.object({
   // to end, and resolved run > node > workflow > role.
   inheritContext: z.union([z.boolean(), z.enum(['session', 'none'])]).optional(),
   inheritMaxEvents: z.number().int().positive().optional(),
+  // P17: workflow-level default for the automatic retry bound; a node's own
+  // `maxRetries` wins. Same clamp as the node field.
+  maxRetries: z.number().int().min(0).max(2).optional(),
   updatedAt: z.number().int().nonnegative(),
 });
 
@@ -212,6 +238,17 @@ export const runSchema = z.object({
   // The working directory of that session. Advisory only: it is shown for
   // diagnostics and weak grouping and NEVER takes part in attribution.
   workspace: z.string().optional(),
+  // P17: the run this one continues, when it was started as a resume. Optional
+  // with no default, for the same reason as the two keys above -- every record
+  // already on disk has neither, and the file backend validates on open/put.
+  resumedFrom: z.string().optional(),
+  // P17: the input the run was launched with. Stored HERE rather than only in the
+  // final `result`, because a resume has to reuse the original input and a run that
+  // died mid-flight never reaches the final write -- reading it back from
+  // `result.input` would have silently continued the run with `{}`, giving the
+  // re-dispatched steps different inputs than the adopted ones were produced
+  // under. `z.any()` so a caller's free-form object survives verbatim.
+  input: z.any().optional(),
 });
 
 // ---- typed domains (underscore names satisfy UNIT_NAME_RE) ----
@@ -941,6 +978,21 @@ export const REVIEW_LIMITS = {
   artifactMax: 20000,
 };
 
+// Automatic re-dispatch of a node whose WORKER died for an infrastructure reason
+// rather than because the work was judged wrong. The distinction is the whole
+// design: a network reset, a provider adapter that went silent or a spawn that hit
+// its ceiling says nothing about the node's task, and re-running it is exactly what
+// an operator would do by hand -- whereas retrying a node that failed on a bad
+// prompt or a real tool error only spends the same timeout again for the same
+// answer. Attempts are bounded so one sick provider cannot stretch a run without
+// limit, and each retry is spaced out (a provider that just dropped a connection
+// is usually usable a moment later, and an immediate re-dispatch tends to land on
+// the same broken path).
+export const RETRY_LIMITS = {
+  maxAutoRetries: 2,
+  backoffMs: [2000, 8000],
+};
+
 // The five dimensions every review must answer. Fixed on purpose: a free-form
 // dimension list makes reviewers invent axes ("code smell", "naming") and turn
 // advisory taste into blocking findings.
@@ -1511,6 +1563,10 @@ const withTimeout = (p, ms, label) => {
   return Promise.race([p, guard]).finally(() => clearTimeout(timer));
 };
 
+// Backoff between automatic re-dispatches. `unref` so a pending retry timer never
+// holds the host process open on its own.
+const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); if (typeof t.unref === 'function') t.unref(); });
+
 // Apply the stored agent definition (model route, persona, tool policy) to a
 // spawned child, and start it. The workflow runner previously ignored all of
 // these, so every child ran the caller's default route and the full
@@ -2035,13 +2091,22 @@ export function apply(ctx) {
     // reason: a workflow that declares "stop when a step fails" and then stores
     // nothing would report a halt setting that can never take effect.
     // P16 adds `inheritContext` for the identical reason.
-    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, inheritContext: wf && wf.inheritContext, inheritMaxEvents: wf && wf.inheritMaxEvents, updatedAt: now() }));
+    // P17 adds `maxRetries` for the identical reason: the schema would accept it,
+    // the tool/HTTP caller would send it, and this builder would drop it -- so a
+    // workflow could declare "retry a dead worker" and store nothing.
+    const rec = workflowSchema.parse(clean({ id: (wf && wf.id) || makeId(), name: wf && wf.name, description: wf && wf.description, nodes: (wf && wf.nodes) || {}, route: wf && wf.route, prompt: wf && wf.prompt, review: wf && wf.review, haltOnFailure: wf && wf.haltOnFailure, inheritContext: wf && wf.inheritContext, inheritMaxEvents: wf && wf.inheritMaxEvents, maxRetries: wf && wf.maxRetries, updatedAt: now() }));
     await withTable('team_workflows', 'flows', (t) => t.put(rec.id, rec)); return rec;
   };
   const listWorkflows = async () => withTable('team_workflows', 'flows', (t) => [...t.entries()].map(([, v]) => v));
   const deleteWorkflow = async (id) => withTable('team_workflows', 'flows', (t) => t.delete(id));
   const listRuns = async () => withTable('team_runs', 'runs', (t) => [...t.entries()].map(([, v]) => v));
   const getRun = async (id) => withTable('team_runs', 'runs', (t) => t.get(id) || null);
+  // Runs are the biggest table by far (one record per launch, each carrying every
+  // node's output, reasoning trace and review verdict), so being unable to remove
+  // one is what makes the runs list grow without bound. Refusing to remove a LIVE
+  // run is not politeness: its scheduler is still writing nodeStates, so a delete
+  // would be undone by the next write and the UI would show it reappearing.
+  const deleteRun = async (id) => withTable('team_runs', 'runs', (t) => t.delete(id));
 
   // ---- progress data plane (read-only) ----
   // The board needs one self-contained payload: which nodes exist, who owns each
@@ -2148,7 +2213,13 @@ export function apply(ctx) {
   const bucketOf = (status) => {
     if (status === 'completed') return 'completed';
     if (status === 'failed') return 'failed';
-    if (status === 'working') return 'working';
+    // P17: `retrying` is a node that is IN FLIGHT -- its worker died on an
+    // infrastructure fault and another dispatch is coming. Counting it as pending
+    // ("not started yet") would say the opposite of what is happening, and it is
+    // exactly the moment an operator looks at the board and asks "is it stuck?".
+    // It reuses the existing `working` bucket, so the roll-up's key set -- a
+    // stability contract the client asserts against -- is unchanged.
+    if (status === 'working' || status === 'retrying') return 'working';
     if (status === 'reviewing') return 'reviewing';
     if (status === 'rework') return 'rework';
     return 'pending';
@@ -2279,6 +2350,13 @@ export function apply(ctx) {
         // undefined, so this key exists ONLY on a skipped node and every other
         // node's projected key set is byte-for-byte what it was before P13.
         blockedBy: st.blockedBy,
+        // P17: how many automatic re-dispatches this node has already burned, and
+        // whether it is a result INHERITED from the run this one continues. Same
+        // `clean`-drops-undefined rule as `blockedBy`: a node that never retried
+        // and was not adopted keeps exactly the key set it had before P17.
+        retries: st.retries,
+        retryOf: st.retryOf,
+        adoptedFrom: st.adoptedFrom,
         // P11: the route this node actually ran on, LIGHTLY. /progress is a
         // 3-second poll, so this carries only what the card needs to be honest
         // (which layer won, what it really ran, whether that was MEASURED, and
@@ -2484,6 +2562,16 @@ export function apply(ctx) {
         // for a run recorded before P11, so an old run's card is unchanged.
         route: st.route === undefined ? null : st.route,
         persona: st.persona === undefined ? null : st.persona,
+        // P17: the retry evidence, on the entry NodeCard actually renders from --
+        // same reason as `review` above, which was unreachable on the card until it
+        // was added here. Passed through RAW (not coerced to null) so `clean` DROPS
+        // these keys on a node that never retried and was not adopted: the projected
+        // key set of an ordinary node must stay exactly what it was before P17, which
+        // is a contract p10-review pins by exact key count. An absent key reads the
+        // same as 0 in the client's `n.retries ?` test, so nothing is lost.
+        retries: st.retries,
+        retryOf: st.retryOf,
+        adoptedFrom: st.adoptedFrom,
       }));
     }
     return clean({
@@ -2516,6 +2604,13 @@ export function apply(ctx) {
   };
   const getTask = async (id) => withTable('team_ledger', 'tasks', (t) => t.get(id) || null);
   const listTasks = async () => withTable('team_ledger', 'tasks', (t) => [...t.entries()].map(([, v]) => v));
+  // Removal is deliberately NOT a transition: TASK_TRANSITIONS models what a task
+  // may become, and "gone" is not a status it can hold. A `working` task is
+  // refused for the same reason a live run is -- a worker is still writing to it,
+  // and the next report would recreate a half-deleted entry. Everything else
+  // (queued backlog, submitted, reworked, completed, settled) is removable,
+  // which is what a user clearing the board actually has in front of them.
+  const deleteTask = async (id) => withTable('team_ledger', 'tasks', (t) => t.delete(id));
   const submitTask = (id) => transition(id, 'submitted', {});
   const startTask = (id) => transition(id, 'working', {});
   const completeTask = (id, output, outputRef) => transition(id, 'completed', clean({ output: output || null, outputRef: outputRef || undefined }));
@@ -2582,6 +2677,19 @@ export function apply(ctx) {
   // something a model should be guessing at, and the tool surface is frozen by
   // p12-usability. The HTTP body and in-process callers can set it.
   const runInheritMax = opts ? opts.inheritMaxEvents : undefined;
+  // P17 RESUME. `opts.resumeFrom` is the id of a run that already ended with
+  // failures. Its nodes that SUCCEEDED are adopted as already-complete, so only the
+  // failed ones and whatever was cut off behind them are dispatched again. This is
+  // the difference between "one role hit a network blip" and "re-run the whole
+  // pipeline": without it, the only recovery was to start over and pay for every
+  // step a second time.
+  //
+  // Deliberately a NEW run record rather than a mutation of the old one: the
+  // previous attempt's nodeStates are evidence (which node failed, on what route,
+  // with what error), and rewriting them in place would destroy the very record
+  // someone consults to decide whether resuming is safe. The new run names its
+  // parent in `resumedFrom` so the two are linkable.
+  const resumeFrom = opts ? opts.resumeFrom : undefined;
     const wf = await withTable('team_workflows', 'flows', (t) => t.get(workflowId));
     if (!wf) throw new Error('team-flowise: workflow not found ' + workflowId);
     const nodes = (wf.nodes || {});
@@ -2595,7 +2703,7 @@ export function apply(ctx) {
     } catch (e) { console.warn('team-flowise: could not resolve the run session: ' + String(e)); origin = {}; }
     // `clean` drops the undefined keys, so an unattributed run is written with
     // exactly the key set it had before P12.
-    const runRec = runSchema.parse(clean({ id: makeId(), workflowId, status: 'running', nodeStates: {}, startedAt: now(), sessionId: origin.sessionId, workspace: origin.workspace }));
+    const runRec = runSchema.parse(clean({ id: makeId(), workflowId, status: 'running', nodeStates: {}, startedAt: now(), sessionId: origin.sessionId, workspace: origin.workspace, resumedFrom: resumeFrom, input: input && Object.keys(input).length ? input : undefined }));
     await withTable('team_runs', 'runs', (t) => t.put(runRec.id, runRec));
     // Publish the run id before any delegation happens, so an HTTP caller can
     // answer immediately and the board can follow the run by polling instead of
@@ -2608,6 +2716,22 @@ export function apply(ctx) {
       const completed = {};
       const succeeded = {};
       const outputs = {};
+      // P17: adopt the successes of the run we are resuming. A node counts as
+      // adopted only when it COMPLETED in the parent run -- a `failed` one is
+      // exactly what we are here to retry, and a `skipped` one never produced
+      // anything. The adoption is what bounds the cost: on a long pipeline where
+      // step 7 of 9 died, steps 1-6 and their review verdicts are reused, and only
+      // 7, 8 and 9 are dispatched again.
+      //
+      // Every adopted node is copied into THIS run's nodeStates with
+      // `adoptedFrom`, so the board shows a full picture rather than a run that
+      // appears to have skipped its own early steps -- and so a reader can never
+      // mistake an inherited result for one produced by this attempt.
+      const resumedFromRun = resumeFrom ? await getRun(resumeFrom) : null;
+      const adopted = [];
+      if (resumedFromRun !== null && resumedFromRun.workflowId !== workflowId) {
+        throw new Error('team-flowise: cannot resume run ' + resumeFrom + ': it belongs to workflow ' + String(resumedFromRun.workflowId) + ', not ' + workflowId);
+      }
       // P10 review ledgers, in `runWorkflow` scope so ONE run shares them.
       // `reworkByNode` / `runRework` are the anti-stretch budget: they bound how
       // many extra worker dispatches a whole run can produce, regardless of what
@@ -2655,6 +2779,26 @@ export function apply(ctx) {
       const nameOf = await roleNamer();
       const titleOf = (node) => nodeTitle(node, node && node.taskTemplate && node.taskTemplate.requirement) || node.id;
       const setRunState = async (patch) => withTable('team_runs', 'runs', (t) => t.update(runRec.id, (cur) => ({ ...cur, ...patch, nodeStates: { ...(cur.nodeStates || {}), ...(patch.nodeStates || {}) } })));
+      // P17: adopt the parent run's successes, now that setRunState exists. A node
+      // counts as adopted only when it COMPLETED there -- a `failed` one is exactly
+      // what a resume is for, and a `skipped` one never produced anything. Each
+      // adopted node is re-published on THIS run with `adoptedFrom`, so the board
+      // shows a complete picture instead of a run that appears to have skipped its
+      // own early steps, and nobody mistakes an inherited result for one this
+      // attempt produced.
+      if (resumedFromRun !== null) {
+        const prevStates = resumedFromRun.nodeStates || {};
+        for (const nid of nodeIds) {
+          const prev = prevStates[nid];
+          if (!prev || prev.status !== 'completed') continue;
+          completed[nid] = true;
+          succeeded[nid] = true;
+          outputs[nid] = typeof prev.output === 'string' ? prev.output : '';
+          adopted.push(nid);
+          await setRunState({ nodeStates: { [nid]: { ...prev, adoptedFrom: resumeFrom, adoptedAt: now() } } });
+        }
+        if (adopted.length > 0) console.log('team-flowise: resuming ' + runRec.id + ' from ' + resumeFrom + ', adopting ' + adopted.length + ' completed node(s): ' + adopted.join(', '));
+      }
       // ---- P10 review phase helpers ----
       // The reviewer actually in effect: the node's own first, then the
       // workflow-level one. Empty/blank strings count as "not configured", so a
@@ -2813,6 +2957,23 @@ export function apply(ctx) {
           // that fails after emitting reasoning DID produce a trace, and the role
           // view would otherwise state that it produced none.
           let reasoning = '';
+          // P17: the retry evidence, hoisted here for exactly the same reason as
+          // `reasoning` above -- the failure write lives in the node's outer catch,
+          // so a declaration inside the dispatch block would be out of scope there
+          // and the "it failed after 2 retries" fact would be lost (or, worse,
+          // throw a ReferenceError while recording the failure).
+          let retryNote = null;
+          // The automatic-retry bound for THIS node, resolved once. Same
+          // node-beats-workflow precedence as the rework cap, clamped to the plugin
+          // ceiling so neither layer can raise it.
+          const retryCapFor = () => {
+            const candidates = [];
+            if (node.maxRetries !== undefined && node.maxRetries !== null) candidates.push(node.maxRetries);
+            if (wf.maxRetries !== undefined && wf.maxRetries !== null) candidates.push(wf.maxRetries);
+            let n = RETRY_LIMITS.maxAutoRetries;
+            for (const c of candidates) if (typeof c === 'number' && isFinite(c)) n = Math.min(n, Math.max(0, Math.floor(c)));
+            return n;
+          };
           // This node's own lifetime. `startedAt` is captured ONCE, here, and then
           // re-sent with every later write for this node: setRunState merges
           // `nodeStates` one level deep (`{...cur.nodeStates, ...patch.nodeStates}`),
@@ -2936,42 +3097,84 @@ export function apply(ctx) {
               if (effFails >= PROVIDER_HEALTH.maxConsecutiveFailures) {
                 throw new Error('provider "' + effProvider + '" 已在本轮连续失败 ' + effFails + ' 次，且该角色没有其他可用路由；为避免再消耗一个完整超时，本次不再派发');
               }
-              const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent), workerTimeoutMs, workerProvider);
-              lastStarted = started;
-              toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
-              if (built.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + built.presetNote);
-              // The ONLY authoritative answer to "what did it run on": the child's
-              // own request header. Reading it must never affect the dispatch, and
-              // an unreadable one is recorded as measured:false, never invented.
-              workerMeasured = measureChildRoute(started);
-              routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
-              deny = (((def && def.tools) || {}).deny || []).slice();
-              const result = await withTimeout(started.run.result, workerTimeoutMs, 'workflow node ' + nid);
-              // Re-read now that the child has certainly issued its first request
-              // (the header only exists from then on); the last real read wins.
-              workerMeasured = refreshMeasured(started, workerMeasured);
-              routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
-              // P16: the child has settled, so its own usage is now readable. This
-              // is the number the whole feature is judged by -- recorded as-is, and
-              // left null (unknown) rather than zeroed when the session is silent.
-              if (contextState !== null) {
-                const stats = measureChildStats(started);
-                contextState.dispatches += 1;
-                if (stats !== null) {
-                  if (stats.seeded !== null) contextState.seeded = stats.seeded;
-                  if (stats.usage !== null) contextState.usage = contextState.usage === null ? stats.usage : sumUsageMerge(contextState.usage, stats.usage);
+              // P17: dispatch, and if the worker dies for an INFRASTRUCTURE reason,
+              // dispatch again -- instead of writing the node off and forcing the
+              // whole workflow to be re-run by hand. This is the fix for "one role
+              // hit a network blip and the entire task had to start over".
+              //
+              // The bound is resolved the same way the rework cap is (run < node <
+              // workflow, clamped to the plugin ceiling) and the ATTEMPTS are
+              // recorded on the node, so "it only succeeded on the third try" is
+              // visible evidence rather than a silent extra run. A work failure is
+              // re-thrown immediately: retrying a bad prompt or a real tool error
+              // would spend the same ceiling for the same answer.
+              const retryCap = retryCapFor();
+              let attempt = 0;
+              for (;;) {
+                try {
+                  const started = await startWorker(subagents, { label: node.id, prompt: [{ type: 'text', text: prompt }], parent, signal: nodeCtl.signal }, built.spec, parentToolNote(parent), workerTimeoutMs, workerProvider);
+                  lastStarted = started;
+                  toolNote = started.note + (built.presetNote ? ' | ' + built.presetNote : '');
+                  if (built.presetNote) console.warn('team-flowise: worker of node ' + nid + ' tools: ' + built.presetNote);
+                  // The ONLY authoritative answer to "what did it run on": the child's
+                  // own request header. Reading it must never affect the dispatch, and
+                  // an unreadable one is recorded as measured:false, never invented.
+                  workerMeasured = measureChildRoute(started);
+                  routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
+                  deny = (((def && def.tools) || {}).deny || []).slice();
+                  const result = await withTimeout(started.run.result, workerTimeoutMs, 'workflow node ' + nid);
+                  // Re-read now that the child has certainly issued its first request
+                  // (the header only exists from then on); the last real read wins.
+                  workerMeasured = refreshMeasured(started, workerMeasured);
+                  routeState = routeRecordOf(workerDecision, workerMeasured, workerTimeoutMs);
+                  // P16: the child has settled, so its own usage is now readable. This
+                  // is the number the whole feature is judged by -- recorded as-is, and
+                  // left null (unknown) rather than zeroed when the session is silent.
+                  if (contextState !== null) {
+                    const stats = measureChildStats(started);
+                    contextState.dispatches += 1;
+                    if (stats !== null) {
+                      if (stats.seeded !== null) contextState.seeded = stats.seeded;
+                      if (stats.usage !== null) contextState.usage = contextState.usage === null ? stats.usage : sumUsageMerge(contextState.usage, stats.usage);
+                    }
+                  }
+                  const blocks = result.output || [];
+                  output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
+                  // Reasoning blocks were already produced by the adapter and simply
+                  // thrown away here, which is why a role's "thinking" was invisible.
+                  reasoning = blocks.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
+                  // A worker that did not finish cleanly must not be reported as a
+                  // successful node: without this an instantly-failing child (e.g.
+                  // NO_ADAPTER) looked like a completed node with empty output.
+                  if (result.stopReason !== 'completed') {
+                    throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + (output ? ' | partial: ' + output.slice(0, 200) : ''));
+                  }
+                  break;
+                } catch (workerError) {
+                  const isInfra = isInfrastructureFailure(workerError);
+                  // Retry only while the budget allows AND the reason is
+                  // infrastructure AND the run has not been halted underneath us
+                  // (a halt means "start nothing new", and a retry is a new start).
+                  if (isInfra && attempt < retryCap && haltedBy === null) {
+                    attempt += 1;
+                    const waitMs = RETRY_LIMITS.backoffMs[Math.min(attempt - 1, RETRY_LIMITS.backoffMs.length - 1)];
+                    retryNote = { attempt, of: retryCap, afterMs: waitMs, error: String(workerError) };
+                    // Visible while it waits: an operator watching the board must be
+                    // able to tell "about to try again" from "stuck".
+                    await setRunState({ nodeStates: { [nid]: {
+                      status: 'retrying', assignee: node.agent, startedAt: nodeStartedAt,
+                      endedAt: null, tools: toolNote, taskId: taskId || null,
+                      error: String(workerError), retries: attempt, retryOf: retryCap,
+                      ...(routeState ? { route: routeState } : {}),
+                      ...(personaState ? { persona: personaState } : {}),
+                      ...(contextState ? { context: contextState } : {}),
+                    } } });
+                    console.warn('team-flowise: node ' + nid + ' infrastructure failure, retry ' + attempt + '/' + retryCap + ' in ' + waitMs + 'ms: ' + String(workerError));
+                    await sleep(waitMs);
+                    continue;
+                  }
+                  throw workerError;
                 }
-              }
-              const blocks = result.output || [];
-              output = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
-              // Reasoning blocks were already produced by the adapter and simply
-              // thrown away here, which is why a role's "thinking" was invisible.
-              reasoning = blocks.filter((b) => b.type === 'reasoning' && typeof b.text === 'string').map((b) => b.text).join('\n');
-              // A worker that did not finish cleanly must not be reported as a
-              // successful node: without this an instantly-failing child (e.g.
-              // NO_ADAPTER) looked like a completed node with empty output.
-              if (result.stopReason !== 'completed') {
-                throw new Error('worker ' + result.stopReason + (result.diagnostic ? ': ' + result.diagnostic : '') + (output ? ' | partial: ' + output.slice(0, 200) : ''));
               }
             }
             // ==== P10 review phase (inserted between the dispatch above and the
@@ -3132,7 +3335,7 @@ export function apply(ctx) {
                 if (statsFail.usage !== null) contextState.usage = contextState.usage === null ? statsFail.usage : sumUsageMerge(contextState.usage, statsFail.usage);
               }
             }
-            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}), ...(contextState ? { context: contextState } : {}) } } });
+            await setRunState({ nodeStates: { [nid]: { status: 'failed', assignee: node.agent, startedAt: nodeStartedAt, endedAt: now(), error: String(e), summary: firstLine('失败：' + String(e), 140), tools: toolNote, taskId: taskId || null, ...(retryNote ? { retries: retryNote.attempt, retryOf: retryNote.of, retried: true } : {}), ...(reasoning ? { reasoning: reasoning.slice(0, REASONING_MAX), reasoningLen: reasoning.length } : {}), ...(reviewState ? { review: reviewState } : {}), ...(routeState ? { route: routeState } : {}), ...(personaState ? { persona: personaState } : {}), ...(reviewRouteState ? { reviewRoute: reviewRouteState } : {}), ...(reviewerPersonaState ? { reviewPersona: reviewerPersonaState } : {}), ...(contextState ? { context: contextState } : {}) } } });
           }
         }));
       }
@@ -3280,15 +3483,45 @@ export function apply(ctx) {
     }));
   }
 
+  // P17: can this run be continued, and what would that do? ONE function answers
+  // it, so the HTTP route and the tests share the same rule instead of each
+  // re-deriving "is there anything left to run" -- which is how a route ends up
+  // starting an empty run that only looks stuck.
+  //   missing   -> refused
+  //   unknown   -> refused
+  //   live      -> refused: its own scheduler is still writing the same node ids
+  //   no graph  -> refused: the workflow it used is gone, so the node set is unknowable
+  //   all done  -> refused: nothing left to continue
+  // Declared BEFORE the service object below, which exposes it.
+  const resumePlan = async (runId) => {
+    const from = typeof runId === 'string' ? runId : '';
+    if (from === '') return { ok: false, error: 'missing runId' };
+    const prev = await getRun(from);
+    if (!prev) return { ok: false, error: 'unknown run ' + from };
+    if (liveRuns.has(from)) return { ok: false, error: 'run is still running; wait for it to settle before resuming' };
+    const states = prev.nodeStates || {};
+    const wf = prev.workflowId ? await withTable('team_workflows', 'flows', (t) => t.get(prev.workflowId)) : null;
+    if (!wf) return { ok: false, error: 'the workflow this run used no longer exists (' + String(prev.workflowId) + '); resume needs it to know the node graph' };
+    const nodeIds = Object.keys(wf.nodes || {});
+    const adoptable = nodeIds.filter((n) => states[n] && states[n].status === 'completed');
+    const pending = nodeIds.filter((n) => !(states[n] && states[n].status === 'completed'));
+    if (nodeIds.length > 0 && pending.length === 0) return { ok: false, error: 'every node of that run already completed; there is nothing to resume' };
+    return { ok: true, runId: from, workflowId: prev.workflowId, nodeIds, adoptable, pending };
+  };
+
   // ---- service (host-plane singleton, shared across sessions) ----
   const svc = {
     ping: async () => ({ pong: true }),
     domainNames: () => DOMAINS.slice(),
     listAgents, upsertAgent, deleteAgent,
     listWorkflows, upsertWorkflow, deleteWorkflow,
-    listRuns, getRun,
-    createTask, getTask, listTasks, submitTask, startTask, completeTask, reworkTask, resumeTask, settleTask, reportTask,
+    listRuns, getRun, deleteRun,
+    createTask, getTask, listTasks, deleteTask, submitTask, startTask, completeTask, reworkTask, resumeTask, settleTask, reportTask,
     runWorkflow,
+    // P17: exposed so the resume path is reachable from the host plane and from a
+    // test without going through HTTP (the routes are thin wrappers over these).
+    isLiveRun: (id) => liveRuns.has(id),
+    resumePlan,
   };
   ctx.provide('teamOrchestrator', svc);
 
@@ -3429,7 +3662,18 @@ export function apply(ctx) {
     // Heavy per-role detail (the complete worker report + reasoning trace),
     // fetched only when a role is opened rather than on every poll.
     route('exact', '/api/team-flowise/role', wrap(async (req) => roleDetail(query(req.url, 'runId'), query(req.url, 'agent'), readSessionOption(query(req.url, 'session')).sessionId)));
-    route('exact', '/api/team-flowise/run', wrap(async (req) => {
+    route('exact', '/api/team-flowise/run', wrap(async (req, res) => {
+      if (req.method === 'DELETE') {
+        if (!guard(req, res)) return;
+        const id = query(req.url, 'id');
+        if (!id) return { ok: false, error: 'missing id' };
+        // A live run is still being written by its scheduler, so a delete would be
+        // silently undone by the next nodeStates write. Refuse it and say why,
+        // rather than reporting success on a record that is about to come back.
+        if (liveRuns.has(id)) return { ok: false, error: 'run is still running; it cannot be deleted until it settles' };
+        await deleteRun(id);
+        return { ok: true, id };
+      }
       const id = query(req.url, 'id');
       if (!id) return { ok: false, error: 'missing id' };
       return { ok: true, run: await getRun(id) };
@@ -3465,6 +3709,22 @@ export function apply(ctx) {
       const t = await reworkTask(body.id, body.feedback);
       return { ok: true, task: t };
     }));
+    // Task removal. A task has no single-record read route (the board reads the
+    // whole ledger through /tasks), so this route exists for DELETE alone and
+    // answers with the id it removed.
+    route('exact', '/api/team-flowise/task', wrap(async (req, res) => {
+      if (!guard(req, res)) return;
+      if (req.method !== 'DELETE') return { ok: false, error: 'method not allowed' };
+      const id = query(req.url, 'id');
+      if (!id) return { ok: false, error: 'missing id' };
+      const cur = await getTask(id);
+      if (!cur) return { ok: false, error: 'unknown task ' + String(id) };
+      // A worker is still writing this one. Deleting it now would be undone by the
+      // next report, which recreates the entry -- so refuse and say so.
+      if (cur.status === 'working') return { ok: false, error: 'task is working; settle it or wait for the worker before deleting' };
+      await deleteTask(id);
+      return { ok: true, id };
+    }));
     route('exact', '/api/team-flowise/run/start', wrap(async (req, res) => {
       if (!guard(req, res)) return;
       const body = await readJsonBody(req); if (!body) return { ok: false, error: 'bad body' };
@@ -3484,7 +3744,7 @@ export function apply(ctx) {
         // `body.inheritContext` (P16) is the run-level inheritance layer: the
         // operator's override, and the kill switch ('none') that outranks every
         // node / role / workflow that asked to inherit the session context.
-      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, inheritContext: body.inheritContext, inheritMaxEvents: body.inheritMaxEvents, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
+      runWorkflow(body.workflowId, body.input || {}, publish, { route: body.route, inheritContext: body.inheritContext, inheritMaxEvents: body.inheritMaxEvents, resumeFrom: typeof body.resumeFrom === 'string' && body.resumeFrom !== '' ? body.resumeFrom : undefined, session: typeof body.session === 'string' ? body.session : ((body.session && typeof body.session === 'object') ? body.session : undefined) }).catch(async (e) => {
         console.error('team-flowise: run failed', String(e));
         if (!rec) return;
         try {
@@ -3493,6 +3753,40 @@ export function apply(ctx) {
       });
       const created = await published;
       return { ok: true, run: { id: created.id, workflowId: created.workflowId, status: 'running' } };
+    }));
+    // P17: continue a finished run instead of starting over. The body is just
+    // `{ runId }`: the workflow and the input come from the run being resumed, so a
+    // caller cannot accidentally continue it with different inputs than the ones
+    // its completed steps were produced under -- which would make the adopted
+    // results quietly inconsistent with the new ones.
+    route('exact', '/api/team-flowise/run/resume', wrap(async (req, res) => {
+      if (!guard(req, res)) return;
+      const body = await readJsonBody(req); if (!body) return { ok: false, error: 'bad body' };
+      // ONE decision function, shared with the tests: the route does not re-derive
+      // "is there anything left to run", because a route that re-derives it is how
+      // an empty run gets started and looks stuck.
+      const plan = await resumePlan(body.runId);
+      if (plan.ok !== true) return { ok: false, error: plan.error };
+      let rec = null;
+      let publish = () => undefined;
+      const published = new Promise((resolve) => { publish = (r) => { rec = r; resolve(r); }; });
+      // The ORIGINAL input, read from the run record's own `input` field -- not
+      // from `result.input`, which does not exist: the final write stores only
+      // { outputs, summary, reviews }, and a run that died mid-flight never reaches
+      // it at all. Reading the wrong place would resume with `{}` and hand the
+      // re-dispatched steps different inputs than the adopted ones were produced
+      // under, which is precisely the inconsistency this route exists to avoid.
+      const prev = await getRun(plan.runId);
+      const prevInput = (prev && prev.input && typeof prev.input === 'object') ? prev.input : {};
+      runWorkflow(plan.workflowId, prevInput, publish, { resumeFrom: plan.runId, session: typeof body.session === 'string' ? body.session : undefined }).catch(async (e) => {
+        console.error('team-flowise: resume failed', String(e));
+        if (!rec) return;
+        try {
+          await withTable('team_runs', 'runs', (t) => t.update(rec.id, (cur) => ({ ...cur, status: 'failed', endedAt: now(), result: { outputs: {}, summary: 'resume failed: ' + String(e) } })));
+        } catch (e2) { console.error('team-flowise: could not mark resume failed', String(e2)); }
+      });
+      const created = await published;
+      return { ok: true, run: { id: created.id, workflowId: created.workflowId, status: 'running', resumedFrom: plan.runId, adopted: plan.adoptable.length } };
     }));
   };
 
