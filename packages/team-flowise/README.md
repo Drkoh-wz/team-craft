@@ -4,7 +4,7 @@ Flowise 式的**多角色（multi-agent）团队编排**插件，作为 DSH 的�
 
 它把「一个 agent 干完」变成「一组有角色、有依赖、有独立评审、有返工上限的 agent 干完」，并且把过程与产出留在可查的记录里。
 
-- 版本：`0.1.5`（`private`，`type: "module"`）
+- 版本：`0.1.6`（`private`，`type: "module"`）
 - 入口：`main` = `src/index.js`；客户端出口 = `./client` → `src/client/index.js`
 - bundle patch：`cordis.patch.yml`（**声明 `flowise-team` 这一行**——行由拥有它的 bundle 自己声明，这样「装上这个包」就等于「挂上这行」。`dsh plugin --profile <名> add <spec>` 只把包加入 `dsh.profile.bundles` 并组合它的 patch 层，从不改写 profile 自己的 patch 文件；若把行写在 profile 里，装完就是「bundle 挂上了、什么都不注册」）
 

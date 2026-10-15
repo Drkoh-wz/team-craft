@@ -64,9 +64,11 @@ ERR_PNPM_MISSING_TARBALL_INTEGRITY  its lockfile entry has no integrity field
 .\scripts\install-desktop.ps1
 ```
 
-它会自己找到应用、在 Desktop 运行时**拒绝执行**（这正是防止它自己的 profile 维护把你的改动对账掉）、用应用自带的 pnpm、装上本项目的 Release 包，并列出重新启动后该看哪几处。其余选项是 `-Action uninstall`、`-Action check`、`-Spec <pnpm 能接受的任何东西>`、`-DryRun`、`-Force`；`Get-Help .\scripts\install-desktop.ps1 -Full` 会打印出来。它也放在 Release 归档里的 `scripts/` 下。
+它会自己找到应用、在 Desktop 运行时**拒绝执行**（这正是防止它自己的 profile 维护把你的改动对账掉；但如果运行中的 Desktop 用的是**另一个** harness home，它会说明情况并继续——只拒绝真正的冲突）、用应用自带的 pnpm、装上本项目的 Release 包，并列出重新启动后该看哪几处。其余选项是 `-Action uninstall`、`-Action check`、`-Spec <pnpm 能接受的任何东西>`、`-DryRun`、`-Force`；`Get-Help .\scripts\install-desktop.ps1 -Full` 会打印出来。它也放在 Release 归档里的 `scripts/` 下。
 
-它**先用纯 HTTPS 把包下载下来，再从落地的那份文件安装**——正是上面实测出的那两个原因：tarball-URL 依赖在 pnpm store 变暖后会坏；而 git 源需要 git-over-HTTPS 到 github.com，在 HTTPS 被重置的网络里会回退到 ssh 并因 host key 失败。若下载连不上 GitHub，脚本会说明，并让你自己下载后传 `-Spec <路径>`——**本地文件这条路在任何情况下都能用**。
+它**先用纯 HTTPS 把包下载下来，再从落地的那份文件安装**，而且**会把那份文件留着**（`<harness home>\.plugin-cache\team-flowise.tgz`）。这两点都是承重的：tarball-**URL** 依赖不可靠——在 dsh 自己的 pnpm workspace 配置下（`nodeLinker: hoisted`），同一个 store 用到第二次就会报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`，而且这**不是本插件特有**的，所有声明了 tarball 的目录条目都一样；而"从路径安装"会把 `file:<路径>` 记成 profile 的依赖，所以下载完再删掉它，就等于让 profile 指向一个空路径——下一次 profile 维护会直接 `ENOENT`。若下载连不上 GitHub，脚本会说明，并让你自己下载后传 `-Spec <路径>`——**本地文件这条路在任何情况下都能用**。
+
+**如果市场那个安装按钮报错了**，那用的是 `github:` 这种写法，要看的错误是 `git ls-remote git+ssh://git@github.com/... HEAD` 最后停在 `Host key verification failed` 或 `Command failed with exit code 128`。pnpm 会把 `github:owner/repo` 解析成 **ssh** URL 并调用 `git`，所以那条命令要求 Desktop 进程能找到 git、**并且**已知 GitHub 的 ssh host key。两条出路，先试简单的：跑上面的脚本，或者把下面那个 `git+https` 命令粘进去。
 
 三件值得知道的事，都是手工操作容易踩的：
 
@@ -88,6 +90,8 @@ $env:ELECTRON_RUN_AS_NODE = '1'
 ```
 
 装完重新启动 Desktop。
+
+**如果市场按钮报的是 `git ls-remote git+ssh://` 那个错**，差别就在这两条命令上：市场生成的 `github:Drkoh-wz/team-craft#path:/packages/team-flowise` 会被解析成 **ssh** URL，而上面这段显式用了 `git+https://`，不需要 ssh key、也不需要 GitHub host key。用上面那段。如果机器上压根没装 git，就用脚本——它完全不碰 git。
 
 桌面版还会按插件声明的 `@deepseek-ai/dsh-*` peer 范围做门禁：范围不包含当前 harness 时，插件会装上但**启动被拒绝**，需要你为那几个确切版本授予豁免。本版本声明的是 `>=0.2.0-rc.2 <0.3.0-0`，匹配，不需要授予任何东西。
 

@@ -58,15 +58,17 @@ There is no build step, and nothing to approve. Install into a profile that has 
 
 ### DSH Desktop (the packaged app)
 
-There is no `dsh` command to run here: the app carries the harness inside itself and owns its profile, so **its own plugin panel is the install surface** — this plugin shows up there once the catalog lists it. Until then, one script does the work. Quit Desktop first, then:
+There is no `dsh` command to run here: the app carries the harness inside itself and owns its profile, so **its own plugin panel is the install surface** — this plugin shows up there once the catalog lists it. The market's own button installs `github:Drkoh-wz/team-craft#path:/packages/team-flowise`, which pnpm resolves to an **ssh** URL (`git+ssh://git@github.com/...`); on a machine without GitHub's ssh host key that fails with `Host key verification failed` inside `resolveGit`, and if git is not on the path the Desktop process inherits, it fails with `'git' is not recognized` in the same place. When that happens, one script does the work and never invokes git. Quit Desktop first, then:
 
 ```powershell
 .\scripts\install-desktop.ps1
 ```
 
-It finds the app, refuses to run while Desktop is up (that is what stops its own profile maintenance from reconciling the change away), picks up the pnpm the app ships, installs this project's published release package, and lists what to check when you start Desktop again. `-Action uninstall`, `-Action check`, `-Spec <anything pnpm accepts>`, `-DryRun` and `-Force` are the rest; `Get-Help .\scripts\install-desktop.ps1 -Full` prints them. It is in the release archive too, under `scripts/`.
+It finds the app, refuses to run while Desktop is up (that is what stops its own profile maintenance from reconciling the change away), picks up the pnpm the app ships, installs this project's published release package, and lists what to check when you start Desktop again. If Desktop is running but using a *different* harness home than the one you target, it says so and proceeds — only a real collision is refused. `-Action uninstall`, `-Action check`, `-Spec <anything pnpm accepts>`, `-DryRun` and `-Force` are the rest; `Get-Help .\scripts\install-desktop.ps1 -Full` prints them. It is in the release archive too, under `scripts/`.
 
-It **downloads** that package over plain HTTPS and then installs from the file it landed in, for the two reasons measured above: a tarball-URL dependency breaks on a warm pnpm store, and a git spec needs git-over-HTTPS to github.com, which drops to ssh and host-key failure on networks where that is reset. If the download cannot reach GitHub, the script says so and asks you to fetch the file yourself and pass `-Spec <path>` — the local-file route is the one that works regardless.
+It **downloads** that package over plain HTTPS and then installs from the file it landed in, and it **keeps that file** (`<harness home>\.plugin-cache\team-flowise.tgz`). Both details are load-bearing. A tarball-*URL* dependency is not reliable: with dsh's own pnpm workspace config (`nodeLinker: hoisted`) it fails with `ERR_PNPM_MISSING_TARBALL_INTEGRITY` on the second use of any given store, for **every** catalog entry that declares one, not just this plugin. And because installing from a path records `file:<path>` as the profile's dependency, deleting the download afterwards leaves the profile pointing at nothing — the next profile maintenance then dies with `ENOENT`. If the download cannot reach GitHub, the script says so and asks you to fetch the file yourself and pass `-Spec <path>` — the local-file route is the one that works regardless.
+
+**If the market's own install button fails**, that is the `github:` spec, and the error to look for is `git ls-remote git+ssh://git@github.com/... HEAD` ending in `Host key verification failed` or a `Command failed with exit code 128`. pnpm resolves `github:owner/repo` to an **ssh** URL and shells out to `git`, so that command needs git to be reachable from the Desktop process *and* GitHub's ssh host key to be known. Two ways out, easiest first: run the script above, or paste the `git+https` command in the block below.
 
 Three things worth knowing, all of them ways this goes wrong by hand:
 
@@ -88,6 +90,8 @@ $env:ELECTRON_RUN_AS_NODE = '1'
 ```
 
 Start Desktop again afterwards.
+
+**If the market button failed with the `git ls-remote git+ssh://` error**, that is the difference between the two commands above: the market's `github:Drkoh-wz/team-craft#path:/packages/team-flowise` resolves to an **ssh** URL, while the block above uses `git+https://` explicitly, which needs no ssh key and no GitHub host key. Use the block above. If git itself is not installed, use the script instead — it never invokes git.
 
 Desktop also gates a plugin on the `@deepseek-ai/dsh-*` peers it declares. A range that does not include the running harness means the plugin stays installed but profile startup **denies** it until you grant an exemption for those exact versions. This build declares `>=0.2.0-rc.2 <0.3.0-0`, which matches, so there is nothing to grant.
 
