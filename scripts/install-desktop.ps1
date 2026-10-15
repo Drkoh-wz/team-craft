@@ -135,13 +135,27 @@ foreach ($pair in @(@('launcher', $exe), @('harness entry', $entry))) {
 Write-Step "harness bin  : resources\app.asar\...\dsh\lib\bin.js (inside the archive)"
 
 # ------------------------------------------------------- refuse to race the app
+# Only when the RUNNING app actually owns the home we are about to write. A running
+# Desktop using a DIFFERENT harness home cannot reconcile this change away, so
+# refusing then would block a perfectly safe install (observed while testing this
+# script against a throwaway home).
 $running = @(Get-Process -Name 'DSH Desktop' -ErrorAction SilentlyContinue)
 if ($running.Count -gt 0 -and -not $Force) {
-  Write-Fail "DSH Desktop is running (pid $($running[0].Id))."
-  Write-Step 'Quit it completely first: it owns the profile, and its own profile'
-  Write-Step 'maintenance can reconcile this change away while it is up.'
-  Write-Step 'Re-run with -Force if you know what you are doing.'
-  exit 3
+  $liveHome = $env:APPDATA
+  if ($liveHome) { $liveHome = Join-Path $liveHome 'dsh-desktop\harness' }
+  $sameHome = $false
+  if ($liveHome -and (Test-Path $liveHome) -and (Test-Path $DshHome)) {
+    try { $sameHome = ((Resolve-Path $liveHome).Path -eq (Resolve-Path $DshHome).Path) } catch { $sameHome = $false }
+  }
+  if ($sameHome) {
+    Write-Fail "DSH Desktop is running (pid $($running[0].Id))."
+    Write-Step 'Quit it completely first: it owns the profile, and its own profile'
+    Write-Step 'maintenance can reconcile this change away while it is up.'
+    Write-Step 'Re-run with -Force if you know what you are doing.'
+    exit 3
+  }
+  Write-Step "note         : DSH Desktop is running (pid $($running[0].Id)), but it uses a"
+  Write-Step "               different home ($liveHome); proceeding with $DshHome"
 }
 
 $harnessHome = if (Test-Path $DshHome) { (Resolve-Path $DshHome).Path } else { $DshHome }
@@ -162,22 +176,52 @@ Write-Step "profile      : $Profile"
 # ------------------------------------------------------------------ build argv
 # An https .tgz spec is DOWNLOADED first and installed from the local path. Two
 # measured reasons, both of which bit this project:
-#   * pnpm fails permanently on a tarball-URL dependency once its store holds that
-#     URL (ERR_PNPM_MISSING_TARBALL_INTEGRITY, no recovery by deleting the lockfile);
+#   * pnpm fails on a tarball-URL dependency when dsh's own pnpm workspace config is
+#     in play (nodeLinker: hoisted) -- ERR_PNPM_MISSING_TARBALL_INTEGRITY, and it
+#     hits EVERY catalog entry that declares a tarball, not just this one;
 #   * a git spec needs git over https to github.com, which is not always reachable
-#     from every network -- it falls back to ssh and dies on host key verification.
+#     from every network -- pnpm's `github:` shorthand resolves to git+ssh://, so it
+#     also needs a GitHub ssh host key.
 # A plain HTTPS download is the step that kept working in both cases.
+#
+# WHERE the download goes matters, and getting it wrong was a real defect:
+# installing from a path records `file:<path>` as the profile's dependency, so if
+# that file is later deleted the profile points at nothing and the NEXT profile
+# maintenance (`pnpm install`) dies with ENOENT. So the download lands in a stable
+# per-home cache directory and is deliberately NOT removed afterwards -- deleting it
+# is what broke this before.
 $downloaded = $null
 if (-not $DryRun -and $Action -eq 'install' -and $Spec -match '^https?://') {
-  $downloaded = Join-Path ([IO.Path]::GetTempPath()) ("team-flowise-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".tgz")
+  $cacheDir = Join-Path $harnessHome '.plugin-cache'
+  if (-not (Test-Path $cacheDir)) { New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null }
+  # A STABLE name, so a re-run reuses the same dependency path instead of adding a
+  # second one; always re-fetched, so `latest/download` really picks up a new release.
+  $downloaded = Join-Path $cacheDir 'team-flowise.tgz'
   Write-Step "downloading  : $Spec"
-  try {
-    $prevProgress = $ProgressPreference
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $Spec -OutFile $downloaded -UseBasicParsing
-    $ProgressPreference = $prevProgress
-  } catch {
-    Write-Fail "download failed: $($_.Exception.Message)"
+  # Retried, because a single attempt is not good enough on a network that reaches
+  # github.com intermittently: measured here, a plain HEAD/GET to the release asset
+  # alternates between succeeding and timing out within the same minute. Without a
+  # retry the script fails for a reason that has nothing to do with the plugin.
+  $prevProgress = $ProgressPreference
+  $ProgressPreference = 'SilentlyContinue'
+  $ok = $false
+  $lastError = ''
+  for ($attempt = 1; $attempt -le 4 -and -not $ok; $attempt++) {
+    try {
+      if ($attempt -gt 1) {
+        $wait = 3 * $attempt
+        Write-Step ("retry {0}/4 in {1}s ({2})" -f $attempt, $wait, $lastError)
+        Start-Sleep -Seconds $wait
+      }
+      Invoke-WebRequest -Uri $Spec -OutFile $downloaded -UseBasicParsing -TimeoutSec 300
+      $ok = $true
+    } catch {
+      $lastError = $_.Exception.Message
+    }
+  }
+  $ProgressPreference = $prevProgress
+  if (-not $ok) {
+    Write-Fail "download failed after 4 attempts: $lastError"
     Write-Step 'A plain HTTPS fetch of the release asset is the step this script'
     Write-Step 'relies on; if it cannot reach GitHub, download the file by hand and'
     Write-Step 'pass its path: -Spec "<path to team-flowise.tgz>"'
@@ -185,6 +229,8 @@ if (-not $DryRun -and $Action -eq 'install' -and $Spec -match '^https?://') {
   }
   $size = (Get-Item $downloaded).Length
   Write-Step "downloaded   : $size bytes -> $downloaded"
+  Write-Step 'kept on disk on purpose: the profile records this path as its'
+  Write-Step 'dependency, so removing it would break the next pnpm install'
   Write-Step 'installing from the local path, so pnpm never resolves a URL'
   $Spec = $downloaded
 }
@@ -247,7 +293,9 @@ try {
   $ErrorActionPreference = $previousPreference
 }
 if ($null -eq $code) { $code = 1 }
-if ($downloaded -ne $null) { Remove-Item $downloaded -Force -ErrorAction SilentlyContinue }
+# The download is deliberately KEPT: the profile records its path as the dependency
+# (`file:<path>`), so deleting it leaves the profile pointing at nothing and the next
+# profile maintenance fails with ENOENT. It lives in the home's .plugin-cache.
 
 Write-Host ''
 if ($code -eq 0) {
@@ -273,15 +321,14 @@ if ($code -eq 0) {
   Write-Step "If it mentions a version exemption, the plugin declares @deepseek-ai/dsh-*"
   Write-Step "peers that do not include this harness; the message names the exact"
   Write-Step 'allow-version command that grants one.'
-  # Measured on pnpm 10: an https tarball URL dependency fails permanently once the
-  # store holds that URL -- "its lockfile entry has no integrity field" -- and
-  # deleting the lockfile does not recover it. git specs and local files are
-  # unaffected. Worth naming, because the symptom looks like corruption and the
-  # obvious remedy does nothing.
+  # Measured on pnpm 10 with dsh's own workspace config (nodeLinker: hoisted): an
+  # https tarball URL dependency fails with ERR_PNPM_MISSING_TARBALL_INTEGRITY, and
+  # it is NOT specific to this plugin -- every catalog entry that declares a tarball
+  # fails the same way. Worth naming, because the symptom looks like corruption and
+  # the obvious remedy (delete the lockfile) does nothing.
   Write-Step ''
   Write-Step 'A spec of the form https://.../something.tgz is a known trap on pnpm 10:'
-  Write-Step 'once its store holds that URL the install fails with'
-  Write-Step 'ERR_PNPM_MISSING_TARBALL_INTEGRITY and stays failed. Use the git spec'
+  Write-Step 'it fails with ERR_PNPM_MISSING_TARBALL_INTEGRITY. Use the git spec'
   Write-Step '(the default) or a local .tgz path instead.'
 }
 exit $code
